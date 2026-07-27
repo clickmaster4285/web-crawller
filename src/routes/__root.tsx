@@ -79,20 +79,24 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Parity — E-commerce Competitive Intelligence" },
+      { title: "Overview — Parity Competitive Intelligence" },
       {
         name: "description",
         content:
-          "Track competitor pricing, catalogue gaps, stock and brand growth across your market with AI-generated business insights.",
+          "Live overview of monitored products, competitor price movements, catalogue gaps and stock changes across your market.",
       },
       { name: "author", content: "Parity" },
-      { property: "og:title", content: "Parity — E-commerce Competitive Intelligence" },
+      { property: "og:title", content: "Overview — Parity Competitive Intelligence" },
       {
         property: "og:description",
-        content: "Competitor pricing, catalogue gaps and AI insights for online retailers.",
+        content: "Live overview of monitored products, competitor price movements, catalogue gaps and stock changes across your market.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
+      { name: "twitter:title", content: "Overview — Parity Competitive Intelligence" },
+      { name: "twitter:description", content: "Live overview of monitored products, competitor price movements, catalogue gaps and stock changes across your market." },
+      { property: "og:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/5d46959c-369f-4acf-8866-b7384e5d7023/id-preview-7e638e6d--7d513d45-9a0e-485f-8b3a-f54f441b39ba.lovable.app-1785142389271.png" },
+      { name: "twitter:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/5d46959c-369f-4acf-8866-b7384e5d7023/id-preview-7e638e6d--7d513d45-9a0e-485f-8b3a-f54f441b39ba.lovable.app-1785142389271.png" },
     ],
     links: [
       {

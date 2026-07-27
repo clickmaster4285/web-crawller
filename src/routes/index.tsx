@@ -42,7 +42,7 @@ export const Route = createFileRoute("/")({
       { property: "og:title", content: "Overview — Parity Competitive Intelligence" },
       {
         property: "og:description",
-        content: "Monitored products, price movements, catalogue gaps and stock changes at a glance.",
+        content: "Live overview of monitored products, competitor price movements, catalogue gaps and stock changes across your market.",
       },
     ],
   }),
