@@ -72,8 +72,8 @@ function Catalogue() {
                   fontSize: 12,
                 }}
               />
-              <Bar dataKey="you" fill="var(--color-chart-1)" />
-              <Bar dataKey="competitors" fill="var(--color-chart-5)" />
+              <Bar isAnimationActive={false} dataKey="you" fill="var(--color-chart-1)" />
+              <Bar isAnimationActive={false} dataKey="competitors" fill="var(--color-chart-5)" />
             </BarChart>
           </ResponsiveContainer>
         </div>

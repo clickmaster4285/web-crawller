@@ -130,9 +130,9 @@ function Overview() {
                 fontSize: 12,
               }}
             />
-            <Area type="monotone" dataKey="you" stroke="var(--color-chart-1)" fill="var(--color-chart-1)" fillOpacity={0.12} strokeWidth={2} />
-            <Area type="monotone" dataKey="market" stroke="var(--color-chart-3)" fill="var(--color-chart-3)" fillOpacity={0.08} strokeWidth={1.5} />
-            <Area type="monotone" dataKey="cheapest" stroke="var(--color-chart-2)" fill="transparent" strokeDasharray="4 3" strokeWidth={1.5} />
+            <Area isAnimationActive={false} type="monotone" dataKey="you" stroke="var(--color-chart-1)" fill="var(--color-chart-1)" fillOpacity={0.12} strokeWidth={2} />
+            <Area isAnimationActive={false} type="monotone" dataKey="market" stroke="var(--color-chart-3)" fill="var(--color-chart-3)" fillOpacity={0.08} strokeWidth={1.5} />
+            <Area isAnimationActive={false} type="monotone" dataKey="cheapest" stroke="var(--color-chart-2)" fill="transparent" strokeDasharray="4 3" strokeWidth={1.5} />
           </AreaChart>
         </ChartCard>
 
@@ -149,8 +149,8 @@ function Overview() {
                 fontSize: 12,
               }}
             />
-            <Line type="monotone" dataKey="you" stroke="var(--color-chart-1)" strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="market" stroke="var(--color-chart-4)" strokeWidth={2} dot={false} />
+            <Line isAnimationActive={false} type="monotone" dataKey="you" stroke="var(--color-chart-1)" strokeWidth={2} dot={false} />
+            <Line isAnimationActive={false} type="monotone" dataKey="market" stroke="var(--color-chart-4)" strokeWidth={2} dot={false} />
           </LineChart>
         </ChartCard>
       </div>
@@ -181,8 +181,8 @@ function Overview() {
                     fontSize: 12,
                   }}
                 />
-                <Bar dataKey="you" fill="var(--color-chart-1)" />
-                <Bar dataKey="competitors" fill="var(--color-chart-5)" />
+                <Bar isAnimationActive={false} dataKey="you" fill="var(--color-chart-1)" />
+                <Bar isAnimationActive={false} dataKey="competitors" fill="var(--color-chart-5)" />
               </BarChart>
             </ResponsiveContainer>
           </div>

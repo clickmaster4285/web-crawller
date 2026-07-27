@@ -73,9 +73,9 @@ function Pricing() {
                   fontSize: 12,
                 }}
               />
-              <Area type="monotone" dataKey="you" stroke="var(--color-chart-1)" fill="var(--color-chart-1)" fillOpacity={0.12} strokeWidth={2} />
-              <Area type="monotone" dataKey="market" stroke="var(--color-chart-3)" fill="var(--color-chart-3)" fillOpacity={0.08} strokeWidth={1.5} />
-              <Area type="monotone" dataKey="cheapest" stroke="var(--color-chart-2)" fill="transparent" strokeDasharray="4 3" strokeWidth={1.5} />
+              <Area isAnimationActive={false} type="monotone" dataKey="you" stroke="var(--color-chart-1)" fill="var(--color-chart-1)" fillOpacity={0.12} strokeWidth={2} />
+              <Area isAnimationActive={false} type="monotone" dataKey="market" stroke="var(--color-chart-3)" fill="var(--color-chart-3)" fillOpacity={0.08} strokeWidth={1.5} />
+              <Area isAnimationActive={false} type="monotone" dataKey="cheapest" stroke="var(--color-chart-2)" fill="transparent" strokeDasharray="4 3" strokeWidth={1.5} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
