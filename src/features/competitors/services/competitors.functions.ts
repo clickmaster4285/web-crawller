@@ -88,10 +88,11 @@ export const updateSchedule = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
-    const patch: Record<string, unknown> = {};
+    const patch: { cadence?: string; max_pages?: number; enabled?: boolean } = {};
     if (data.cadence) patch.cadence = data.cadence;
     if (data.maxPages !== undefined) patch.max_pages = data.maxPages;
     if (data.enabled !== undefined) patch.enabled = data.enabled;
+
 
     const { error } = await context.supabase
       .from("crawl_schedules")
