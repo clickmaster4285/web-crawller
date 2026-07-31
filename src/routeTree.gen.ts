@@ -8,34 +8,28 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
-import { Route as rootRouteImport } from './routes/__root'
-import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
-import { Route as AuthRouteImport } from './routes/auth'
-import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
-import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
-import { Route as AuthenticatedSourcesRouteImport } from './routes/_authenticated/sources'
-import { Route as AuthenticatedReportsRouteImport } from './routes/_authenticated/reports'
-import { Route as AuthenticatedProductsRouteImport } from './routes/_authenticated/products'
-import { Route as AuthenticatedPricingRouteImport } from './routes/_authenticated/pricing'
-import { Route as AuthenticatedInsightsRouteImport } from './routes/_authenticated/insights'
-import { Route as AuthenticatedCompetitorsRouteImport } from './routes/_authenticated/competitors'
-import { Route as AuthenticatedCatalogueRouteImport } from './routes/_authenticated/catalogue'
-import { Route as AuthenticatedAlertsRouteImport } from './routes/_authenticated/alerts'
-import { Route as ApiPublicHooksReportTickRouteImport } from './routes/api/public/hooks/report-tick'
-import { Route as ApiPublicHooksCrawlTickRouteImport } from './routes/api/public/hooks/crawl-tick'
+import { Route as rootRouteImport } from './pages/__root'
+import { Route as AuthenticatedRouteRouteImport } from './pages/_authenticated/route'
+import { Route as SitemapDotxmlRouteImport } from './pages/sitemap[.]xml'
+import { Route as AuthenticatedIndexRouteImport } from './pages/_authenticated/index'
+import { Route as AuthLoginRouteImport } from './pages/auth/login'
+import { Route as AuthSignupRouteImport } from './pages/auth/signup'
+import { Route as AuthenticatedAlertsIndexRouteImport } from './pages/_authenticated/alerts/index'
+import { Route as AuthenticatedCatalogueIndexRouteImport } from './pages/_authenticated/catalogue/index'
+import { Route as AuthenticatedCompetitorsIndexRouteImport } from './pages/_authenticated/competitors/index'
+import { Route as AuthenticatedInsightsIndexRouteImport } from './pages/_authenticated/insights/index'
+import { Route as AuthenticatedPricingIndexRouteImport } from './pages/_authenticated/pricing/index'
+import { Route as AuthenticatedProductsIndexRouteImport } from './pages/_authenticated/products/index'
+import { Route as AuthenticatedReportsIndexRouteImport } from './pages/_authenticated/reports/index'
+import { Route as AuthenticatedSourcesIndexRouteImport } from './pages/_authenticated/sources/index'
 
+const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
+  id: '/_authenticated',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
   id: '/sitemap.xml',
   path: '/sitemap.xml',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuthRoute = AuthRouteImport.update({
-  id: '/auth',
-  path: '/auth',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
-  id: '/_authenticated',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
@@ -43,126 +37,130 @@ const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
-const AuthenticatedSourcesRoute = AuthenticatedSourcesRouteImport.update({
-  id: '/sources',
-  path: '/sources',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const AuthenticatedReportsRoute = AuthenticatedReportsRouteImport.update({
-  id: '/reports',
-  path: '/reports',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const AuthenticatedProductsRoute = AuthenticatedProductsRouteImport.update({
-  id: '/products',
-  path: '/products',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const AuthenticatedPricingRoute = AuthenticatedPricingRouteImport.update({
-  id: '/pricing',
-  path: '/pricing',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const AuthenticatedInsightsRoute = AuthenticatedInsightsRouteImport.update({
-  id: '/insights',
-  path: '/insights',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const AuthenticatedCompetitorsRoute =
-  AuthenticatedCompetitorsRouteImport.update({
-    id: '/competitors',
-    path: '/competitors',
-    getParentRoute: () => AuthenticatedRouteRoute,
-  } as any)
-const AuthenticatedCatalogueRoute = AuthenticatedCatalogueRouteImport.update({
-  id: '/catalogue',
-  path: '/catalogue',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const AuthenticatedAlertsRoute = AuthenticatedAlertsRouteImport.update({
-  id: '/alerts',
-  path: '/alerts',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const ApiPublicHooksReportTickRoute =
-  ApiPublicHooksReportTickRouteImport.update({
-    id: '/api/public/hooks/report-tick',
-    path: '/api/public/hooks/report-tick',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicHooksCrawlTickRoute = ApiPublicHooksCrawlTickRouteImport.update({
-  id: '/api/public/hooks/crawl-tick',
-  path: '/api/public/hooks/crawl-tick',
+const AuthLoginRoute = AuthLoginRouteImport.update({
+  id: '/auth/login',
+  path: '/auth/login',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AuthSignupRoute = AuthSignupRouteImport.update({
+  id: '/auth/signup',
+  path: '/auth/signup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedAlertsIndexRoute =
+  AuthenticatedAlertsIndexRouteImport.update({
+    id: '/alerts/',
+    path: '/alerts/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedCatalogueIndexRoute =
+  AuthenticatedCatalogueIndexRouteImport.update({
+    id: '/catalogue/',
+    path: '/catalogue/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedCompetitorsIndexRoute =
+  AuthenticatedCompetitorsIndexRouteImport.update({
+    id: '/competitors/',
+    path: '/competitors/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedInsightsIndexRoute =
+  AuthenticatedInsightsIndexRouteImport.update({
+    id: '/insights/',
+    path: '/insights/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedPricingIndexRoute =
+  AuthenticatedPricingIndexRouteImport.update({
+    id: '/pricing/',
+    path: '/pricing/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedProductsIndexRoute =
+  AuthenticatedProductsIndexRouteImport.update({
+    id: '/products/',
+    path: '/products/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedReportsIndexRoute =
+  AuthenticatedReportsIndexRouteImport.update({
+    id: '/reports/',
+    path: '/reports/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedSourcesIndexRoute =
+  AuthenticatedSourcesIndexRouteImport.update({
+    id: '/sources/',
+    path: '/sources/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
-  '/auth': typeof AuthRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
-  '/alerts': typeof AuthenticatedAlertsRoute
-  '/catalogue': typeof AuthenticatedCatalogueRoute
-  '/competitors': typeof AuthenticatedCompetitorsRoute
-  '/insights': typeof AuthenticatedInsightsRoute
-  '/pricing': typeof AuthenticatedPricingRoute
-  '/products': typeof AuthenticatedProductsRoute
-  '/reports': typeof AuthenticatedReportsRoute
-  '/sources': typeof AuthenticatedSourcesRoute
-  '/api/public/hooks/crawl-tick': typeof ApiPublicHooksCrawlTickRoute
-  '/api/public/hooks/report-tick': typeof ApiPublicHooksReportTickRoute
+  '/auth/login': typeof AuthLoginRoute
+  '/auth/signup': typeof AuthSignupRoute
+  '/alerts/': typeof AuthenticatedAlertsIndexRoute
+  '/catalogue/': typeof AuthenticatedCatalogueIndexRoute
+  '/competitors/': typeof AuthenticatedCompetitorsIndexRoute
+  '/insights/': typeof AuthenticatedInsightsIndexRoute
+  '/pricing/': typeof AuthenticatedPricingIndexRoute
+  '/products/': typeof AuthenticatedProductsIndexRoute
+  '/reports/': typeof AuthenticatedReportsIndexRoute
+  '/sources/': typeof AuthenticatedSourcesIndexRoute
 }
 export interface FileRoutesByTo {
-  '/auth': typeof AuthRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
-  '/alerts': typeof AuthenticatedAlertsRoute
-  '/catalogue': typeof AuthenticatedCatalogueRoute
-  '/competitors': typeof AuthenticatedCompetitorsRoute
-  '/insights': typeof AuthenticatedInsightsRoute
-  '/pricing': typeof AuthenticatedPricingRoute
-  '/products': typeof AuthenticatedProductsRoute
-  '/reports': typeof AuthenticatedReportsRoute
-  '/sources': typeof AuthenticatedSourcesRoute
+  '/auth/login': typeof AuthLoginRoute
+  '/auth/signup': typeof AuthSignupRoute
   '/': typeof AuthenticatedIndexRoute
-  '/api/public/hooks/crawl-tick': typeof ApiPublicHooksCrawlTickRoute
-  '/api/public/hooks/report-tick': typeof ApiPublicHooksReportTickRoute
+  '/alerts': typeof AuthenticatedAlertsIndexRoute
+  '/catalogue': typeof AuthenticatedCatalogueIndexRoute
+  '/competitors': typeof AuthenticatedCompetitorsIndexRoute
+  '/insights': typeof AuthenticatedInsightsIndexRoute
+  '/pricing': typeof AuthenticatedPricingIndexRoute
+  '/products': typeof AuthenticatedProductsIndexRoute
+  '/reports': typeof AuthenticatedReportsIndexRoute
+  '/sources': typeof AuthenticatedSourcesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
-  '/auth': typeof AuthRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
-  '/_authenticated/alerts': typeof AuthenticatedAlertsRoute
-  '/_authenticated/catalogue': typeof AuthenticatedCatalogueRoute
-  '/_authenticated/competitors': typeof AuthenticatedCompetitorsRoute
-  '/_authenticated/insights': typeof AuthenticatedInsightsRoute
-  '/_authenticated/pricing': typeof AuthenticatedPricingRoute
-  '/_authenticated/products': typeof AuthenticatedProductsRoute
-  '/_authenticated/reports': typeof AuthenticatedReportsRoute
-  '/_authenticated/sources': typeof AuthenticatedSourcesRoute
+  '/auth/login': typeof AuthLoginRoute
+  '/auth/signup': typeof AuthSignupRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
-  '/api/public/hooks/crawl-tick': typeof ApiPublicHooksCrawlTickRoute
-  '/api/public/hooks/report-tick': typeof ApiPublicHooksReportTickRoute
+  '/_authenticated/alerts/': typeof AuthenticatedAlertsIndexRoute
+  '/_authenticated/catalogue/': typeof AuthenticatedCatalogueIndexRoute
+  '/_authenticated/competitors/': typeof AuthenticatedCompetitorsIndexRoute
+  '/_authenticated/insights/': typeof AuthenticatedInsightsIndexRoute
+  '/_authenticated/pricing/': typeof AuthenticatedPricingIndexRoute
+  '/_authenticated/products/': typeof AuthenticatedProductsIndexRoute
+  '/_authenticated/reports/': typeof AuthenticatedReportsIndexRoute
+  '/_authenticated/sources/': typeof AuthenticatedSourcesIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/auth'
     | '/sitemap.xml'
-    | '/alerts'
-    | '/catalogue'
-    | '/competitors'
-    | '/insights'
-    | '/pricing'
-    | '/products'
-    | '/reports'
-    | '/sources'
-    | '/api/public/hooks/crawl-tick'
-    | '/api/public/hooks/report-tick'
+    | '/auth/login'
+    | '/auth/signup'
+    | '/alerts/'
+    | '/catalogue/'
+    | '/competitors/'
+    | '/insights/'
+    | '/pricing/'
+    | '/products/'
+    | '/reports/'
+    | '/sources/'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/auth'
     | '/sitemap.xml'
+    | '/auth/login'
+    | '/auth/signup'
+    | '/'
     | '/alerts'
     | '/catalogue'
     | '/competitors'
@@ -171,56 +169,44 @@ export interface FileRouteTypes {
     | '/products'
     | '/reports'
     | '/sources'
-    | '/'
-    | '/api/public/hooks/crawl-tick'
-    | '/api/public/hooks/report-tick'
   id:
     | '__root__'
     | '/_authenticated'
-    | '/auth'
     | '/sitemap.xml'
-    | '/_authenticated/alerts'
-    | '/_authenticated/catalogue'
-    | '/_authenticated/competitors'
-    | '/_authenticated/insights'
-    | '/_authenticated/pricing'
-    | '/_authenticated/products'
-    | '/_authenticated/reports'
-    | '/_authenticated/sources'
+    | '/auth/login'
+    | '/auth/signup'
     | '/_authenticated/'
-    | '/api/public/hooks/crawl-tick'
-    | '/api/public/hooks/report-tick'
+    | '/_authenticated/alerts/'
+    | '/_authenticated/catalogue/'
+    | '/_authenticated/competitors/'
+    | '/_authenticated/insights/'
+    | '/_authenticated/pricing/'
+    | '/_authenticated/products/'
+    | '/_authenticated/reports/'
+    | '/_authenticated/sources/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
-  AuthRoute: typeof AuthRoute
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
-  ApiPublicHooksCrawlTickRoute: typeof ApiPublicHooksCrawlTickRoute
-  ApiPublicHooksReportTickRoute: typeof ApiPublicHooksReportTickRoute
+  AuthLoginRoute: typeof AuthLoginRoute
+  AuthSignupRoute: typeof AuthSignupRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/sitemap.xml': {
-      id: '/sitemap.xml'
-      path: '/sitemap.xml'
-      fullPath: '/sitemap.xml'
-      preLoaderRoute: typeof SitemapDotxmlRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/auth': {
-      id: '/auth'
-      path: '/auth'
-      fullPath: '/auth'
-      preLoaderRoute: typeof AuthRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/_authenticated': {
       id: '/_authenticated'
       path: ''
       fullPath: '/'
       preLoaderRoute: typeof AuthenticatedRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sitemap.xml': {
+      id: '/sitemap.xml'
+      path: '/sitemap.xml'
+      fullPath: '/sitemap.xml'
+      preLoaderRoute: typeof SitemapDotxmlRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/': {
@@ -230,101 +216,101 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/sources': {
-      id: '/_authenticated/sources'
-      path: '/sources'
-      fullPath: '/sources'
-      preLoaderRoute: typeof AuthenticatedSourcesRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
+    '/auth/login': {
+      id: '/auth/login'
+      path: '/auth/login'
+      fullPath: '/auth/login'
+      preLoaderRoute: typeof AuthLoginRouteImport
+      parentRoute: typeof rootRouteImport
     }
-    '/_authenticated/reports': {
-      id: '/_authenticated/reports'
-      path: '/reports'
-      fullPath: '/reports'
-      preLoaderRoute: typeof AuthenticatedReportsRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
+    '/auth/signup': {
+      id: '/auth/signup'
+      path: '/auth/signup'
+      fullPath: '/auth/signup'
+      preLoaderRoute: typeof AuthSignupRouteImport
+      parentRoute: typeof rootRouteImport
     }
-    '/_authenticated/products': {
-      id: '/_authenticated/products'
-      path: '/products'
-      fullPath: '/products'
-      preLoaderRoute: typeof AuthenticatedProductsRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/pricing': {
-      id: '/_authenticated/pricing'
-      path: '/pricing'
-      fullPath: '/pricing'
-      preLoaderRoute: typeof AuthenticatedPricingRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/insights': {
-      id: '/_authenticated/insights'
-      path: '/insights'
-      fullPath: '/insights'
-      preLoaderRoute: typeof AuthenticatedInsightsRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/competitors': {
-      id: '/_authenticated/competitors'
-      path: '/competitors'
-      fullPath: '/competitors'
-      preLoaderRoute: typeof AuthenticatedCompetitorsRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/catalogue': {
-      id: '/_authenticated/catalogue'
-      path: '/catalogue'
-      fullPath: '/catalogue'
-      preLoaderRoute: typeof AuthenticatedCatalogueRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/alerts': {
-      id: '/_authenticated/alerts'
+    '/_authenticated/alerts/': {
+      id: '/_authenticated/alerts/'
       path: '/alerts'
-      fullPath: '/alerts'
-      preLoaderRoute: typeof AuthenticatedAlertsRouteImport
+      fullPath: '/alerts/'
+      preLoaderRoute: typeof AuthenticatedAlertsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/api/public/hooks/report-tick': {
-      id: '/api/public/hooks/report-tick'
-      path: '/api/public/hooks/report-tick'
-      fullPath: '/api/public/hooks/report-tick'
-      preLoaderRoute: typeof ApiPublicHooksReportTickRouteImport
-      parentRoute: typeof rootRouteImport
+    '/_authenticated/catalogue/': {
+      id: '/_authenticated/catalogue/'
+      path: '/catalogue'
+      fullPath: '/catalogue/'
+      preLoaderRoute: typeof AuthenticatedCatalogueIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/api/public/hooks/crawl-tick': {
-      id: '/api/public/hooks/crawl-tick'
-      path: '/api/public/hooks/crawl-tick'
-      fullPath: '/api/public/hooks/crawl-tick'
-      preLoaderRoute: typeof ApiPublicHooksCrawlTickRouteImport
-      parentRoute: typeof rootRouteImport
+    '/_authenticated/competitors/': {
+      id: '/_authenticated/competitors/'
+      path: '/competitors'
+      fullPath: '/competitors/'
+      preLoaderRoute: typeof AuthenticatedCompetitorsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/insights/': {
+      id: '/_authenticated/insights/'
+      path: '/insights'
+      fullPath: '/insights/'
+      preLoaderRoute: typeof AuthenticatedInsightsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/pricing/': {
+      id: '/_authenticated/pricing/'
+      path: '/pricing'
+      fullPath: '/pricing/'
+      preLoaderRoute: typeof AuthenticatedPricingIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/products/': {
+      id: '/_authenticated/products/'
+      path: '/products'
+      fullPath: '/products/'
+      preLoaderRoute: typeof AuthenticatedProductsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/reports/': {
+      id: '/_authenticated/reports/'
+      path: '/reports'
+      fullPath: '/reports/'
+      preLoaderRoute: typeof AuthenticatedReportsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/sources/': {
+      id: '/_authenticated/sources/'
+      path: '/sources'
+      fullPath: '/sources/'
+      preLoaderRoute: typeof AuthenticatedSourcesIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
     }
   }
 }
 
 interface AuthenticatedRouteRouteChildren {
-  AuthenticatedAlertsRoute: typeof AuthenticatedAlertsRoute
-  AuthenticatedCatalogueRoute: typeof AuthenticatedCatalogueRoute
-  AuthenticatedCompetitorsRoute: typeof AuthenticatedCompetitorsRoute
-  AuthenticatedInsightsRoute: typeof AuthenticatedInsightsRoute
-  AuthenticatedPricingRoute: typeof AuthenticatedPricingRoute
-  AuthenticatedProductsRoute: typeof AuthenticatedProductsRoute
-  AuthenticatedReportsRoute: typeof AuthenticatedReportsRoute
-  AuthenticatedSourcesRoute: typeof AuthenticatedSourcesRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedAlertsIndexRoute: typeof AuthenticatedAlertsIndexRoute
+  AuthenticatedCatalogueIndexRoute: typeof AuthenticatedCatalogueIndexRoute
+  AuthenticatedCompetitorsIndexRoute: typeof AuthenticatedCompetitorsIndexRoute
+  AuthenticatedInsightsIndexRoute: typeof AuthenticatedInsightsIndexRoute
+  AuthenticatedPricingIndexRoute: typeof AuthenticatedPricingIndexRoute
+  AuthenticatedProductsIndexRoute: typeof AuthenticatedProductsIndexRoute
+  AuthenticatedReportsIndexRoute: typeof AuthenticatedReportsIndexRoute
+  AuthenticatedSourcesIndexRoute: typeof AuthenticatedSourcesIndexRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
-  AuthenticatedAlertsRoute: AuthenticatedAlertsRoute,
-  AuthenticatedCatalogueRoute: AuthenticatedCatalogueRoute,
-  AuthenticatedCompetitorsRoute: AuthenticatedCompetitorsRoute,
-  AuthenticatedInsightsRoute: AuthenticatedInsightsRoute,
-  AuthenticatedPricingRoute: AuthenticatedPricingRoute,
-  AuthenticatedProductsRoute: AuthenticatedProductsRoute,
-  AuthenticatedReportsRoute: AuthenticatedReportsRoute,
-  AuthenticatedSourcesRoute: AuthenticatedSourcesRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedAlertsIndexRoute: AuthenticatedAlertsIndexRoute,
+  AuthenticatedCatalogueIndexRoute: AuthenticatedCatalogueIndexRoute,
+  AuthenticatedCompetitorsIndexRoute: AuthenticatedCompetitorsIndexRoute,
+  AuthenticatedInsightsIndexRoute: AuthenticatedInsightsIndexRoute,
+  AuthenticatedPricingIndexRoute: AuthenticatedPricingIndexRoute,
+  AuthenticatedProductsIndexRoute: AuthenticatedProductsIndexRoute,
+  AuthenticatedReportsIndexRoute: AuthenticatedReportsIndexRoute,
+  AuthenticatedSourcesIndexRoute: AuthenticatedSourcesIndexRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren =
@@ -332,11 +318,20 @@ const AuthenticatedRouteRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
-  AuthRoute: AuthRoute,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
-  ApiPublicHooksCrawlTickRoute: ApiPublicHooksCrawlTickRoute,
-  ApiPublicHooksReportTickRoute: ApiPublicHooksReportTickRoute,
+  AuthLoginRoute: AuthLoginRoute,
+  AuthSignupRoute: AuthSignupRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
+  }
+}

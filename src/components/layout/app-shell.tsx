@@ -22,7 +22,6 @@ import { workspace } from "@/data/mock";
 const intelligence = INTELLIGENCE_NAV;
 const operations = OPERATIONS_NAV;
 
-
 function AppSidebar() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });
 

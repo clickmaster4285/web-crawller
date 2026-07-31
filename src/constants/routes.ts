@@ -1,4 +1,6 @@
 export const ROUTES = {
+  login: "/auth/login",
+  signup: "/auth/signup",
   overview: "/",
   competitors: "/competitors",
   products: "/products",

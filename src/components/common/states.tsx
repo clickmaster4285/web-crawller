@@ -16,7 +16,9 @@ export function EmptyState({
   return (
     <div className="mx-6 my-10 border border-dashed border-border bg-card p-10 text-center">
       <h2 className="font-display text-2xl">{title}</h2>
-      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">{description}</p>
+      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
+        {description}
+      </p>
       <Button asChild className="mt-6">
         <Link to={actionTo}>{actionLabel}</Link>
       </Button>

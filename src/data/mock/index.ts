@@ -200,7 +200,7 @@ export const matchedProducts: MatchedProduct[] = [
   },
   {
     id: "p6",
-    name: "LG OLED evo C5 65\" 4K Smart TV",
+    name: 'LG OLED evo C5 65" 4K Smart TV',
     brand: "LG",
     category: "Televisions",
     sku: "LG-OLED65C5",
@@ -334,7 +334,7 @@ export const alerts: AlertItem[] = [
   {
     id: "a1",
     type: "price_drop",
-    title: "LG OLED evo C5 65\" dropped £100",
+    title: 'LG OLED evo C5 65" dropped £100',
     detail: "£1,749 → £1,649. You are now £150 more expensive.",
     competitor: "Halden Direct",
     time: "18 min ago",
@@ -446,8 +446,20 @@ export const dashboardStats = {
 
 export const reports: ReportSummary[] = [
   { id: "r1", name: "Daily pricing digest", period: "27 Jul 2026", pages: 6, status: "Ready" },
-  { id: "r2", name: "Weekly competitor movement", period: "21–27 Jul 2026", pages: 18, status: "Ready" },
-  { id: "r3", name: "Monthly catalogue & brand analysis", period: "June 2026", pages: 42, status: "Ready" },
+  {
+    id: "r2",
+    name: "Weekly competitor movement",
+    period: "21–27 Jul 2026",
+    pages: 18,
+    status: "Ready",
+  },
+  {
+    id: "r3",
+    name: "Monthly catalogue & brand analysis",
+    period: "June 2026",
+    pages: 42,
+    status: "Ready",
+  },
   { id: "r4", name: "Quarterly market position", period: "Q2 2026", pages: 66, status: "Ready" },
   { id: "r5", name: "Annual intelligence review", period: "2025", pages: 128, status: "Archived" },
 ];

@@ -43,7 +43,13 @@ export function StatCard({
   );
 }
 
-export function SectionTitle({ children, aside }: { children: React.ReactNode; aside?: React.ReactNode }) {
+export function SectionTitle({
+  children,
+  aside,
+}: {
+  children: React.ReactNode;
+  aside?: React.ReactNode;
+}) {
   return (
     <div className="mb-4 flex items-end justify-between gap-4">
       <h2 className="text-xl">{children}</h2>

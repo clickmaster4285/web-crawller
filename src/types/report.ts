@@ -1,12 +1,7 @@
 import type { Severity } from "./common";
 
 export type AlertType =
-  | "price_drop"
-  | "price_rise"
-  | "new_product"
-  | "removed"
-  | "stock"
-  | "discount";
+  "price_drop" | "price_rise" | "new_product" | "removed" | "stock" | "discount";
 
 export interface AlertItem {
   id: string;
