@@ -1,16 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import {
-  LayoutDashboard,
-  Users,
-  PackageSearch,
-  TrendingDown,
-  Layers,
-  Bell,
-  FileText,
-  Settings2,
-  Sparkles,
-  CircleCheck,
-} from "lucide-react";
+import { CircleCheck } from "lucide-react";
 
 import {
   Sidebar,
@@ -27,22 +16,12 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
+import { INTELLIGENCE_NAV, OPERATIONS_NAV } from "@/constants";
 import { workspace } from "@/data/mock";
 
-const intelligence = [
-  { title: "Overview", url: "/", icon: LayoutDashboard },
-  { title: "Competitors", url: "/competitors", icon: Users },
-  { title: "Matched products", url: "/products", icon: PackageSearch },
-  { title: "Price intelligence", url: "/pricing", icon: TrendingDown },
-  { title: "Catalogue gaps", url: "/catalogue", icon: Layers },
-];
+const intelligence = INTELLIGENCE_NAV;
+const operations = OPERATIONS_NAV;
 
-const operations = [
-  { title: "AI insights", url: "/insights", icon: Sparkles },
-  { title: "Alerts", url: "/alerts", icon: Bell },
-  { title: "Reports", url: "/reports", icon: FileText },
-  { title: "Sources & crawling", url: "/sources", icon: Settings2 },
-];
 
 function AppSidebar() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });
