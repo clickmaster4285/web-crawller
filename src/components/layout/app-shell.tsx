@@ -27,7 +27,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
-import { workspace } from "@/lib/demo-data";
+import { workspace } from "@/data/mock";
 
 const intelligence = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
