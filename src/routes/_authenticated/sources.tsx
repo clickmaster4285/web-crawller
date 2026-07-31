@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { SourcesPage } from "@/features/settings";
 
-export const Route = createFileRoute("/sources")({
+export const Route = createFileRoute("/_authenticated/sources")({
   head: () => ({
     meta: [
       { title: "Sources & crawling — Parity" },

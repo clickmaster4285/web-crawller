@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { CompetitorsPage } from "@/features/competitors";
 
-export const Route = createFileRoute("/competitors")({
+export const Route = createFileRoute("/_authenticated/competitors")({
   head: () => ({
     meta: [
       { title: "Competitors — Parity" },

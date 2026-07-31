@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { PricingPage } from "@/features/pricing";
 
-export const Route = createFileRoute("/pricing")({
+export const Route = createFileRoute("/_authenticated/pricing")({
   head: () => ({
     meta: [
       { title: "Price intelligence — Parity" },
