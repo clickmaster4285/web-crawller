@@ -17,7 +17,7 @@ import { SectionTitle, StatCard } from "@/components/cards/stat-card";
 import { EmptyState, LoadingState } from "@/components/common/states";
 import { Button } from "@/components/ui/button";
 import { useAnalytics } from "@/hooks/useWorkspace";
-import { gbp } from "@/utils/format";
+import { gbp } from "@/utils";
 
 const axis = {
   stroke: "var(--color-muted-foreground)",
