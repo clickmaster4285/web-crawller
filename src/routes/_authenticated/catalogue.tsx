@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { CataloguePage } from "@/features/catalogue";
 
-export const Route = createFileRoute("/catalogue")({
+export const Route = createFileRoute("/_authenticated/catalogue")({
   head: () => ({
     meta: [
       { title: "Catalogue gaps — Parity" },
