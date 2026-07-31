@@ -21,6 +21,7 @@ import { Route as AuthenticatedInsightsRouteImport } from './routes/_authenticat
 import { Route as AuthenticatedCompetitorsRouteImport } from './routes/_authenticated/competitors'
 import { Route as AuthenticatedCatalogueRouteImport } from './routes/_authenticated/catalogue'
 import { Route as AuthenticatedAlertsRouteImport } from './routes/_authenticated/alerts'
+import { Route as ApiPublicHooksReportTickRouteImport } from './routes/api/public/hooks/report-tick'
 import { Route as ApiPublicHooksCrawlTickRouteImport } from './routes/api/public/hooks/crawl-tick'
 
 const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
@@ -83,6 +84,12 @@ const AuthenticatedAlertsRoute = AuthenticatedAlertsRouteImport.update({
   path: '/alerts',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const ApiPublicHooksReportTickRoute =
+  ApiPublicHooksReportTickRouteImport.update({
+    id: '/api/public/hooks/report-tick',
+    path: '/api/public/hooks/report-tick',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicHooksCrawlTickRoute = ApiPublicHooksCrawlTickRouteImport.update({
   id: '/api/public/hooks/crawl-tick',
   path: '/api/public/hooks/crawl-tick',
@@ -102,6 +109,7 @@ export interface FileRoutesByFullPath {
   '/reports': typeof AuthenticatedReportsRoute
   '/sources': typeof AuthenticatedSourcesRoute
   '/api/public/hooks/crawl-tick': typeof ApiPublicHooksCrawlTickRoute
+  '/api/public/hooks/report-tick': typeof ApiPublicHooksReportTickRoute
 }
 export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
@@ -116,6 +124,7 @@ export interface FileRoutesByTo {
   '/sources': typeof AuthenticatedSourcesRoute
   '/': typeof AuthenticatedIndexRoute
   '/api/public/hooks/crawl-tick': typeof ApiPublicHooksCrawlTickRoute
+  '/api/public/hooks/report-tick': typeof ApiPublicHooksReportTickRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -132,6 +141,7 @@ export interface FileRoutesById {
   '/_authenticated/sources': typeof AuthenticatedSourcesRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/api/public/hooks/crawl-tick': typeof ApiPublicHooksCrawlTickRoute
+  '/api/public/hooks/report-tick': typeof ApiPublicHooksReportTickRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -148,6 +158,7 @@ export interface FileRouteTypes {
     | '/reports'
     | '/sources'
     | '/api/public/hooks/crawl-tick'
+    | '/api/public/hooks/report-tick'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/auth'
@@ -162,6 +173,7 @@ export interface FileRouteTypes {
     | '/sources'
     | '/'
     | '/api/public/hooks/crawl-tick'
+    | '/api/public/hooks/report-tick'
   id:
     | '__root__'
     | '/_authenticated'
@@ -177,6 +189,7 @@ export interface FileRouteTypes {
     | '/_authenticated/sources'
     | '/_authenticated/'
     | '/api/public/hooks/crawl-tick'
+    | '/api/public/hooks/report-tick'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -184,6 +197,7 @@ export interface RootRouteChildren {
   AuthRoute: typeof AuthRoute
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
   ApiPublicHooksCrawlTickRoute: typeof ApiPublicHooksCrawlTickRoute
+  ApiPublicHooksReportTickRoute: typeof ApiPublicHooksReportTickRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -272,6 +286,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAlertsRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/api/public/hooks/report-tick': {
+      id: '/api/public/hooks/report-tick'
+      path: '/api/public/hooks/report-tick'
+      fullPath: '/api/public/hooks/report-tick'
+      preLoaderRoute: typeof ApiPublicHooksReportTickRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/hooks/crawl-tick': {
       id: '/api/public/hooks/crawl-tick'
       path: '/api/public/hooks/crawl-tick'
@@ -314,6 +335,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthRoute: AuthRoute,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
   ApiPublicHooksCrawlTickRoute: ApiPublicHooksCrawlTickRoute,
+  ApiPublicHooksReportTickRoute: ApiPublicHooksReportTickRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
