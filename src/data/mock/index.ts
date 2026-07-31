@@ -1,87 +1,23 @@
 /**
- * Demo dataset for the competitive intelligence platform.
- * Deterministic, presentation-layer only — swapped for live crawl data later.
+ * Deterministic demo dataset for the Parity workspace.
+ * Presentation-layer only — replaced by live crawl data once Cloud storage is wired.
  */
+import type {
+  AlertItem,
+  BrandGap,
+  CategoryGap,
+  Competitor,
+  Insight,
+  MatchedProduct,
+  PricePoint,
+  ReportSummary,
+  Workspace,
+} from "@/types";
 
-export type Money = number; // in GBP
+export { gbp } from "@/utils/formatCurrency";
+export type * from "@/types";
 
-export interface Competitor {
-  id: string;
-  name: string;
-  website: string;
-  country: string;
-  currency: string;
-  language: string;
-  industry: string;
-  platform: string;
-  status: "active" | "paused" | "error";
-  lastCrawl: string;
-  products: number;
-  newToday: number;
-  priceChanges: number;
-  outOfStock: number;
-  avgPriceIndex: number; // 100 = parity with you
-  frequency: "Hourly" | "Every 6 hours" | "Daily" | "Weekly";
-}
-
-export interface MatchedProduct {
-  id: string;
-  name: string;
-  brand: string;
-  category: string;
-  sku: string;
-  gtin: string;
-  yourPrice: Money | null;
-  competitor: string;
-  competitorPrice: Money;
-  matchMethod: "GTIN" | "MPN" | "Brand + Model" | "AI similarity";
-  confidence: number;
-  stock: "In stock" | "Low stock" | "Out of stock";
-  delivery: string;
-  priceChange24h: number;
-  rating: number;
-  reviews: number;
-}
-
-export interface PricePoint {
-  date: string;
-  you: number;
-  market: number;
-  cheapest: number;
-}
-
-export interface CategoryGap {
-  category: string;
-  you: number;
-  competitors: number;
-}
-
-export interface BrandGap {
-  brand: string;
-  you: number;
-  competitors: number;
-  trend: number;
-}
-
-export interface AlertItem {
-  id: string;
-  type: "price_drop" | "price_rise" | "new_product" | "removed" | "stock" | "discount";
-  title: string;
-  detail: string;
-  competitor: string;
-  time: string;
-  severity: "high" | "medium" | "low";
-}
-
-export interface Insight {
-  id: string;
-  headline: string;
-  body: string;
-  impact: string;
-  category: "pricing" | "catalogue" | "stock" | "brand";
-}
-
-export const workspace = {
+export const workspace: Workspace = {
   name: "ABC Electronics",
   owner: "John Whitfield",
   email: "admin@abc.com",
@@ -508,19 +444,10 @@ export const dashboardStats = {
   missingBrands: 9,
 };
 
-export const reports = [
+export const reports: ReportSummary[] = [
   { id: "r1", name: "Daily pricing digest", period: "27 Jul 2026", pages: 6, status: "Ready" },
   { id: "r2", name: "Weekly competitor movement", period: "21–27 Jul 2026", pages: 18, status: "Ready" },
   { id: "r3", name: "Monthly catalogue & brand analysis", period: "June 2026", pages: 42, status: "Ready" },
   { id: "r4", name: "Quarterly market position", period: "Q2 2026", pages: 66, status: "Ready" },
   { id: "r5", name: "Annual intelligence review", period: "2025", pages: 128, status: "Archived" },
 ];
-
-export function gbp(value: number, fractionDigits = 0) {
-  return new Intl.NumberFormat("en-GB", {
-    style: "currency",
-    currency: "GBP",
-    minimumFractionDigits: fractionDigits,
-    maximumFractionDigits: fractionDigits,
-  }).format(value);
-}
