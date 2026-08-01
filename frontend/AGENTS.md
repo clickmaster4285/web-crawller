@@ -84,6 +84,7 @@ src/
 ├── hooks/
 │   ├── useWorkspace.ts       # useWorkspace + useAnalytics (fetch from backend /api/data)
 │   ├── useData.ts            # per-domain useApiQuery hooks (competitors, products, …) + useSavedCrawls (polls saved crawls every 30s)
+│   ├── useLocalStorage.ts    # SSR-safe localStorage-backed useState (refresh-proof UI state: job id, crawl config, …)
 │   └── use-mobile.tsx
 ├── layouts/
 │   ├── AuthLayout.tsx
@@ -197,7 +198,7 @@ no page imports local mock data. There are no placeholder shells left:
 | AI insights      | `/insights`    | `NoRealDataState` (needs the insight engine)                                                     |
 | Alerts           | `/alerts`      | `NoRealDataState` (needs the alert engine)                                                       |
 | Reports          | `/reports`     | `NoRealDataState` (needs the report generator)                                                   |
-| Data sources     | `/sources`     | "Your website" card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %) + **Live crawl** panel (full config, live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning) + **Frequency scheduler** + **Saved crawls** panel |
+| Data sources     | `/sources`     | "Your website" card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %) + **Live crawl** panel (full config, live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning) + **Frequency scheduler** + **Saved crawls** panel. Panel state is **refresh-proof**: config, running `jobId`, expanded saved-crawl row and schedules cache persist via `useLocalStorageState`, and the job id is mirrored to `?job=` so a reload (even in another tab) reconnects to the running crawl ("Reconnected to running crawl" badge) |
 
 Existing shared primitives: `PageHeader`/`DashboardLayout`/`Sidebar`
 (`components/layout/`), `StatCard`/`SectionTitle` (`components/cards/`),
@@ -273,6 +274,31 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   inflates the estimate, 5s warm-up floor), and a **Running with** row of
   parameter badges plus a **Config changed mid-run** warning when the panel
   config diverges from the job's captured `params`.
+- **Refresh-proof Sources page** — `src/hooks/useLocalStorage.ts` (SSR-safe
+  localStorage-backed `useState`; try/catch reads/writes, server no-ops)
+  backs every crawl-panel control under `parity.sources.*`: origin,
+  collections, **job id**, delay, concurrency, **max-pages mode with a
+  Custom… free number input** (strict positive integer via `Number()` +
+  `Number.isInteger`; empty falls back to unlimited), robots/product-only/
+  snapshot toggles, and frequency. Also persisted: the expanded saved-crawl
+  row id (`parity.sources.expandedCrawlId`) and a schedules cache
+  (`parity.sources.schedules`) that renders silently while the live query
+  loads and shows an honest "Server unreachable — showing the last known
+  schedules from memory" note only on error (`isError && !data` — live
+  server response always wins, so cancelled schedules don't resurrect). A dead persisted `jobId` (pruned
+  job) is cleared by an effect, and the "No progress available" hint is
+  gated on `jobId != null`.
+- **Cross-tab job handoff via `?job=`** — the Sources route has a typed
+  `validateSearch` (`SourcesSearch { job?: string }`); on mount the URL's
+  `?job=` **wins over localStorage** (mount-once ref guard), and afterwards
+  `jobId` mirrors into the URL with `navigate({ search: (prev) => ({ ...prev,
+  job: jobId ?? undefined }), replace: true })` — `replace: true` keeps the
+  back button clean, the updater preserves other search params, and `job:
+  undefined` drops the param when the job ends. A **"Reconnected to running
+  crawl"** badge (with `RefreshCw` icon + helper line) renders while a
+  restored job is still running: `startedInThisSession` ref records jobs this
+  page session started itself (`start.onSuccess`), so a fresh run never shows
+  it, and it auto-hides when the crawl finishes.
 - **Detection from the last crawl** — the "Your website" card is rebuilt from
   the latest saved crawl: **platform** (detected via robots.txt markers +
   homepage signals in `discover/platform.ts`, persisted as
