@@ -55,3 +55,28 @@ export function ErrorState({
     </div>
   );
 }
+
+/**
+ * Shown when a page's endpoint has no real data source yet (or no crawls
+ * have been saved). The demo dataset was removed, so pages must never show
+ * fabricated numbers — only this honest state until real data exists.
+ */
+export function NoRealDataState({
+  title = "No real data yet",
+  description = "This view needs data this build doesn't produce yet. Run a crawl on the Sources page to see real captured data here once the matching/analysis layer lands.",
+}: {
+  title?: string;
+  description?: string;
+}) {
+  return (
+    <div className="mx-6 my-10 border border-dashed border-border bg-card p-10 text-center">
+      <h2 className="font-display text-2xl">{title}</h2>
+      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
+        {description}
+      </p>
+      <Button asChild className="mt-6">
+        <Link to="/sources">Run a crawl</Link>
+      </Button>
+    </div>
+  );
+}

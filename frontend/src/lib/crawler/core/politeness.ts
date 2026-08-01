@@ -102,10 +102,17 @@ export class AdaptiveThrottle implements RequestThrottle {
 export class Politeness implements RequestThrottle {
   private readonly robots: ParsedRobots | null;
   private readonly throttle: AdaptiveThrottle;
+  /** Raw robots.txt body ("" when absent/unreachable) — reused by platform detection. */
+  readonly robotsBody: string;
 
-  private constructor(robots: ParsedRobots | null, throttle: AdaptiveThrottle) {
+  private constructor(
+    robots: ParsedRobots | null,
+    throttle: AdaptiveThrottle,
+    robotsBody: string,
+  ) {
     this.robots = robots;
     this.throttle = throttle;
+    this.robotsBody = robotsBody;
   }
 
   /**
@@ -125,6 +132,7 @@ export class Politeness implements RequestThrottle {
   ): Promise<Politeness> {
     const baseDelay = options.delayMs ?? 1000;
     let robots: ParsedRobots | null = null;
+    let robotsBody = "";
     if (options.respectRobots !== false) {
       try {
         const response = await fetchWithRetry(`${origin}/robots.txt`, {
@@ -134,8 +142,9 @@ export class Politeness implements RequestThrottle {
           userAgent: options.userAgent,
         });
         if (response.status >= 200 && response.status < 300) {
+          robotsBody = await response.text();
           robots = parseRobotsTxt(
-            await response.text(),
+            robotsBody,
             `${origin}/robots.txt`,
             USER_AGENT_TOKEN,
           );
@@ -152,6 +161,7 @@ export class Politeness implements RequestThrottle {
         baseline,
         options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS,
       ),
+      robotsBody,
     );
   }
 

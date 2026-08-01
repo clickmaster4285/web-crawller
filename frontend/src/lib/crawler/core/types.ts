@@ -48,6 +48,30 @@ export interface CrawlConfig {
   productOnly?: boolean;
   /** Called after each product is fetched. */
   onProgress?: (fetched: number, discovered: number) => void;
+  /**
+   * Called during the discovery phase with live per-strategy counts (sitemap
+   * URLs found, HTML pages visited, product URLs accumulated) so a UI can
+   * show discovery progress instead of a bare spinner.
+   */
+  onDiscoveryProgress?: (progress: DiscoveryProgress) => void;
+}
+
+/** Live snapshot of the discovery phase, emitted via `onDiscoveryProgress`. */
+export interface DiscoveryProgress {
+  /** Which strategy is currently running (or just finished). */
+  phase: "collections" | "sitemap" | "htmlCrawl" | "done";
+  /** Total product URLs accumulated across all strategies so far. */
+  urlsFound: number;
+  /** Product URLs contributed by the sitemap walk so far. */
+  sitemapUrls: number;
+  /** Product URLs contributed by the HTML crawl so far. */
+  htmlUrls: number;
+  /** HTML pages visited so far (BFS). */
+  htmlPagesVisited: number;
+  /** Product handles contributed by collection walks so far. */
+  collectionHandles: number;
+  /** Detected store platform (set once detection runs, usually at "done"). */
+  platform?: string;
 }
 
 export interface CrawledVariant {
@@ -86,6 +110,24 @@ export interface CrawlFailure {
   error: string;
 }
 
+/**
+ * What each discovery strategy contributed (and whether it failed). Mirrors
+ * `ProductDiscovery.diagnostics` so a run's discovery phase can be surfaced
+ * in the UI / persisted with the crawl.
+ */
+export interface DiscoveryDiagnostics {
+  collections: Array<{ collection: string; handles: number; error?: string }>;
+  sitemap: { urls: number; lastmod: number; error?: string };
+  htmlCrawl: {
+    urls: number;
+    pagesVisited: number;
+    truncated: boolean;
+    error?: string;
+  };
+  /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
+  platform: { platform: string; signal: string };
+}
+
 export interface CrawlStats {
   discovered: number;
   fetched: number;
@@ -102,4 +144,6 @@ export interface CrawlResult {
   config: Pick<CrawlConfig, "origin" | "collections">;
   stats: CrawlStats;
   products: CrawledProduct[];
+  /** Per-strategy discovery diagnostics (sitemap / html-crawl / collections). */
+  discovery: DiscoveryDiagnostics;
 }

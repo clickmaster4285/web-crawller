@@ -15,6 +15,7 @@
 
 import { discoverCollectionHandles } from "../adapters/shopify-discover.ts";
 import { discoverByHtmlCrawl } from "./html-crawl.ts";
+import { detectPlatform } from "./platform.ts";
 import { fetchSitemapUrls, type DiscoveredUrl } from "./sitemap.ts";
 import type { CrawlConfig } from "../core/types.ts";
 import type { HttpOptions } from "../core/http.ts";
@@ -38,6 +39,7 @@ export interface ProductDiscovery {
       truncated: boolean;
       error?: string;
     };
+    platform: { platform: string; signal: string };
   };
 }
 
@@ -51,6 +53,8 @@ export interface ProductDiscovery {
 export async function discoverProducts(
   config: CrawlConfig,
   opts: HttpOptions = httpOptions(config),
+  /** robots.txt body already fetched by the politeness layer (avoids a refetch). */
+  robotsBody?: string | null,
 ): Promise<ProductDiscovery> {
   const urlSet = new Set<string>();
   const lastmod = new Map<string, string>();
@@ -58,7 +62,24 @@ export async function discoverProducts(
     collections: [],
     sitemap: { urls: 0, lastmod: 0 },
     htmlCrawl: { urls: 0, pagesVisited: 0, truncated: false },
+    platform: { platform: "Unknown", signal: "Not detected" },
   };
+
+  // Platform detection (robots.txt body + one polite homepage fetch when the
+  // body alone isn't conclusive). Runs first so the result lands in the
+  // diagnostics and the final live tick.
+  try {
+    diagnostics.platform = await detectPlatform(
+      config.origin,
+      opts,
+      robotsBody,
+    );
+  } catch (error) {
+    diagnostics.platform = {
+      platform: "Unknown",
+      signal: `Detection failed: ${String(error)}`,
+    };
+  }
 
   // 1. Shopify collection handles → product URLs.
   if (config.collections?.length) {
@@ -80,6 +101,17 @@ export async function discoverProducts(
           error: String(error),
         });
       }
+      config.onDiscoveryProgress?.({
+        phase: "collections",
+        urlsFound: urlSet.size,
+        sitemapUrls: 0,
+        htmlUrls: 0,
+        htmlPagesVisited: 0,
+        collectionHandles: diagnostics.collections.reduce(
+          (n, c) => n + c.handles,
+          0,
+        ),
+      });
     }
   }
 
@@ -95,23 +127,55 @@ export async function discoverProducts(
       config.productOnly === false
         ? sitemapUrls
         : filterProductSitemapEntries(sitemapUrls);
+    let sitemapAdded = 0;
     for (const u of entries) {
+      // Count only URLs this strategy actually contributed, so the
+      // diagnostics reflect sitemap's own share when collections already
+      // added some of the same product URLs.
+      if (!urlSet.has(u.loc)) sitemapAdded++;
       urlSet.add(u.loc);
       if (u.lastmod) {
         lastmod.set(u.loc, u.lastmod);
         diagnostics.sitemap.lastmod++;
       }
     }
-    diagnostics.sitemap.urls = urlSet.size;
+    diagnostics.sitemap.urls = sitemapAdded;
   } catch (error) {
     diagnostics.sitemap.error = String(error);
   }
+  config.onDiscoveryProgress?.({
+    phase: "sitemap",
+    urlsFound: urlSet.size,
+    sitemapUrls: diagnostics.sitemap.urls,
+    htmlUrls: 0,
+    htmlPagesVisited: 0,
+    collectionHandles: diagnostics.collections.reduce(
+      (n, c) => n + c.handles,
+      0,
+    ),
+  });
 
   // 3. HTML link-graph BFS from the site root.
   try {
     const html = await discoverByHtmlCrawl(config.origin, opts, {
       maxPages: DISCOVERY_MAX_PAGES,
       maxDepth: DISCOVERY_MAX_DEPTH,
+      onPageVisited: (pagesVisited, productsFound) => {
+        config.onDiscoveryProgress?.({
+          phase: "htmlCrawl",
+          // Approximate live union: urlSet (collections + sitemap) plus the
+          // BFS's own raw count. May briefly over-count URLs found by both
+          // strategies; the final 'done' tick reports the deduped total.
+          urlsFound: urlSet.size + productsFound,
+          sitemapUrls: diagnostics.sitemap.urls,
+          htmlUrls: productsFound,
+          htmlPagesVisited: pagesVisited,
+          collectionHandles: diagnostics.collections.reduce(
+            (n, c) => n + c.handles,
+            0,
+          ),
+        });
+      },
     });
     for (const u of html.productUrls) urlSet.add(u);
     diagnostics.htmlCrawl = {
@@ -122,6 +186,18 @@ export async function discoverProducts(
   } catch (error) {
     diagnostics.htmlCrawl.error = String(error);
   }
+  config.onDiscoveryProgress?.({
+    phase: "done",
+    urlsFound: urlSet.size,
+    sitemapUrls: diagnostics.sitemap.urls,
+    htmlUrls: diagnostics.htmlCrawl.urls,
+    htmlPagesVisited: diagnostics.htmlCrawl.pagesVisited,
+    collectionHandles: diagnostics.collections.reduce(
+      (n, c) => n + c.handles,
+      0,
+    ),
+    platform: diagnostics.platform.platform,
+  });
 
   return {
     urls: [...urlSet].filter((u) => !opts.isAllowed || opts.isAllowed(u)),

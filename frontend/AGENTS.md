@@ -18,8 +18,11 @@ now split into two apps:
 
 The frontend talks to the backend through a dev proxy (`/api` → `:3000`).
 There is **no Supabase** and **no Lovable runtime code** — do not reintroduce
-them. The demo dataset lives in `backend/data/demo-data.json` (single source
-of truth) and the demo admin user is seeded into MongoDB on backend boot.
+them. The old demo dataset (`backend/data/demo-data.json`) has been **deleted**
+— every `/api/data/*` response is now either **derived from real saved crawls**
+(the `CrawlResult` collection, written when a crawl finishes) or **honestly
+empty** for features that have no data source yet. The demo admin user is
+seeded into MongoDB on backend boot.
 
 ## Tech stack
 
@@ -42,6 +45,7 @@ of truth) and the demo admin user is seeded into MongoDB on backend boot.
 | `npm run lint`      | ESLint (run this after every change; currently 0 errors, 4 pre-existing`react-refresh/only-export-components` warnings in shadcn UI components) |
 | `npm run format`    | Prettier write                                                                                                                                    |
 | `npx tsc --noEmit`  | Typecheck (strict mode)                                                                                                                           |
+| `npm run crawl`    | CLI crawl against obdesignsusa.com, checkpointing to `.crawler/` (gitignored)                                                                  |
 | `cd ../backend && npm start` | Start the Express API on :3000 (needs MongoDB running; seeds the demo admin user)                                                |
 
 Verification loop for any change: `npx tsc --noEmit` → `npm run lint` → `npm run build`.
@@ -79,16 +83,16 @@ src/
 │   └── sidebar.ts
 ├── hooks/
 │   ├── useWorkspace.ts       # useWorkspace + useAnalytics (fetch from backend /api/data)
-│   ├── useData.ts            # per-domain useApiQuery hooks (competitors, products, …)
+│   ├── useData.ts            # per-domain useApiQuery hooks (competitors, products, …) + useSavedCrawls (polls saved crawls every 30s)
 │   └── use-mobile.tsx
 ├── layouts/
 │   ├── AuthLayout.tsx
 │   └── DashboardLayout.tsx
 ├── lib/
 │   ├── http.ts               # token-aware fetch client (/api prefix + Bearer JWT)
-│   ├── api.ts                # REST getters for GET /api/data/* (workspace, analytics, …)
+│   ├── api.ts                # REST getters for GET /api/data/* (workspace, analytics, … + crawl-results)
 │   ├── auth.ts               # real JWT auth (signIn → POST /api/auth/login; token + session in localStorage)
-│   ├── crawl.ts              # startCrawl/getCrawlProgress job API (checkpointed crawler, persisted to backend)
+│   ├── crawl.ts              # startCrawl/getCrawlProgress job API + scheduleCrawl/getCrawlSchedules/cancelCrawlSchedule (checkpointed crawler, persisted to backend)
 │   ├── error-page.ts         # SSR error HTML
 │   ├── error-capture.ts      # SSR error capture used by server.ts
 │   └── utils.ts
@@ -172,27 +176,33 @@ before starting again.
 
 The app is a **working client/server prototype**: the TanStack frontend
 fetches every page's data from the Express backend over HTTP (dev-proxied
-`/api` → `:3000`), and auth is real JWT against MongoDB. The demo dataset
-lives in `backend/data/demo-data.json` and is served by `backend/routes/data.js`.
-Hooks fetch via TanStack Query — no page imports local mock data. There are no
-placeholder shells left:
+`/api` → `:3000`), and auth is real JWT against MongoDB. The demo dataset has
+been **removed** — `backend/controllers/dataController.js` derives every
+`/api/data/*` response from the real `CrawlResult` collection (competitors
+= one per crawled origin, products = flattened crawled products, aggregate
+stats = computed from saved crawls) and returns honest empty arrays for
+features with no data source yet (workspace, price history, gaps, insights,
+alerts, reports). Pages that get empty data render a
+`NoRealDataState` ("No real data yet") with a **Run a crawl** link to
+`/sources` instead of fabricated numbers. Hooks fetch via TanStack Query —
+no page imports local mock data. There are no placeholder shells left:
 
 | Page             | Route            | What it shows today                                                                                |
 | ---------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
-| Overview         | `/`            | Stat cards + charts (price movements, catalogue growth) via`useAnalytics()`; empty/error states wired |
-| Competitors      | `/competitors` | Competitor list via`useCompetitors()`                                                             |
-| Matched products | `/products`    | Searchable/filterable table via`useMatchedProducts()` (price gap, confidence, stock, delivery)  |
-| Pricing          | `/pricing`     | Price comparison + history charts via`usePricing()`                                              |
-| Catalogue gaps   | `/catalogue`   | Category/brand gap tables via`useCatalogue()`                                                   |
-| AI insights      | `/insights`    | Insight cards via`useInsights()`                                                                 |
-| Alerts           | `/alerts`      | Alert feed via`useAlerts()`                                                                      |
-| Reports          | `/reports`     | Report list via`useReports()`                                                                    |
-| Data sources     | `/sources`     | Workspace config via`useWorkspace()` + **Live crawl** panel that runs the real crawler on the server |
+| Overview         | `/`            | Stat cards + competitor snapshot via`useAnalytics()`; `NoRealDataState` when no crawls exist yet  |
+| Competitors      | `/competitors` | One card + table row per **crawled origin** via`useCompetitors()` (derived from saved crawls)   |
+| Matched products | `/products`    | Searchable/filterable table via`useMatchedProducts()` — real crawled products; your-price/gap matching placeholder until the matching layer lands |
+| Pricing          | `/pricing`     | Positioning + market average from crawled data via`usePricing()`; history empty until time-series  |
+| Catalogue gaps   | `/catalogue`   | Charts/gaps empty until your catalogue + matching exist; honest`NoRealDataState`               |
+| AI insights      | `/insights`    | `NoRealDataState` (needs the insight engine)                                                     |
+| Alerts           | `/alerts`      | `NoRealDataState` (needs the alert engine)                                                       |
+| Reports          | `/reports`     | `NoRealDataState` (needs the report generator)                                                   |
+| Data sources     | `/sources`     | Workspace summary + **Live crawl** panel (full config) + **Frequency scheduler** + **Saved crawls** panel |
 
 Existing shared primitives: `PageHeader`/`DashboardLayout`/`Sidebar`
 (`components/layout/`), `StatCard`/`SectionTitle` (`components/cards/`),
-`EmptyState`/`LoadingState`/`ErrorState` (`components/common/`), and the shadcn
-set in `components/ui/`.
+`EmptyState`/`LoadingState`/`ErrorState`/`NoRealDataState`
+(`components/common/`), and the shadcn set in `components/ui/`.
 
 ## What's next (the plan)
 
@@ -207,17 +217,17 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 - Unify page headers, breadcrumbs, and table/toolbar patterns across pages.
 - Make titles/meta consistent (see "Page titles" gotcha).
 
-### Layer 2 — Product functionality on mock data
+### Layer 2 — Product functionality (on real data)
 
 - Add page-level interactions: filtering, sorting, pagination, drill-downs
   (e.g. product → price history, competitor → profile).
 - Add global search + command palette over competitors/products/insights.
 - Add create/edit flows (e.g. add a competitor, subscribe to a data source,
   configure an alert) using `react-hook-form` + `zod` (already installed).
-- Move interactive state to `useWorkspace`/`useAnalytics` so pages stop reading
-  `src/data/mock` directly.
+- (The old `src/data/mock` layer is gone — interactions now run on the real
+  backend-derived data.)
 
-### Layer 3 — Real client/server split — **mostly done**
+### Layer 3 — Real client/server split — **done** (split + dashboard wiring)
 
 - **Frontend API layer** — `src/lib/api.ts` is now a REST client: every
   getter hits `GET /api/data/*` on the Express backend via `src/lib/http.ts`
@@ -228,11 +238,12 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   page awaits the real `POST /api/auth/login` and surfaces backend errors
   (e.g. "Invalid credentials"). The demo admin user is seeded on boot
   (`backend/seed.js`).
-- **Backend** — `backend/` owns the dataset (`data/demo-data.json`),
-  serves `GET /api/data/{workspace,analytics,competitors,matched-products,
-  pricing,catalogue,insights,alerts,reports}`, plus existing JWT auth and
-  user CRUD. `backend/index.js` mounts the routes and calls
-  `ensureDemoUser()` on start.
+- **Backend** — `backend/` serves `GET /api/data/{workspace,analytics,
+  competitors,matched-products,pricing,catalogue,insights,alerts,reports}`,
+  plus existing JWT auth and user CRUD. `backend/index.js` mounts the routes
+  and calls `ensureDemoUser()` on start. `backend/controllers/dataController.js`
+  derives real responses from the `CrawlResult` collection (no demo dataset
+  — `backend/data/demo-data.json` was deleted).
 - **Crawler** — `startCrawl`/`getCrawlProgress` live in `src/lib/crawl.ts` as
   TanStack server functions (not proxied to Express) because the crawler is
   a Node-only TypeScript module with native deps (`better-sqlite3`).
@@ -244,20 +255,31 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   finished results are upserted to the backend's `CrawlResult` collection.
 - **Sources page** — Live crawl panel (origin + collections, `useMutation`,
   stat cards, failures, product previews) imports `startCrawl` from
-  `@/lib/crawl` and polls `getCrawlProgress` for live progress. A **Saved
-  crawls** panel below it lists persisted results via `useSavedCrawls()`
-  (`GET /api/data/crawl-results`, types in `src/lib/api.ts`) with
-  expandable stats/products/failures; it auto-refreshes when a finished
-  crawl persists (`queryClient.invalidateQueries` on `job.persisted`).
+  `@/lib/crawl` and polls `getCrawlProgress` for live progress. The config
+  section is fully wired to real crawl parameters: concurrency (1–8),
+  request delay (0.25–2s), max pages, **Respect robots.txt** toggle (with a
+  politeness warning when concurrency is raised), Product-only mode, and
+  Store full snapshots. A **Frequency scheduler** section registers
+  recurring crawls (`scheduleCrawl`, 1h/6h/daily/weekly) with an active-
+  schedules list + cancel. A **Saved crawls** panel below lists persisted
+  results via `useSavedCrawls()` (`GET /api/data/crawl-results`, types in
+  `src/lib/api.ts`) with expandable stats/products/failures; it auto-
+  refreshes when a finished crawl persists (`queryClient.invalidateQueries`
+  on `job.persisted`) and polls every 30s so scheduled runs appear.
 - Persistence: crawl results are saved to MongoDB (backend `CrawlResult`
   model, `POST/GET /api/data/crawl-results`) plus per-origin SQLite
   checkpoints (`.crawler/crawl-<host>.db`) for skip-unchanged re-crawls and
   crash-safe incremental saves. The backend keeps **snapshot history** (up to
   20 per origin, `createdAt`-sorted) when `storeSnapshots` is true, or
-  replaces the latest result when false. Still TODO: wiring those results
-  into the dashboard pages (needs a product-matching layer), auth for
-  `/api/data` routes, and production `vite preview` needs a reverse proxy in
-  front of the backend (the `/api` proxy is dev-only).
+  replaces the latest result when false. **Dashboard wiring is done**: the
+  demo dataset is deleted and `backend/controllers/dataController.js`
+  derives competitors/products/stats from the real `CrawlResult` collection,
+  returning honest empty states for features with no source yet. Still TODO:
+  your-store workspace setup, the product-matching layer (GTIN > SKU > slug
+  > fuzzy), price-history time-series, category/brand gaps, the
+  insights/alerts/reports engines, auth for `/api/data` routes, and
+  production `vite preview` needs a reverse proxy in front of the backend
+  (the `/api` proxy is dev-only).
 
 ### Layer 4 — Data ingestion & alerts
 
@@ -276,8 +298,9 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 
 - **Never reintroduce Supabase or Lovable runtime code.** Mock-first, then a
   clean API layer on top — do not bolt on a third-party BaaS.
-- **Keep the demo runnable** (`npm run dev` → network URL) at every step; the
-  product is currently shown to stakeholders from mock data.
+- **Keep the app runnable** (`npm run dev` → network URL) at every step. The
+  demo dataset is gone — pages must never show fabricated numbers; anything
+  without a real source renders `NoRealDataState` instead.
 - Follow the verification loop after every change and keep the routes/pages
   structure stable (file-based routing drives URLs).
 
@@ -297,12 +320,14 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 
 # Crawler — generic e-commerce crawler
 
-The current crawler is **Shopify-only**. It hardcodes the
-`/products/{handle}.json` endpoint and the Shopify product envelope. That works
-for the OB Designs demo, but Parity's stated goal (Layer 4 of the product
-plan) is "real data-source connectors (web crawlers/APIs) feeding competitors,
-products, and prices" — which means the crawler must handle **any
-e-commerce storefront**, not just Shopify.
+The crawler started Shopify-only (hardcoded `/products/{handle}.json`), but
+build steps 1–5 below are done: it is now a **generic engine** with a Shopify
+native adapter, JSON-LD/microdata/OG/HTML extraction, sitemap + HTML-crawl
+discovery, SQLite checkpointing, and robots.txt + adaptive-throttle
+politeness. Parity's stated goal (Layer 4 of the product plan) is "real
+data-source connectors (web crawlers/APIs) feeding competitors, products, and
+prices" — remaining work (Playwright fallback, Woo/BigCommerce adapters,
+identity dedupe) is tracked in "Current state" below.
 
 This section is the working plan for evolving the crawler into a generic
 e-com crawler. It records the design analysis, the build order, and the
@@ -581,7 +606,8 @@ the TanStack app fetches data from the Express API and authenticates with JWT.
   the backend's `message`, and redirects to `/auth/login` on 401.
 - **`src/lib/api.ts`** — REST getters for `GET /api/data/*` (workspace,
   analytics bundle, competitors, matched products, pricing, catalogue,
-  insights, alerts, reports). Shapes match the backend `dataController`.
+  insights, alerts, reports, crawl-results). Shapes match the backend
+  `dataController`.
 - **`src/lib/auth.ts`** — `signIn` → `POST /api/auth/login`; JWT in
   `parity.token`, profile in `parity.session`; `getUser()`/guard unchanged.
 - **`src/lib/crawl.ts`** — `startCrawl` (POST → `{ jobId }`, runs the crawl
@@ -604,11 +630,18 @@ the TanStack app fetches data from the Express API and authenticates with JWT.
   lazy 30s interval started from a handler kicks off due crawls as normal
   background jobs. Schedules reset on server restart (no persistence).
 - **Hooks** — `useWorkspace`/`useAnalytics` and `useData.ts` (thin
-  `useApiQuery` wrapper) all return `{ data, isLoading, isError }`; every
-  page guards `isError` → `ErrorState` before `LoadingState`.
+  `useApiQuery` wrapper, plus `useSavedCrawls` which polls every 30s) all
+  return `{ data, isLoading, isError }`; every page guards
+  `isError` → `ErrorState` → `LoadingState`, and renders `NoRealDataState`
+  when the payload is empty.
 - **Backend** — `backend/` Express app: JWT auth (`/api/auth`), user CRUD
   (`/api/users`), dataset endpoints (`/api/data`), demo-user seed on boot.
-  Data source: `backend/data/demo-data.json`.
+  Data source: the real `CrawlResult` collection (demo dataset deleted;
+  `dataController.js` derives competitors/products/stats from saved crawls
+  and returns honest empty states for unconnected features).
+  `POST/GET /api/data/crawl-results` persists/reads saved crawls
+  (`crawlController.js`): snapshot history (cap 20/origin) when
+  `storeSnapshots`, else replace-latest.
 - Verification: `tsc` clean · `eslint src` 0 errors (4 pre-existing shadcn
   `react-refresh` warnings) · `build` clean · backend boots and serves
   `/health`, `/api/data/*`, and `/api/auth/login` (curl-verified).

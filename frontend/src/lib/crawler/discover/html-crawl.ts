@@ -33,6 +33,8 @@ export interface HtmlCrawlOptions {
   maxPages?: number;
   /** Max BFS depth from the start URL. */
   maxDepth?: number;
+  /** Called after each page is visited (live progress during the BFS). */
+  onPageVisited?: (pagesVisited: number, productsFound: number) => void;
 }
 
 export interface HtmlCrawlResult {
@@ -93,6 +95,8 @@ export async function discoverByHtmlCrawl(
         queue.push({ url: abs, depth: depth + 1 });
       }
     }
+    // Live progress tick after this page is fully parsed.
+    crawlOptions.onPageVisited?.(pagesVisited, products.size);
   }
 
   if (queue.length > 0) truncated = true;

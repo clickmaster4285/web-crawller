@@ -30,6 +30,37 @@ const failureSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const discoveryCollectionSchema = new mongoose.Schema(
+  {
+    collection: String,
+    handles: Number,
+    error: String
+  },
+  { _id: false, suppressReservedKeysWarning: true }
+);
+
+const discoverySchema = new mongoose.Schema(
+  {
+    collections: { type: [discoveryCollectionSchema], default: [] },
+    sitemap: {
+      urls: { type: Number, default: 0 },
+      lastmod: { type: Number, default: 0 },
+      error: String
+    },
+    htmlCrawl: {
+      urls: { type: Number, default: 0 },
+      pagesVisited: { type: Number, default: 0 },
+      truncated: { type: Boolean, default: false },
+      error: String
+    },
+    platform: {
+      platform: { type: String, default: 'Unknown' },
+      signal: { type: String, default: '' }
+    }
+  },
+  { _id: false }
+);
+
 const crawlResultSchema = new mongoose.Schema(
   {
     origin: {
@@ -55,6 +86,10 @@ const crawlResultSchema = new mongoose.Schema(
     failures: {
       type: [failureSchema],
       default: []
+    },
+    discovery: {
+      type: discoverySchema,
+      default: null
     }
   },
   { timestamps: true }

@@ -12,7 +12,11 @@ import {
 import { PageHeader } from "@/components/layout/app-shell";
 import { SectionTitle, StatCard } from "@/components/cards/stat-card";
 import { Badge } from "@/components/ui/badge";
-import { LoadingState, ErrorState } from "@/components/common/states";
+import {
+  LoadingState,
+  ErrorState,
+  NoRealDataState,
+} from "@/components/common/states";
 import { usePricing } from "@/hooks/useData";
 import { gbp } from "@/utils/formatCurrency";
 import { cn } from "@/lib/utils";
@@ -41,6 +45,14 @@ function PricingPage() {
   const { data, isLoading, isError } = usePricing();
   if (isError) return <ErrorState />;
   if (isLoading || !data) return <LoadingState />;
+  if (data.competitors.length === 0) {
+    return (
+      <NoRealDataState
+        title="No pricing data yet"
+        description="Prices come from real crawls. Run a crawl on the Sources page to see competitor pricing here; matched-basket trends and price history need the matching layer and time-series snapshots."
+      />
+    );
+  }
 
   const { competitors, matchedProducts, priceHistory } = data;
   const s = data.stats;

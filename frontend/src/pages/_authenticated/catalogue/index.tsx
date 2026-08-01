@@ -12,7 +12,11 @@ import {
 import { PageHeader } from "@/components/layout/app-shell";
 import { SectionTitle, StatCard } from "@/components/cards/stat-card";
 import { Progress } from "@/components/ui/progress";
-import { LoadingState, ErrorState } from "@/components/common/states";
+import {
+  LoadingState,
+  ErrorState,
+  NoRealDataState,
+} from "@/components/common/states";
 import { useCatalogue } from "@/hooks/useData";
 import { cn } from "@/lib/utils";
 
@@ -40,6 +44,14 @@ function CataloguePage() {
   const { data, isLoading, isError } = useCatalogue();
   if (isError) return <ErrorState />;
   if (isLoading || !data) return <LoadingState />;
+  if (data.stats.competitorsTracked === 0) {
+    return (
+      <NoRealDataState
+        title="No catalogue data yet"
+        description="Catalogue gaps need your own catalogue plus the matching layer to compare against crawled competitor products. Run a crawl on the Sources page first — gaps will appear here once matching is connected."
+      />
+    );
+  }
 
   const { categoryGaps, brandGaps } = data;
   const s = data.stats;

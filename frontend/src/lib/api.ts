@@ -96,6 +96,19 @@ export interface SavedCrawl {
   };
   products: SavedCrawlProduct[];
   failures: SavedCrawlFailure[];
+  /** Per-strategy discovery diagnostics captured during the run. */
+  discovery?: {
+    collections: Array<{ collection: string; handles: number; error?: string }>;
+    sitemap: { urls: number; lastmod: number; error?: string };
+    htmlCrawl: {
+      urls: number;
+      pagesVisited: number;
+      truncated: boolean;
+      error?: string;
+    };
+    /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
+    platform?: { platform: string; signal: string };
+  };
   createdAt: string;
   updatedAt: string;
 }

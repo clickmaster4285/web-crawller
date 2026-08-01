@@ -97,7 +97,13 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
 
   let discovered;
   try {
-    discovered = await discoverProducts(config, opts);
+    // Pass the robots.txt body politeness already fetched so platform
+    // detection doesn't refetch it.
+    discovered = await discoverProducts(
+      config,
+      opts,
+      respectRobots ? politeness.robotsBody : null,
+    );
   } catch (error) {
     store?.close();
     return emptyResult(config, startedAt, [
@@ -196,6 +202,9 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       durationMs: Date.now() - startedAt,
     },
     products,
+    // Surface what each discovery strategy contributed (sitemap / html-crawl /
+    // collections) so the UI can show real numbers instead of placeholders.
+    discovery: discovered.diagnostics,
   };
 }
 
@@ -279,5 +288,11 @@ function emptyResult(
       durationMs: Date.now() - startedAt,
     },
     products: [],
+    discovery: {
+      collections: [],
+      sitemap: { urls: 0, lastmod: 0 },
+      htmlCrawl: { urls: 0, pagesVisited: 0, truncated: false },
+      platform: { platform: "Unknown", signal: "Crawl did not run" },
+    },
   };
 }

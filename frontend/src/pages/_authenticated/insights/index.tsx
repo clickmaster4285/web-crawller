@@ -4,7 +4,11 @@ import { Sparkles } from "lucide-react";
 import { PageHeader } from "@/components/layout/app-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { LoadingState, ErrorState } from "@/components/common/states";
+import {
+  LoadingState,
+  ErrorState,
+  NoRealDataState,
+} from "@/components/common/states";
 import { useInsights } from "@/hooks/useData";
 
 export const Route = createFileRoute("/_authenticated/insights/")({
@@ -31,6 +35,14 @@ function InsightsPage() {
   const { data: insights, isLoading, isError } = useInsights();
   if (isError) return <ErrorState />;
   if (isLoading || !insights) return <LoadingState />;
+  if (insights.length === 0) {
+    return (
+      <NoRealDataState
+        title="No insights generated yet"
+        description="Insights come from an analysis engine that compares crawl snapshots across competitors and history. That engine isn't built yet — the data it would analyse is on the Sources page."
+      />
+    );
+  }
 
   return (
     <div>

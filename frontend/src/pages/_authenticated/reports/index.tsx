@@ -12,7 +12,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { LoadingState, ErrorState } from "@/components/common/states";
+import {
+  LoadingState,
+  ErrorState,
+  NoRealDataState,
+} from "@/components/common/states";
 import { useReports } from "@/hooks/useData";
 
 export const Route = createFileRoute("/_authenticated/reports/")({
@@ -48,6 +52,14 @@ function ReportsPage() {
   const { data: reports, isLoading, isError } = useReports();
   if (isError) return <ErrorState />;
   if (isLoading || !reports) return <LoadingState />;
+  if (reports.length === 0) {
+    return (
+      <NoRealDataState
+        title="No reports yet"
+        description="Reports are compiled from real crawl snapshots by a report generator that isn't built yet. The raw data those reports would use is already being captured on the Sources page."
+      />
+    );
+  }
 
   return (
     <div>

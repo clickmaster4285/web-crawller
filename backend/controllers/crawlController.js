@@ -23,6 +23,7 @@ const saveCrawlResult = async (req, res) => {
       stats,
       products,
       failures,
+      discovery,
       storeSnapshots
     } = req.body || {};
     if (!origin) {
@@ -36,19 +37,32 @@ const saveCrawlResult = async (req, res) => {
       collections: Array.isArray(collections) ? collections : [],
       stats: stats || {},
       products: Array.isArray(products) ? products : [],
-      failures: Array.isArray(failures) ? failures : []
+      failures: Array.isArray(failures) ? failures : [],
+      discovery: discovery || null
     };
 
     let doc;
     if (storeSnapshots === false) {
       // Replace mode — keep only the latest snapshot per origin (removes any
-      // earlier snapshots left by history mode).
-      doc = await CrawlResult.findOneAndUpdate({ origin }, payload, {
-        upsert: true,
-        new: true,
-        runValidators: true
-      });
-      await CrawlResult.deleteMany({ origin, _id: { $ne: doc._id } });
+      // earlier snapshots left by history mode). The metadata check guards a
+      // rare race: without a unique index, two concurrent replace-upserts for
+      // the same origin can both *insert*; running deleteMany unconditionally
+      // would then let each delete the other's doc (leaving zero). Only clean
+      // up when this call actually updated an existing doc.
+      const result = await CrawlResult.findOneAndUpdate(
+        { origin },
+        payload,
+        {
+          upsert: true,
+          new: true,
+          runValidators: true,
+          includeResultMetadata: true
+        }
+      );
+      doc = result.value;
+      if (result.lastErrorObject?.updatedExisting) {
+        await CrawlResult.deleteMany({ origin, _id: { $ne: doc._id } });
+      }
     } else {
       // History mode — append a snapshot, then cap history per origin.
       doc = await CrawlResult.create(payload);

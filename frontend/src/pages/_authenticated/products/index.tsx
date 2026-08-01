@@ -16,7 +16,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { LoadingState, ErrorState } from "@/components/common/states";
+import {
+  LoadingState,
+  ErrorState,
+  NoRealDataState,
+} from "@/components/common/states";
 import { useMatchedProducts } from "@/hooks/useData";
 import { gbp } from "@/utils/formatCurrency";
 import { cn } from "@/lib/utils";
@@ -67,6 +71,14 @@ function ProductsPage() {
 
   if (isError) return <ErrorState />;
   if (isLoading || !matchedProducts) return <LoadingState />;
+  if (matchedProducts.length === 0) {
+    return (
+      <NoRealDataState
+        title="No matched products yet"
+        description="Matched products need the matching layer (GTIN > SKU > slug > fuzzy) plus your own catalogue. Crawled competitor products already exist on the Sources page and will flow here once matching is connected."
+      />
+    );
+  }
 
   return (
     <div>

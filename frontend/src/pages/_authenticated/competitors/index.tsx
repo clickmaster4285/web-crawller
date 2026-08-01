@@ -12,7 +12,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { LoadingState, ErrorState } from "@/components/common/states";
+import {
+  LoadingState,
+  ErrorState,
+  NoRealDataState,
+} from "@/components/common/states";
 import { useCompetitors } from "@/hooks/useData";
 
 export const Route = createFileRoute("/_authenticated/competitors/")({
@@ -45,6 +49,14 @@ function CompetitorsPage() {
   const { data: competitors, isLoading, isError } = useCompetitors();
   if (isError) return <ErrorState />;
   if (isLoading || !competitors) return <LoadingState />;
+  if (competitors.length === 0) {
+    return (
+      <NoRealDataState
+        title="No competitors crawled yet"
+        description="Competitors are listed from real saved crawls — one per crawled origin. Run a crawl on the Sources page and the store will appear here automatically."
+      />
+    );
+  }
 
   return (
     <div>

@@ -15,9 +15,9 @@ import { ArrowUpRight } from "lucide-react";
 import { PageHeader } from "@/components/layout/app-shell";
 import { SectionTitle, StatCard } from "@/components/cards/stat-card";
 import {
-  EmptyState,
   ErrorState,
   LoadingState,
+  NoRealDataState,
 } from "@/components/common/states";
 import { Button } from "@/components/ui/button";
 import { useAnalytics } from "@/hooks/useWorkspace";
@@ -103,9 +103,9 @@ function DashboardPage() {
     return (
       <div>
         {header}
-        <EmptyState
+        <NoRealDataState
           title="No crawl data yet"
-          description="Add a competitor website and run your first crawl. Prices, availability and catalogue gaps will appear here as soon as products are captured."
+          description="Run your first crawl on the Sources page — prices, availability and catalogue gaps will appear here as soon as real competitor products are captured."
         />
       </div>
     );

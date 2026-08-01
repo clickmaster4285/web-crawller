@@ -58,7 +58,22 @@ export function useReports() {
   return useApiQuery("reports", () => getReportsData());
 }
 
-/** Persisted crawl results (one per origin) from GET /api/data/crawl-results. */
+/**
+ * Persisted crawl results (one per origin) from GET /api/data/crawl-results.
+ *
+ * Polls every 30s so results saved by *scheduled* crawls (which run as
+ * internal jobs the page never polls) still show up without a manual
+ * reload; on-demand crawls also invalidate this query on persist.
+ */
 export function useSavedCrawls() {
-  return useApiQuery("saved-crawls", () => getCrawlResultsData());
+  const query = useQuery({
+    queryKey: ["saved-crawls"],
+    queryFn: () => getCrawlResultsData(),
+    refetchInterval: 30_000,
+  });
+  return {
+    data: query.data,
+    isLoading: query.isLoading,
+    isError: query.isError,
+  };
 }

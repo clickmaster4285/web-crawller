@@ -73,6 +73,35 @@ export interface CrawlRunResult {
     available: boolean;
     url: string;
   }>;
+  /** What each discovery strategy contributed, for the Discovery engine card. */
+  discovery: {
+    collections: Array<{ collection: string; handles: number; error?: string }>;
+    sitemap: { urls: number; lastmod: number; error?: string };
+    htmlCrawl: {
+      urls: number;
+      pagesVisited: number;
+      truncated: boolean;
+      error?: string;
+    };
+    /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
+    platform: { platform: string; signal: string };
+  };
+}
+
+/**
+ * Live discovery progress while a crawl's discovery phase is running,
+ * surfaced through `getCrawlProgress` so the UI can render real numbers
+ * (sitemap URLs found, pages visited) instead of a bare spinner.
+ */
+export interface CrawlJobDiscovery {
+  phase: "collections" | "sitemap" | "htmlCrawl" | "done";
+  urlsFound: number;
+  sitemapUrls: number;
+  htmlUrls: number;
+  htmlPagesVisited: number;
+  collectionHandles: number;
+  /** Detected store platform (set once detection runs, usually at "done"). */
+  platform?: string;
 }
 
 /** Crawl parameters the job was started with (captured at start). */
@@ -127,6 +156,14 @@ export interface CrawlJob {
   /** Products fetched/reused so far — progress through `total`. */
   processed: number;
   startedAt: number;
+  /**
+   * When the fetch phase began (first progress tick with a known URL count),
+   * so the UI can exclude the discovery phase from the ETA and show the two
+   * phases separately. Null while still discovering.
+   */
+  fetchStartedAt: number | null;
+  /** Live discovery counts while the discovery phase runs (null after). */
+  discovery: CrawlJobDiscovery | null;
   finishedAt: number | null;
   /** Present when status === "done". */
   result?: CrawlRunResult;
@@ -177,8 +214,11 @@ function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
   const maxConcurrencyPerHost =
     input.maxConcurrencyPerHost == null
       ? undefined
-      : Math.min(12, Math.max(1, Math.round(input.maxConcurrencyPerHost)));  const maxPages =
-    input.maxPages == null ? undefined : Math.max(1, Math.round(input.maxPages));
+      : Math.min(12, Math.max(1, Math.round(input.maxConcurrencyPerHost)));
+  const maxPages =
+    input.maxPages == null
+      ? undefined
+      : Math.max(1, Math.round(input.maxPages));
   return {
     ...input,
     origin,
@@ -205,6 +245,8 @@ export const startCrawl = createServerFn({ method: "POST" })
       total: 0,
       processed: 0,
       startedAt: Date.now(),
+      fetchStartedAt: null,
+      discovery: null,
       finishedAt: null,
       params: {
         delayMs: data.delayMs ?? 1000,
@@ -245,7 +287,9 @@ function validateScheduleInput(input: ScheduleCrawlInput): ScheduleCrawlInput {
       ? undefined
       : Math.min(12, Math.max(1, Math.round(input.maxConcurrencyPerHost)));
   const maxPages =
-    input.maxPages == null ? undefined : Math.max(1, Math.round(input.maxPages));
+    input.maxPages == null
+      ? undefined
+      : Math.max(1, Math.round(input.maxPages));
   return {
     origin,
     collections: input.collections,
@@ -328,21 +372,30 @@ async function runScheduledCrawl(
     total: 0,
     processed: 0,
     startedAt: Date.now(),
+    fetchStartedAt: null,
+    discovery: null,
     finishedAt: null,
     params: sched.params,
   });
-  await runJob(jobId, {
-    origin: sched.origin,
-    collections: sched.collections,
-    delayMs: sched.params.delayMs,
-    maxConcurrencyPerHost: sched.params.maxConcurrencyPerHost,
-    maxPages: sched.params.maxPages ?? undefined,
-    respectRobotsTxt: sched.params.respectRobotsTxt,
-    productOnly: sched.params.productOnly,
-    storeSnapshots: sched.params.storeSnapshots,
-  });
-  const current = schedules.get(origin);
-  if (current) current.running = false;
+  try {
+    await runJob(jobId, {
+      origin: sched.origin,
+      collections: sched.collections,
+      delayMs: sched.params.delayMs,
+      maxConcurrencyPerHost: sched.params.maxConcurrencyPerHost,
+      maxPages: sched.params.maxPages ?? undefined,
+      respectRobotsTxt: sched.params.respectRobotsTxt,
+      productOnly: sched.params.productOnly,
+      storeSnapshots: sched.params.storeSnapshots,
+    });
+  } finally {
+    // Clear the running flag in a finally so an unexpected throw (e.g. a
+    // transport failure) can never wedge the schedule. Only clear it if the
+    // stored schedule is still this one — a cancelled-then-re-added schedule
+    // for the same origin mid-run must not have its flag cleared by the
+    // stale run.
+    if (schedules.get(origin) === sched) sched.running = false;
+  }
 }
 
 /**
@@ -387,8 +440,21 @@ async function runJob(jobId: string, input: CrawlRunInput): Promise<void> {
       onProgress: (processed, total) => {
         const current = jobs.get(jobId);
         if (current) {
+          // First tick with a known URL count marks the end of discovery:
+          // from here the ETA can be computed on fetch throughput alone.
+          if (current.fetchStartedAt === null && total > 0) {
+            current.fetchStartedAt = Date.now();
+          }
           current.processed = processed;
           current.total = total;
+        }
+      },
+      // `onDiscoveryProgress` fires throughout the discovery phase so the
+      // progress panel can show live sitemap/page counts, not a spinner.
+      onDiscoveryProgress: (progress) => {
+        const current = jobs.get(jobId);
+        if (current) {
+          current.discovery = progress;
         }
       },
     });
@@ -410,6 +476,7 @@ async function runJob(jobId: string, input: CrawlRunInput): Promise<void> {
           available: p.available,
           url: p.url,
         })),
+        discovery: result.discovery,
       };
       // Persist to MongoDB BEFORE flipping to "done" so the client's final
       // poll sees an accurate `persisted` flag. Best-effort: a down backend
@@ -428,6 +495,7 @@ async function runJob(jobId: string, input: CrawlRunInput): Promise<void> {
             stats: sanitized.stats,
             products: sanitized.products,
             failures: sanitized.failures,
+            discovery: sanitized.discovery,
             storeSnapshots: input.storeSnapshots,
           }),
         });
