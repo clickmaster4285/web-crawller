@@ -1,0 +1,562 @@
+<!-- LOVABLE:END -->
+
+# Project context
+
+## What this is
+
+**Parity** — a competitive intelligence SaaS dashboard. It lets users track
+competitors, their products, pricing, product catalogues, market insights,
+alerts, reports, and data sources.
+
+**Important:** This repo was migrated *off* Lovable and *off* Supabase. It is
+now a plain TanStack Start app running entirely on local mock data. There is
+**no Supabase**, **no Lovable runtime code**, and **no real backend** — do not
+reintroduce them. All auth is a localStorage-backed demo.
+
+## Tech stack
+
+- **Framework:** TanStack Start (SSR-first) — `@tanstack/react-start` ^1.168
+- **Routing:** TanStack Router (file-based, generated route tree) — `@tanstack/react-router` ^1.170
+- **UI:** React 19.2, Tailwind CSS v4 (`@tailwindcss/vite`), shadcn-style Radix components
+- **Build tool:** Vite 8 (dev = `vite dev`, prod build = `vite build` → Nitro SSR server)
+- **Data fetching:** TanStack Query 5
+- **Forms:** react-hook-form + zod
+- **Charts:** recharts
+
+## Commands
+
+| Command               | Purpose                                                                                                                                           |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`       | Start dev server on**port 8080**, exposed on the network (`host: true`)                                                                   |
+| `npm run build`     | Production build: client + Nitro SSR server →`dist/client`, `dist/server`                                                                    |
+| `npm run build:dev` | Build with development mode                                                                                                                       |
+| `npm run preview`   | Preview the production build                                                                                                                      |
+| `npm run lint`      | ESLint (run this after every change; currently 0 errors, 4 pre-existing`react-refresh/only-export-components` warnings in shadcn UI components) |
+| `npm run format`    | Prettier write                                                                                                                                    |
+| `npx tsc --noEmit`  | Typecheck (strict mode)                                                                                                                           |
+
+Verification loop for any change: `npx tsc --noEmit` → `npm run lint` → `npm run build`.
+
+## Source layout (`src/`)
+
+```
+src/
+├── pages/            # THE ROUTES DIRECTORY — every file/folder maps to a URL (see below)
+│   ├── __root.tsx            # root layout + 404 + error boundary (the TanStack Start "App.tsx")
+│   ├── sitemap[.]xml.ts      # /sitemap.xml server handler
+│   ├── auth/                 # public auth pages
+│   │   └── login.tsx         # /auth/login
+│   └── _authenticated/       # authenticated group (guarded shell)
+│       ├── route.tsx         # auth guard + DashboardLayout wrapper
+│       ├── index.tsx         # /           → Overview
+│       ├── competitors/      # /competitors
+│       ├── products/         # /products
+│       ├── pricing/          # /pricing
+│       ├── catalogue/        # /catalogue
+│       ├── insights/         # /insights
+│       ├── alerts/           # /alerts
+│       ├── reports/          # /reports
+│       └── sources/          # /sources
+├── components/
+│   ├── ui/                   # shadcn primitives (Radix + CVA + tailwind-merge)
+│   ├── common/               # shared app components
+│   └── layout/               # layout components
+├── constants/
+│   ├── routes.ts             # central ROUTES map (incl. ROUTES.login)
+│   └── sidebar.ts
+├── data/
+│   └── mock/index.ts         # ALL demo data: workspace, competitors, matchedProducts,
+│                             #   priceHistory, insights, alerts, reports
+├── hooks/
+│   ├── useWorkspace.ts       # mock useWorkspace + useAnalytics (feeds dashboard/pricing/etc.)
+│   ├── useData.ts            # per-domain useApiQuery hooks (competitors, products, …)
+│   └── use-mobile.tsx
+├── layouts/
+│   ├── AuthLayout.tsx
+│   └── DashboardLayout.tsx
+├── lib/
+│   ├── mock-auth.ts          # mock session backend (localStorage key "parity.session")
+│   ├── error-page.ts         # SSR error HTML
+│   ├── error-capture.ts      # SSR error capture used by server.ts
+│   └── utils.ts
+├── types/                    # common.ts, competitor.ts, product.ts, report.ts
+├── utils/
+│   ├── formatCurrency.ts
+│   └── index.ts
+├── styles.css
+├── router.tsx                # getRouter() factory (routeTree + QueryClient) — REQUIRED by Start
+├── routeTree.gen.ts          # AUTO-GENERATED from src/pages — never hand-edit
+├── server.ts                 # Nitro/edge server entry (prod build only, not used by dev)
+├── start.ts                  # createStart() — server middleware (error page + CSRF)
+```
+
+Path alias: `@/*` → `./src/*` (wired via `resolve.tsconfigPaths` in vite.config.ts).
+
+## Entry-point conventions (TanStack Start — no `app.tsx`/`main.tsx`)
+
+TanStack Start is SSR-first; the classic Vite-SPA entry files do **not** exist
+here and nothing is missing:
+
+- **No `src/main.tsx`** — the client entry is injected automatically by the
+  TanStack Start plugin (`@tanstack/react-start/client-entry`).
+- **No `src/App.tsx`** — the app root layout is `src/pages/__root.tsx`.
+- **`src/router.tsx`** — REQUIRED by convention. Exports `getRouter()`; the
+  Start plugin and `start.ts` pick it up from this exact path.
+- **`src/start.ts`** — REQUIRED entry for `createStart()`. Holds server
+  middleware: custom error page + `createCsrfMiddleware` (protects server
+  functions from cross-site requests). If deleted, Start auto-installs a bare
+  default and you lose error handling + CSRF.
+- **`src/server.ts`** — OPTIONAL (but used). The custom server entry for the
+  Nitro production build (`npm run build` → `dist/server/server.js`). NOT used
+  by `vite dev`. Keep it if you run/deploy the production server.
+- **`src/routeTree.gen.ts`** — AUTO-GENERATED by the router plugin from
+  `src/pages/` on every file change. Never edit by hand.
+
+## Routing gotchas (do not "fix" these)
+
+1. **Routes directory config:** `vite.config.ts` uses
+   `tanstackStart({ router: { routesDirectory: "pages", generatedRouteTree: "routeTree.gen.ts" } })`.
+   These paths are **relative to `src/`** — the plugin resolves them against
+   `srcDirectory`. Passing absolute/`./src/pages` paths breaks the build with
+   `ENOENT scandir <root>/src/routes`. Only `"pages"` / `"routeTree.gen.ts"`.
+2. **`/sitemap.xml` route:** the file **must** be named `sitemap[.]xml.ts`
+   (bracketed dot). This router version's `pathParamsAllowedCharacters` excludes
+   `.`, so a plain `sitemap.xml.ts` becomes `/sitemap/xml`. The brackets escape
+   the dot. (The file is a server handler — it has no UI component export.)
+3. **Index route files:** overview is `src/pages/_authenticated/index.tsx`, not
+   `src/pages/index.tsx`.
+4. **Page titles:** every dashboard page must set its own real title (e.g.
+   `export const Route = createFileRoute('/competitors/')()` with a
+   `document.title = ...` — do not leave placeholder names like
+   `CompetitorsPage`/`AlertsPage` as the title).
+
+## Auth (mock — no backend)
+
+- **`src/lib/mock-auth.ts`** — `signIn`, `signOut`, `getUser`, `MockUser`,
+  plus `DEMO_CREDENTIALS` shown on the login page. Session is stored in
+  `localStorage` under the key **`parity.session`**.
+  Any email/password is accepted (login is intentionally loose).
+- **Guard:** `src/pages/_authenticated/route.tsx` redirects to `/auth/login`
+  when there's no session. Authenticated pages use `ssr: false` (client-side
+  guard), so the SSR server still returns 200 for `/` — the redirect happens
+  on the client after hydration.
+
+## Dev server on the network
+
+`vite.config.ts` sets `server: { host: true, port: 8080, strictPort: true }`.
+With `npm run dev`, Vite prints `Local` and `Network` URLs
+(e.g. `http://192.168.x.x:8080/`). The machine's LAN IP is the network URL
+other devices use. If you see `Port 8080 is already in use`, kill the stale
+`node.exe` process holding it (check with `netstat -ano | findstr :8080`)
+before starting again.
+
+## What we've built so far (current state)
+
+The app is a **working frontend prototype backed by a server-function API
+layer**. Every route renders a real page; data is served by TanStack Start
+server functions in `src/lib/api.ts` (which currently return the demo dataset
+from `src/data/mock/index.ts` server-side) and fetched via TanStack Query
+hooks — no page imports mock data directly anymore. There are no placeholder
+shells left:
+
+| Page             | Route            | What it shows today                                                                                |
+| ---------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
+| Overview         | `/`            | Stat cards + charts (price movements, catalogue growth) via`useAnalytics()`; empty/error states wired |
+| Competitors      | `/competitors` | Competitor list via`useCompetitors()`                                                             |
+| Matched products | `/products`    | Searchable/filterable table via`useMatchedProducts()` (price gap, confidence, stock, delivery)  |
+| Pricing          | `/pricing`     | Price comparison + history charts via`usePricing()`                                              |
+| Catalogue gaps   | `/catalogue`   | Category/brand gap tables via`useCatalogue()`                                                   |
+| AI insights      | `/insights`    | Insight cards via`useInsights()`                                                                 |
+| Alerts           | `/alerts`      | Alert feed via`useAlerts()`                                                                      |
+| Reports          | `/reports`     | Report list via`useReports()`                                                                    |
+| Data sources     | `/sources`     | Workspace config via`useWorkspace()` + **Live crawl** panel that runs the real crawler on the server |
+
+Existing shared primitives: `PageHeader`/`DashboardLayout`/`Sidebar`
+(`components/layout/`), `StatCard`/`SectionTitle` (`components/cards/`),
+`EmptyState`/`LoadingState`/`ErrorState` (`components/common/`), and the shadcn
+set in `components/ui/`.
+
+## What's next (the plan)
+
+Goal — take Parity from a static mock prototype to a **real competitive
+intelligence product**. Work proceeds in layers; each layer keeps the app green
+(`tsc` → `lint` → `build`).
+
+### Layer 1 — Page polish & copy
+
+- Harden each page's **static content**: real section copy, descriptions,
+  help/empty-state text, consistent typography, responsive behavior.
+- Unify page headers, breadcrumbs, and table/toolbar patterns across pages.
+- Make titles/meta consistent (see "Page titles" gotcha).
+
+### Layer 2 — Product functionality on mock data
+
+- Add page-level interactions: filtering, sorting, pagination, drill-downs
+  (e.g. product → price history, competitor → profile).
+- Add global search + command palette over competitors/products/insights.
+- Add create/edit flows (e.g. add a competitor, subscribe to a data source,
+  configure an alert) using `react-hook-form` + `zod` (already installed).
+- Move interactive state to `useWorkspace`/`useAnalytics` so pages stop reading
+  `src/data/mock` directly.
+
+### Layer 3 — Real backend (swap mock → live) — **in progress**
+
+- **API layer in place** — `src/lib/api.ts` defines TanStack Start server
+  functions (`createServerFn`) for workspace, analytics, competitors,
+  products, pricing, catalogue, insights, alerts, reports, plus a POST
+  `runCrawlNow` that invokes the real crawler server-side (dynamically
+  imported; validates the origin is an http(s) URL — SSRF guard).
+- **Hooks migrated** — `useWorkspace`/`useAnalytics` and the new
+  `src/hooks/useData.ts` (per-domain `useApiQuery` helper) fetch via TanStack
+  Query and expose `{ data, isLoading, isError }`; all 9 dashboard pages
+  render `LoadingState`/`ErrorState`/`EmptyState` accordingly. No page
+  imports `@/data/mock` directly anymore.
+- **Sources page** now has a **Live crawl** panel: origin + collections
+  inputs, a Run-crawl button (`useMutation`), stat cards (discovered /
+  fetched / skipped-unchanged / failed / duration), failure list, and a
+  product preview (bare "store price", no currency assumption).
+- Still TODO: replace `mock-auth` with real auth (keep demo mode behind a
+  flag), add persistence + migration for workspace/competitors/products,
+  and swap the API layer's mock dataset for real crawl output.
+
+### Layer 4 — Data ingestion & alerts
+
+- Real data-source connectors (web crawlers/APIs) feeding competitors,
+  products, and prices.
+- Alert engine: detect price drops, catalogue gaps, stock changes → alert feed.
+- Insight generation from collected data.
+
+### Layer 5 — Productionize
+
+- Error handling, loading/skeleton states, and analytics instrumentation.
+- Automated tests (component + e2e).
+- Deployment: build via Nitro (`dist/server`), configure host, CI pipeline.
+
+## Decision rules / constraints
+
+- **Never reintroduce Supabase or Lovable runtime code.** Mock-first, then a
+  clean API layer on top — do not bolt on a third-party BaaS.
+- **Keep the demo runnable** (`npm run dev` → network URL) at every step; the
+  product is currently shown to stakeholders from mock data.
+- Follow the verification loop after every change and keep the routes/pages
+  structure stable (file-based routing drives URLs).
+
+## Recurring dev notes
+
+- Prettier config includes `"endOfLine": "auto"` — do not strip it; without it
+  CRLF line endings cause lint failures.
+- `npm run build` produces both `dist/client` and `dist/server` — the SSR
+  chunks for `router.tsx`, `start.ts`, and `server.ts` are expected in the
+  server bundle.
+- ESLint: the remaining `react-refresh/only-export-components` warnings come
+  from shadcn `components/ui/*` and are pre-existing — do not chase them.
+- This repo is connected to Lovable: never rewrite published git history
+  (see the banner at the top of this file).
+
+---
+
+# Crawler — generic e-commerce crawler
+
+The current crawler is **Shopify-only**. It hardcodes the
+`/products/{handle}.json` endpoint and the Shopify product envelope. That works
+for the OB Designs demo, but Parity's stated goal (Layer 4 of the product
+plan) is "real data-source connectors (web crawlers/APIs) feeding competitors,
+products, and prices" — which means the crawler must handle **any
+e-commerce storefront**, not just Shopify.
+
+This section is the working plan for evolving the crawler into a generic
+e-com crawler. It records the design analysis, the build order, and the
+current state of the work so anyone (human or agent) can pick it up.
+
+## What we have today (state at start of plan)
+
+- `src/lib/crawler/http.ts` — `fetchWithRetry`, `fetchText`, `fetchJson`,
+  `parseRetryAfter`, `httpOptions`. Global `fetch`, configurable delay + retries
+  + UA. Exponential backoff honoring `Retry-After`.
+- `src/lib/crawler/discover.ts` — `fetchSitemapUrls` (sitemap + sitemapindex,
+  depth ≤ 3), `extractLocs`, `discoverCollectionHandles` (Shopify collection
+  page pagination, extracts `/products/{handle}`). *(Removed in a later
+  cleanup — the refactor moved this into `discover/sitemap.ts` and
+  `adapters/shopify-discover.ts`.)*
+- `src/lib/crawler/parse.ts` — `parseShopifyProduct`, `RawProduct`,
+  `RawVariant`. Only knows the Shopify `{ product: { ... } }` envelope.
+  *(Removed in a later cleanup — lives in `adapters/shopify-parse.ts`.)*
+- `src/lib/crawler/normalize.ts` — `toMatchedProduct`, `stockStatus`. Bridge
+  from `CrawledProduct` to app `MatchedProduct`. *(Removed in a later
+  cleanup — the CrawledProduct-based engine never imported it; the API
+  layer maps between the two shapes.)*
+- `src/lib/crawler/types.ts` — `CrawledProduct`, `CrawledVariant`,
+  `CrawlConfig`, `CrawlStats`, `CrawlResult`, `CrawlFailure`.
+- `src/lib/crawler/index.ts` — `runCrawl` (collection-scoped) and
+  `runSitemapCrawl` (full catalogue via sitemap). Sequential per-product
+  fetches, no persistence, no dedupe, no concurrency control.
+- `scripts/crawl-obdesigns.ts` — thin wrapper that calls `runCrawl` for the
+  OB Designs store and writes JSON.
+
+**Strengths to preserve:** dependency-free, runs under plain `node` (Node
+≥22.6 type-stripping), vendor-neutral `CrawledProduct` shape, polite
+defaults, idempotent handle dedup within a run.
+
+**Gaps (why we can't ship this as-is):** Shopify-only, no fallback for
+non-Shopify stores, no platform detection, no HTML parsing, no
+robots.txt/adaptive politeness, no concurrency, no persistence, no
+cross-store identity, no browser fallback for JS-rendered sites.
+
+## Design analysis
+
+### Tiered extraction model
+
+Real-world e-com stores need a fallback chain. No single strategy covers all
+of them. The model:
+
+| Tier | Source | Coverage | Cost |
+|------|--------|----------|------|
+| 1. Platform native API | `/products/{handle}.json` (Shopify), `/wp-json/wc/v3/products` (Woo), `/api/storefront/catalog/products` (BigCommerce) | High fidelity, structured | Per-platform quirks |
+| 2. Sitemap + structured data | `/sitemap.xml` → product pages → parse JSON-LD `Product` schema in `<script type="application/ld+json">` | ~40–60% of all stores | Free, reliable |
+| 3. HTML scraping | Cheerio + heuristic product-page detector (price near title, add-to-cart button) | ~70% of remaining | Brittle, needs tuning |
+| 4. Headless browser | Playwright/Chromium for JS-rendered pages, infinite scroll, anti-bot JS | Last ~10–15% | Heavy, slow, can be blocked |
+| 5. Third-party (paid) | Rainforest API, Oxylabs, Diffbot, Apify stores | Any URL | $$ per request |
+
+**v1 target:** Tiers 1–3 cover ~85% of SMB e-com. Tier 4 is the escape hatch.
+Tier 5 is a per-customer conversation.
+
+### The key insight: JSON-LD is the universal interface
+
+Most e-com sites embed **Schema.org `Product`** as
+`<script type="application/ld+json">`. Google requires it for product rich
+results, so adoption is high. Schema gives us `name`, `description`, `image`,
+`brand.name`, `sku`, `gtin13`, `mpn`, `offers.{price, priceCurrency,
+availability, url}`, `aggregateRating.{ratingValue, reviewCount}`.
+
+**One JSON-LD parser covers most sites regardless of platform.** That's the
+Tier 2 backbone. Fall back to: OpenGraph (`og:price:amount`,
+`product:price:currency`) → Microdata → HTML heuristics.
+
+### Discovery: not every site has a sitemap
+
+Run in parallel, union the results:
+1. **Sitemap walk** — fast, complete when present (Shopify, BigCommerce, most
+   serious stores). Already implemented.
+2. **HTML link crawl** — BFS from homepage, follow category links
+   (heuristic: `/category/`, `/c/`, `/collection/`, `/shop/`), BFS to depth
+   3, collect product-like URLs (`/product/...`, `/p/...`, `/dp/...`,
+   `/item/...`). Stop on max-page cap or no new URLs.
+
+### Engine responsibilities (same for every site)
+
+- **Politeness** — fetch `/robots.txt` once per host, respect `Disallow` +
+  `Crawl-delay`. Per-host adaptive throttle: slow down on 429, speed up after
+  warmup.
+- **Concurrency** — max 2 concurrent per host by default, configurable.
+- **Retries** — extend current logic with distinct backoff for 403 vs 429
+  vs 5xx.
+- **Checkpointing** — SQLite (`better-sqlite3`, sync, single file, zero ops).
+  One row per `(origin, url)` with status, last-fetched-at, etag, lastmod,
+  product JSON. Resume on crash, skip unchanged (etag/lastmod match).
+- **Identity dedupe** — same product across sites and across re-crawls of
+  the same site. Priority: GTIN > SKU > URL slug > fuzzy name+brand.
+- **Stats** — discovered, fetched, parsed, failed, skipped-unchanged,
+  duration.
+
+### Platform detection (cheap, one round trip)
+
+```ts
+async function detectPlatform(origin: string): Promise<Platform> {
+  const probes = await Promise.all([
+    probe(`${origin}/products/random-handle-xyz.json`),  // Shopify
+    probe(`${origin}/wp-json/`),                        // WordPress
+    probe(`${origin}/api/storefront/products`),         // BigCommerce
+    probe(`${origin}/cart.js`),                         // Shopify cart
+    probe(`${origin}/`),                                // meta tags, headers
+  ]);
+  if (probes.shopifyJson) return "shopify";
+  if (probes.wpJson) return "wordpress";
+  if (probes.bigcommerce) return "bigcommerce";
+  return "generic";
+}
+```
+
+Signals: response status, `X-ShopId` header, `Content-Type`, body markers
+(`"shopify"`, `"woocommerce"`, `"bigcommerce"`), `<meta name="generator">`.
+
+### Generic HTML parser (Tier 3)
+
+Heuristics for a product page when JSON-LD is absent:
+1. **Title** — `<h1>`, or `<meta property="og:title">`.
+2. **Price** — schema.org `Product` first; else regex `[$€£¥]\s?\d+([.,]\d{2})?`
+   near a `<span>`/`<div>` with class containing "price".
+3. **Image** — `<meta property="og:image">`; else first `<img>` in a
+   "gallery" container.
+4. **Stock** — "Add to Cart" vs "Out of Stock" button text; schema
+   `availability`.
+5. **SKU/GTIN** — table rows labeled "SKU", "EAN", "GTIN", "Barcode".
+6. **Category** — breadcrumb last node.
+
+Brittle by nature — every site is different. JSON-LD first, HTML heuristics
+only as last resort.
+
+### Headless browser (Tier 4)
+
+Only when HTTP returns empty/JS-rendered HTML. `playwright` is the right pick
+(vs Puppeteer — better auto-wait, multi-browser, more actively maintained).
+**Don't install Chromium by default.** Lazy-load the headless path; require
+`PLAYWRIGHT_BROWSERS_PATH` env var. Most crawls won't need it.
+
+### Library choices
+
+- **HTTP** — keep global `fetch`. Works in Node, edge, browser. No
+  `axios`/`got` needed.
+- **HTML parsing** — `cheerio` (jQuery-like, fast, zero deps). `linkedom` if
+  we need to keep `jsdom`-free.
+- **Headless** — `playwright`. Lazy-loaded, optional peer dep.
+- **SQLite** — `better-sqlite3`. Sync, fast, single file, no server. Install
+  only when checkpointing ships.
+- **Fuzzy match** — `fast-fuzzy` or `fuse.js`. Used in dedupe layer.
+- **Robots.txt** — `robots-parser` (small, sync).
+
+**What NOT to add:** Scrapy (Python — wrong stack), Apify SDK (lock-in),
+Puppeteer (Playwright supersedes).
+
+## Target architecture
+
+```
+src/lib/crawler/
+├── core/                      # engine — same for every site
+│   ├── queue.ts               # bounded concurrency per host
+│   ├── politeness.ts          # robots.txt + per-host adaptive throttle
+│   ├── fetcher.ts             # HTTP + optional Playwright fallback
+│   ├── checkpoint.ts          # SQLite-backed resume + per-product writes
+│   └── dedupe.ts              # identity (GTIN > SKU > slug > fuzzy)
+├── extract/
+│   ├── jsonld.ts              # Schema.org Product from <script>
+│   ├── microdata.ts           # itemtype="Product"
+│   ├── opengraph.ts           # og:price, product:price:amount
+│   ├── html-heuristics.ts     # last resort: regex for $XX.XX, add-to-cart
+│   └── schema.ts              # vendor-neutral Product shape
+├── discover/
+│   ├── sitemap.ts             # sitemap + sitemapindex walker
+│   ├── html-crawl.ts          # BFS from homepage, follow category links
+│   └── shopify.ts             # /products/{handle}.json discovery
+├── adapters/
+│   ├── shopify.ts             # Tier 1
+│   ├── woocommerce.ts         # Tier 1 (when /wp-json is exposed)
+│   ├── bigcommerce.ts         # Tier 1
+│   └── index.ts               # registry + auto-pick
+├── detect.ts                  # sniff platform from headers + probes
+├── headless.ts                # Playwright wrapper, lazy-loaded
+├── types.ts
+└── index.ts                   # public API: runCrawl({ origin })
+```
+
+## Build order (8 steps, sequential, each verifiable)
+
+Each step keeps the app green: `tsc --noEmit` → `lint` → `build`. After each
+step, pause and confirm before moving on.
+
+1. **Refactor** current code into `core/` + `adapters/shopify.ts` — zero
+   behavior change. Public API unchanged. Validates the new structure
+   without changing output.
+2. **Add JSON-LD extractor** — biggest coverage win, ~200 LOC, no deps. One
+   parser, most sites.
+3. **Add sitemap + HTML-crawl dual discovery** — covers stores without
+   sitemaps. Run in parallel, union, dedupe.
+4. **Add SQLite checkpoint + resume + etag/lastmod skip** — turns a 2h run
+   into resumable increments. Per-product atomic writes.
+5. **Add concurrency + robots.txt + adaptive throttle** — production
+   politeness. Per-host bounded concurrency, slowdown on 429, speedup on
+   warmup.
+6. **Add Playwright fallback** — escape hatch for JS-rendered stores.
+   Lazy-loaded, optional peer dep.
+7. **Add WooCommerce + BigCommerce adapters + auto-detect** — three named
+   adapters covers majority of SMB e-com.
+8. **Add identity dedupe** — match products across stores. GTIN > SKU >
+   slug > fuzzy.
+
+## Current state
+
+- Step 1 (refactor) — **done**. Files split into `core/` (`http`, `types`),
+  `discover/sitemap.ts`, `adapters/shopify-parse.ts`,
+  `adapters/shopify-discover.ts`, `adapters/shopify.ts` (barrel). `index.ts`
+  engine rewired. `tsc` + `lint` + `build` all green. (The back-compat shims
+  `discover.ts`/`parse.ts` were removed in a later cleanup — nothing
+  imported them.)
+- Step 2 (JSON-LD extractor) — **done**. `extract/jsonld.ts` (handles
+  `@graph`/`mainEntity`/nested nodes, `gtin13/12/8`, `AggregateOffer`),
+  `extract/microdata.ts` (stub), `extract/opengraph.ts` (price + image +
+  availability), `extract/html-heuristics.ts` (last-resort regex),
+  `extract/schema.ts` (`ExtractedProduct` shape),
+  `extract/mapper.ts` (`extractFromHtml` chain → `CrawledProduct`).
+  `tsc` + `lint` + `build` all green.
+- Step 3 (sitemap + HTML-crawl dual discovery) — **done**.
+  `discover/html-crawl.ts` (BFS from root, follow category links, collect
+  product URLs, max-pages/max-depth caps, same-origin only).
+  `discover/index.ts` (`discoverProducts()` unifies collection walks +
+  sitemap + html-crawl, dedupes, captures diagnostics).
+  `index.ts` engine now `discover → fetch (Shopify JSON → HTML extract
+  fallback) → parse`. Per-product lastmod captured from sitemap.
+  `tsc` + `lint` + `build` all green.
+- Step 4 (SQLite checkpoint + resume) — **done**.
+  `core/checkpoint.ts` (`better-sqlite3` loaded via `createRequire`, WAL,
+  one row per `(origin, url)`: etag, lastmod, status, product_json).
+  Engine wires it in when `config.checkpointPath` is set: captures
+  etag/lastmod from responses, `shouldFetch` fast-path reuses cached
+  products when the sitemap lastmod is unchanged (counted in
+  `stats.skippedUnchanged`), failures are recorded and retried next run,
+  and crash-resume skips URLs whose sitemap lastmod is unchanged (URLs
+  without a lastmod signal are always refetched). Transient failures
+  don't destroy the cached product. `npm run crawl` checkpoints to
+  `.crawler/` (gitignored). Verified with `tsc`/`lint`/`build`. Note: a
+  full live crawl against obdesignsusa.com is currently blocked by the site
+  rate-limiting this machine (HTTP 429); `fetchWithRetry` now has a 30s
+  per-request timeout so a stalled connection can't hang a crawl.
+- Step 5 (concurrency + robots.txt + adaptive throttle) — **done**.
+  `core/politeness.ts` (robots-parser; `parseRobotsTxt`, `AdaptiveThrottle`
+  — 429 raises the delay honoring Retry-After, successes decay it back to
+  baseline, baseline = max(delayMs, robots Crawl-delay); `Politeness` facade
+  loads robots.txt once, degrades to permissive on 429/unreachable).
+  `core/queue.ts` (`Semaphore`, per-host `HostLimiter`, `runWithConcurrency`).
+  HTTP layer waits on the throttle and reports 429/success to it; discovery
+  (html-crawl, Shopify collection walk, sitemap URL filter) respects
+  robots.txt via `HttpOptions.isAllowed`. Engine fetch loop now runs with
+  bounded per-host concurrency (`maxConcurrencyPerHost`, default 2) and
+  closes the checkpoint store via try/finally. New dep: `robots-parser`.
+  Tradeoff (documented in code): the throttle's wait is per-caller, not a
+  global rate limiter, so crawl-delay is a per-request baseline; the 429
+  backstop is the real enforcement. Also fixed: a crawler-wide prettier pass
+  removed long-hidden formatting errors in `extract/*` and `parse.ts` from
+  steps 2–3 — the earlier "lint green" checks used a grep pattern that never
+  matched eslint's Windows backslash paths. Verified with `tsc` + lint +
+  build.
+- Step 6 (Playwright fallback) — **next**
+
+---
+
+# Layer 3 — frontend ↔ crawler bridge (done part)
+
+Milestone status: the app now talks to the server through a TanStack Start
+server-function API layer instead of importing mock data directly.
+
+- **`src/lib/api.ts`** — GET server functions serve the demo dataset from the
+  server (workspace, analytics bundle, competitors, matched products,
+  pricing, catalogue, insights, alerts, reports). `runCrawlNow` (POST)
+  dynamically imports `runCrawl` and runs a live crawl (no `checkpointPath`
+  in the UI path; `maxRetries: 1`, `maxConcurrencyPerHost: 2`), returning
+  sanitized stats/failures/first-100 products. Origin validated as http(s) in
+  the validator (SSRF guard). Crawler errors are caught and returned in
+  `result.error`; validator/transport errors surface as a rejected mutation.
+- **Hooks** — `useWorkspace`/`useAnalytics` (`src/hooks/useWorkspace.ts`) and
+  `src/hooks/useData.ts` (thin `useApiQuery` wrapper per domain). All return
+  `{ data, isLoading, isError }`.
+- **Pages** — all dashboard pages fetch through the hooks; every page guards
+  `isError` → `ErrorState` before `isLoading`/`!data` → `LoadingState`.
+- **Sources page** — workspace from `useWorkspace()`; Live crawl panel calls
+  `runCrawlNow` via `useMutation`, resets stale results when inputs change,
+  shows request-level errors (`crawl.isError`) and crawl-level errors
+  (`result.error`) distinctly, and labels crawled prices as "store price"
+  (no currency assumption — the crawler doesn't capture currency).
+- Verification: `tsc` clean · `eslint src` 0 errors (4 pre-existing shadcn
+  `react-refresh` warnings) · `build` clean.
+
+Note: live crawls from the UI hit the same external rate-limits as the CLI
+(obdesignsusa.com 429s this machine's IP) — the panel reports 0 products with
+the failures listed, which is honest behavior rather than a bug.
