@@ -14,6 +14,7 @@ import {
   getAlertsData,
   getCatalogueData,
   getCompetitorsData,
+  getCrawlResultsData,
   getInsightsData,
   getMatchedProductsData,
   getPricingData,
@@ -55,4 +56,9 @@ export function useAlerts() {
 
 export function useReports() {
   return useApiQuery("reports", () => getReportsData());
+}
+
+/** Persisted crawl results (one per origin) from GET /api/data/crawl-results. */
+export function useSavedCrawls() {
+  return useApiQuery("saved-crawls", () => getCrawlResultsData());
 }

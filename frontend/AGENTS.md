@@ -9,9 +9,17 @@ competitors, their products, pricing, product catalogues, market insights,
 alerts, reports, and data sources.
 
 **Important:** This repo was migrated *off* Lovable and *off* Supabase. It is
-now a plain TanStack Start app running entirely on local mock data. There is
-**no Supabase**, **no Lovable runtime code**, and **no real backend** — do not
-reintroduce them. All auth is a localStorage-backed demo.
+now split into two apps:
+
+- **`frontend/`** — the TanStack Start app (this directory). UI, routing,
+  TanStack Query hooks, and the crawler server function.
+- **`backend/`** — a separate Express + MongoDB API (port 3000) that owns
+  auth (JWT) and serves the dashboard dataset over `GET /api/data/*`.
+
+The frontend talks to the backend through a dev proxy (`/api` → `:3000`).
+There is **no Supabase** and **no Lovable runtime code** — do not reintroduce
+them. The demo dataset lives in `backend/data/demo-data.json` (single source
+of truth) and the demo admin user is seeded into MongoDB on backend boot.
 
 ## Tech stack
 
@@ -34,8 +42,13 @@ reintroduce them. All auth is a localStorage-backed demo.
 | `npm run lint`      | ESLint (run this after every change; currently 0 errors, 4 pre-existing`react-refresh/only-export-components` warnings in shadcn UI components) |
 | `npm run format`    | Prettier write                                                                                                                                    |
 | `npx tsc --noEmit`  | Typecheck (strict mode)                                                                                                                           |
+| `cd ../backend && npm start` | Start the Express API on :3000 (needs MongoDB running; seeds the demo admin user)                                                |
 
 Verification loop for any change: `npx tsc --noEmit` → `npm run lint` → `npm run build`.
+
+> **Run both servers for the full app:** `cd backend && npm start` (API on
+> :3000) **and** `npm run dev` in `frontend/` (UI on :8080, proxies `/api` to
+> the backend).
 
 ## Source layout (`src/`)
 
@@ -64,22 +77,22 @@ src/
 ├── constants/
 │   ├── routes.ts             # central ROUTES map (incl. ROUTES.login)
 │   └── sidebar.ts
-├── data/
-│   └── mock/index.ts         # ALL demo data: workspace, competitors, matchedProducts,
-│                             #   priceHistory, insights, alerts, reports
 ├── hooks/
-│   ├── useWorkspace.ts       # mock useWorkspace + useAnalytics (feeds dashboard/pricing/etc.)
+│   ├── useWorkspace.ts       # useWorkspace + useAnalytics (fetch from backend /api/data)
 │   ├── useData.ts            # per-domain useApiQuery hooks (competitors, products, …)
 │   └── use-mobile.tsx
 ├── layouts/
 │   ├── AuthLayout.tsx
 │   └── DashboardLayout.tsx
 ├── lib/
-│   ├── mock-auth.ts          # mock session backend (localStorage key "parity.session")
+│   ├── http.ts               # token-aware fetch client (/api prefix + Bearer JWT)
+│   ├── api.ts                # REST getters for GET /api/data/* (workspace, analytics, …)
+│   ├── auth.ts               # real JWT auth (signIn → POST /api/auth/login; token + session in localStorage)
+│   ├── crawl.ts              # startCrawl/getCrawlProgress job API (checkpointed crawler, persisted to backend)
 │   ├── error-page.ts         # SSR error HTML
 │   ├── error-capture.ts      # SSR error capture used by server.ts
 │   └── utils.ts
-├── types/                    # common.ts, competitor.ts, product.ts, report.ts
+├── types/                    # common.ts (incl. DashboardStats), competitor.ts, product.ts, report.ts
 ├── utils/
 │   ├── formatCurrency.ts
 │   └── index.ts
@@ -130,16 +143,21 @@ here and nothing is missing:
    `document.title = ...` — do not leave placeholder names like
    `CompetitorsPage`/`AlertsPage` as the title).
 
-## Auth (mock — no backend)
+## Auth (real — JWT against the Express backend)
 
-- **`src/lib/mock-auth.ts`** — `signIn`, `signOut`, `getUser`, `MockUser`,
-  plus `DEMO_CREDENTIALS` shown on the login page. Session is stored in
-  `localStorage` under the key **`parity.session`**.
-  Any email/password is accepted (login is intentionally loose).
+- **`src/lib/auth.ts`** — `signIn(email, password)` calls
+  `POST /api/auth/login` on the backend and stores the returned JWT under
+  `parity.token` and the user profile under `parity.session` (so the existing
+  `getUser()` guard keeps working unchanged). `signOut()` clears both.
+  `DEMO_CREDENTIALS` (`admin@clickmasters.com` / `1234`) is shown and
+  pre-filled on the login page; the backend seeds that user on boot.
 - **Guard:** `src/pages/_authenticated/route.tsx` redirects to `/auth/login`
   when there's no session. Authenticated pages use `ssr: false` (client-side
   guard), so the SSR server still returns 200 for `/` — the redirect happens
   on the client after hydration.
+- **401 handling:** `src/lib/http.ts` clears the session and redirects to
+  `/auth/login` when the backend returns 401 (expired/stale token), so a dead
+  session never strands the user on ErrorState pages.
 
 ## Dev server on the network
 
@@ -152,12 +170,12 @@ before starting again.
 
 ## What we've built so far (current state)
 
-The app is a **working frontend prototype backed by a server-function API
-layer**. Every route renders a real page; data is served by TanStack Start
-server functions in `src/lib/api.ts` (which currently return the demo dataset
-from `src/data/mock/index.ts` server-side) and fetched via TanStack Query
-hooks — no page imports mock data directly anymore. There are no placeholder
-shells left:
+The app is a **working client/server prototype**: the TanStack frontend
+fetches every page's data from the Express backend over HTTP (dev-proxied
+`/api` → `:3000`), and auth is real JWT against MongoDB. The demo dataset
+lives in `backend/data/demo-data.json` and is served by `backend/routes/data.js`.
+Hooks fetch via TanStack Query — no page imports local mock data. There are no
+placeholder shells left:
 
 | Page             | Route            | What it shows today                                                                                |
 | ---------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
@@ -199,25 +217,47 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 - Move interactive state to `useWorkspace`/`useAnalytics` so pages stop reading
   `src/data/mock` directly.
 
-### Layer 3 — Real backend (swap mock → live) — **in progress**
+### Layer 3 — Real client/server split — **mostly done**
 
-- **API layer in place** — `src/lib/api.ts` defines TanStack Start server
-  functions (`createServerFn`) for workspace, analytics, competitors,
-  products, pricing, catalogue, insights, alerts, reports, plus a POST
-  `runCrawlNow` that invokes the real crawler server-side (dynamically
-  imported; validates the origin is an http(s) URL — SSRF guard).
-- **Hooks migrated** — `useWorkspace`/`useAnalytics` and the new
-  `src/hooks/useData.ts` (per-domain `useApiQuery` helper) fetch via TanStack
-  Query and expose `{ data, isLoading, isError }`; all 9 dashboard pages
-  render `LoadingState`/`ErrorState`/`EmptyState` accordingly. No page
-  imports `@/data/mock` directly anymore.
-- **Sources page** now has a **Live crawl** panel: origin + collections
-  inputs, a Run-crawl button (`useMutation`), stat cards (discovered /
-  fetched / skipped-unchanged / failed / duration), failure list, and a
-  product preview (bare "store price", no currency assumption).
-- Still TODO: replace `mock-auth` with real auth (keep demo mode behind a
-  flag), add persistence + migration for workspace/competitors/products,
-  and swap the API layer's mock dataset for real crawl output.
+- **Frontend API layer** — `src/lib/api.ts` is now a REST client: every
+  getter hits `GET /api/data/*` on the Express backend via `src/lib/http.ts`
+  (which prefixes `/api` and attaches the JWT). The `AnalyticsData`,
+  `PricingData`, `CatalogueData` shapes are unchanged from the previous
+  server-function era, so hooks and pages were untouched.
+- **Auth migrated** — `mock-auth.ts` replaced by `src/lib/auth.ts`; the login
+  page awaits the real `POST /api/auth/login` and surfaces backend errors
+  (e.g. "Invalid credentials"). The demo admin user is seeded on boot
+  (`backend/seed.js`).
+- **Backend** — `backend/` owns the dataset (`data/demo-data.json`),
+  serves `GET /api/data/{workspace,analytics,competitors,matched-products,
+  pricing,catalogue,insights,alerts,reports}`, plus existing JWT auth and
+  user CRUD. `backend/index.js` mounts the routes and calls
+  `ensureDemoUser()` on start.
+- **Crawler** — `startCrawl`/`getCrawlProgress` live in `src/lib/crawl.ts` as
+  TanStack server functions (not proxied to Express) because the crawler is
+  a Node-only TypeScript module with native deps (`better-sqlite3`).
+  `startCrawl` returns a `jobId` immediately and the crawl runs in the
+  background; the client polls `getCrawlProgress` for live progress (server
+  functions are one-shot RPC — no SSE). Each run uses a per-origin SQLite
+  checkpoint (`.crawler/crawl-<host>.db`) so unchanged products are skipped
+  on re-runs and every product is saved incrementally as it is crawled;
+  finished results are upserted to the backend's `CrawlResult` collection.
+- **Sources page** — Live crawl panel (origin + collections, `useMutation`,
+  stat cards, failures, product previews) imports `startCrawl` from
+  `@/lib/crawl` and polls `getCrawlProgress` for live progress. A **Saved
+  crawls** panel below it lists persisted results via `useSavedCrawls()`
+  (`GET /api/data/crawl-results`, types in `src/lib/api.ts`) with
+  expandable stats/products/failures; it auto-refreshes when a finished
+  crawl persists (`queryClient.invalidateQueries` on `job.persisted`).
+- Persistence: crawl results are saved to MongoDB (backend `CrawlResult`
+  model, `POST/GET /api/data/crawl-results`) plus per-origin SQLite
+  checkpoints (`.crawler/crawl-<host>.db`) for skip-unchanged re-crawls and
+  crash-safe incremental saves. The backend keeps **snapshot history** (up to
+  20 per origin, `createdAt`-sorted) when `storeSnapshots` is true, or
+  replaces the latest result when false. Still TODO: wiring those results
+  into the dashboard pages (needs a product-matching layer), auth for
+  `/api/data` routes, and production `vite preview` needs a reverse proxy in
+  front of the backend (the `/api` proxy is dev-only).
 
 ### Layer 4 — Data ingestion & alerts
 
@@ -531,31 +571,47 @@ step, pause and confirm before moving on.
 
 ---
 
-# Layer 3 — frontend ↔ crawler bridge (done part)
+# Layer 3 — frontend ↔ backend bridge (done part)
 
-Milestone status: the app now talks to the server through a TanStack Start
-server-function API layer instead of importing mock data directly.
+Milestone status: the frontend and backend are now wired together for real —
+the TanStack app fetches data from the Express API and authenticates with JWT.
 
-- **`src/lib/api.ts`** — GET server functions serve the demo dataset from the
-  server (workspace, analytics bundle, competitors, matched products,
-  pricing, catalogue, insights, alerts, reports). `runCrawlNow` (POST)
-  dynamically imports `runCrawl` and runs a live crawl (no `checkpointPath`
-  in the UI path; `maxRetries: 1`, `maxConcurrencyPerHost: 2`), returning
-  sanitized stats/failures/first-100 products. Origin validated as http(s) in
-  the validator (SSRF guard). Crawler errors are caught and returned in
-  `result.error`; validator/transport errors surface as a rejected mutation.
-- **Hooks** — `useWorkspace`/`useAnalytics` (`src/hooks/useWorkspace.ts`) and
-  `src/hooks/useData.ts` (thin `useApiQuery` wrapper per domain). All return
-  `{ data, isLoading, isError }`.
-- **Pages** — all dashboard pages fetch through the hooks; every page guards
-  `isError` → `ErrorState` before `isLoading`/`!data` → `LoadingState`.
-- **Sources page** — workspace from `useWorkspace()`; Live crawl panel calls
-  `runCrawlNow` via `useMutation`, resets stale results when inputs change,
-  shows request-level errors (`crawl.isError`) and crawl-level errors
-  (`result.error`) distinctly, and labels crawled prices as "store price"
-  (no currency assumption — the crawler doesn't capture currency).
+- **`src/lib/http.ts`** — token-aware fetch client: prefixes `/api`, attaches
+  `Authorization: Bearer <token>` from localStorage, throws `ApiError` with
+  the backend's `message`, and redirects to `/auth/login` on 401.
+- **`src/lib/api.ts`** — REST getters for `GET /api/data/*` (workspace,
+  analytics bundle, competitors, matched products, pricing, catalogue,
+  insights, alerts, reports). Shapes match the backend `dataController`.
+- **`src/lib/auth.ts`** — `signIn` → `POST /api/auth/login`; JWT in
+  `parity.token`, profile in `parity.session`; `getUser()`/guard unchanged.
+- **`src/lib/crawl.ts`** — `startCrawl` (POST → `{ jobId }`, runs the crawl
+  in the background) + `getCrawlProgress` (POST → job snapshot with live
+  `total`/`processed` counters). Node-only crawler, not proxied to Express.
+  SSRF guard on origin, sanitized stats/failures/first-100 products, errors
+  caught into the job's `error`. Writes per-origin SQLite checkpoints during
+  the run and posts the finished result to `POST /api/data/crawl-results`
+  on the Express backend (best-effort; `job.persisted` reflects success).
+  Crawl parameters (`delayMs`, `maxConcurrencyPerHost`, `maxPages`,
+  `respectRobotsTxt`, `productOnly`, `storeSnapshots`) flow from the Sources
+  page config through `CrawlRunInput` into `runCrawl` (clamped server-side);
+  `CrawlJob.params` snapshots what a job started with. The engine enforces
+  `maxPages` as a fetch-loop cap (discovery count is unchanged), only applies
+  the robots.txt gate/crawl-delay when `respectRobotsTxt` is true (the
+  adaptive throttle always runs), and filters sitemap entries to product
+  pages unless `productOnly` is false.
+- **Recurring crawls** — `scheduleCrawl`/`getCrawlSchedules`/
+  `cancelCrawlSchedule` register in-memory schedules (1h/6h/daily/weekly); a
+  lazy 30s interval started from a handler kicks off due crawls as normal
+  background jobs. Schedules reset on server restart (no persistence).
+- **Hooks** — `useWorkspace`/`useAnalytics` and `useData.ts` (thin
+  `useApiQuery` wrapper) all return `{ data, isLoading, isError }`; every
+  page guards `isError` → `ErrorState` before `LoadingState`.
+- **Backend** — `backend/` Express app: JWT auth (`/api/auth`), user CRUD
+  (`/api/users`), dataset endpoints (`/api/data`), demo-user seed on boot.
+  Data source: `backend/data/demo-data.json`.
 - Verification: `tsc` clean · `eslint src` 0 errors (4 pre-existing shadcn
-  `react-refresh` warnings) · `build` clean.
+  `react-refresh` warnings) · `build` clean · backend boots and serves
+  `/health`, `/api/data/*`, and `/api/auth/login` (curl-verified).
 
 Note: live crawls from the UI hit the same external rate-limits as the CLI
 (obdesignsusa.com 429s this machine's IP) — the panel reports 0 products with

@@ -115,27 +115,35 @@ export class Politeness implements RequestThrottle {
    */
   static async load(
     origin: string,
-    options: { userAgent?: string; delayMs?: number; maxDelayMs?: number } = {},
+    options: {
+      userAgent?: string;
+      delayMs?: number;
+      maxDelayMs?: number;
+      /** When false, skip robots.txt entirely (no disallow gate, no crawl-delay). */
+      respectRobots?: boolean;
+    } = {},
   ): Promise<Politeness> {
     const baseDelay = options.delayMs ?? 1000;
     let robots: ParsedRobots | null = null;
-    try {
-      const response = await fetchWithRetry(`${origin}/robots.txt`, {
-        delayMs: baseDelay,
-        maxRetries: 1,
-        timeoutMs: ROBOTS_TIMEOUT_MS,
-        userAgent: options.userAgent,
-      });
-      if (response.status >= 200 && response.status < 300) {
-        robots = parseRobotsTxt(
-          await response.text(),
-          `${origin}/robots.txt`,
-          USER_AGENT_TOKEN,
-        );
+    if (options.respectRobots !== false) {
+      try {
+        const response = await fetchWithRetry(`${origin}/robots.txt`, {
+          delayMs: baseDelay,
+          maxRetries: 1,
+          timeoutMs: ROBOTS_TIMEOUT_MS,
+          userAgent: options.userAgent,
+        });
+        if (response.status >= 200 && response.status < 300) {
+          robots = parseRobotsTxt(
+            await response.text(),
+            `${origin}/robots.txt`,
+            USER_AGENT_TOKEN,
+          );
+        }
+      } catch {
+        // 429 / network error fetching robots.txt → stay permissive; the
+        // adaptive throttle will handle the rate limiting anyway.
       }
-    } catch {
-      // 429 / network error fetching robots.txt → stay permissive; the
-      // adaptive throttle will handle the rate limiting anyway.
     }
     const baseline = Math.max(baseDelay, robots?.crawlDelayMs ?? 0);
     return new Politeness(

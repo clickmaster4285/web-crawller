@@ -21,3 +21,23 @@ export interface Workspace {
   categories: number;
   lastScan: string;
 }
+
+/** Aggregate dashboard stats served by the backend `/api/data/*` endpoints. */
+export interface DashboardStats {
+  productsMonitored: number;
+  competitorsTracked: number;
+  productsMatched: number;
+  matchRate: number;
+  priceChangesToday: number;
+  newProductsToday: number;
+  outOfStock: number;
+  avgPriceGap: number;
+  yourAvgPrice: number;
+  marketAvgPrice: number;
+  cheapestCompetitor: string;
+  mostExpensiveCompetitor: string;
+  onlyYouSell: number;
+  onlyTheySell: number;
+  missingCategories: number;
+  missingBrands: number;
+}

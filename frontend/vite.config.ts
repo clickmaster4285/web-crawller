@@ -24,5 +24,13 @@ export default defineConfig({
     host: true,
     port: 8080,
     strictPort: true,
+    // Proxy API calls to the Express backend (port 3000). The frontend
+    // always talks to `/api/*` same-origin; Vite forwards to the backend.
+    proxy: {
+      "/api": {
+        target: "http://localhost:3000",
+        changeOrigin: true,
+      },
+    },
   },
 });

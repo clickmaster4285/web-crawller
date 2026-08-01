@@ -1,48 +1,24 @@
 /**
- * Server API layer (Layer 3 — real backend).
+ * Data API layer — REST client for the Parity Express backend.
  *
- * Every endpoint is a TanStack Start server function, so the frontend now
- * fetches real server responses instead of importing mock data directly.
- * Data currently originates from the demo dataset (`@/data/mock`) served on
- * the server; the shapes mirror what the live crawl pipeline will produce
- * once persistence is wired.
- *
- * `runCrawlNow` actually invokes the real crawler on the server.
+ * Every getter hits `GET /api/data/*` through `src/lib/http.ts` (dev-proxied
+ * to the backend at :3000). The returned shapes are identical to the previous
+ * TanStack server functions, so hooks and pages are unchanged.
  */
 
-import { createServerFn } from "@tanstack/react-start";
-
-import {
-  alerts,
-  brandGaps,
-  categoryGaps,
-  competitors,
-  dashboardStats,
-  insights,
-  matchedProducts,
-  priceHistory,
-  reports,
-  workspace,
-} from "@/data/mock";
+import { http } from "@/lib/http";
 import type {
   AlertItem,
   BrandGap,
   CategoryGap,
   Competitor,
+  DashboardStats,
   Insight,
   MatchedProduct,
   PricePoint,
   ReportSummary,
   Workspace,
 } from "@/types";
-
-// ---------------------------------------------------------------------------
-// Read-only data endpoints
-// ---------------------------------------------------------------------------
-
-export const getWorkspaceData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<Workspace> => workspace,
-);
 
 export interface AnalyticsData {
   hasData: boolean;
@@ -79,109 +55,38 @@ export interface AnalyticsData {
   brandGaps: BrandGap[];
 }
 
-/** The dashboard bundle consumed by the Overview page. */
-export const getAnalyticsData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<AnalyticsData> => ({
-    hasData: true,
-    stats: {
-      competitors: competitors.length,
-      productsTracked: dashboardStats.productsMonitored,
-      yourProducts: workspace.products,
-      matchedProducts: dashboardStats.productsMatched,
-      missingProducts: dashboardStats.onlyTheySell,
-      outOfStock: dashboardStats.outOfStock,
-      yourAvgPrice: dashboardStats.yourAvgPrice,
-      marketAvgPrice: dashboardStats.marketAvgPrice,
-      cheapestCompetitor: dashboardStats.cheapestCompetitor,
-      mostExpensiveCompetitor: dashboardStats.mostExpensiveCompetitor,
-    },
-    competitors: competitors.map((c) => ({
-      id: c.id,
-      name: c.name,
-      website: c.website,
-      lastCrawl: c.lastCrawl,
-      products: c.products,
-      avgPriceIndex: c.avgPriceIndex,
-    })),
-    matchedProducts: matchedProducts.map((p) => ({
-      id: p.id,
-      name: p.name,
-      competitor: p.competitor,
-      competitorPrice: p.competitorPrice,
-      yourPrice: p.yourPrice,
-      gap: p.yourPrice === null ? null : p.competitorPrice - p.yourPrice,
-    })),
-    priceHistory,
-    categoryGaps: categoryGaps.map((c) => ({
-      category: c.category,
-      yours: c.you,
-      theirs: c.competitors,
-    })),
-    brandGaps,
-  }),
-);
-
-export const getCompetitorsData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<Competitor[]> => competitors,
-);
-
-export const getMatchedProductsData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<MatchedProduct[]> => matchedProducts,
-);
-
 export interface PricingData {
   competitors: Competitor[];
   matchedProducts: MatchedProduct[];
   priceHistory: PricePoint[];
-  stats: typeof dashboardStats;
+  stats: DashboardStats;
 }
-
-export const getPricingData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<PricingData> => ({
-    competitors,
-    matchedProducts,
-    priceHistory,
-    stats: dashboardStats,
-  }),
-);
 
 export interface CatalogueData {
   categoryGaps: CategoryGap[];
   brandGaps: BrandGap[];
-  stats: typeof dashboardStats;
+  stats: DashboardStats;
 }
 
-export const getCatalogueData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<CatalogueData> => ({
-    categoryGaps,
-    brandGaps,
-    stats: dashboardStats,
-  }),
-);
+/** A product inside a persisted crawl result (backend `CrawlResult`). */
+export interface SavedCrawlProduct {
+  name: string;
+  brand: string;
+  price: number;
+  available: boolean;
+  url: string;
+}
 
-export const getInsightsData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<Insight[]> => insights,
-);
+export interface SavedCrawlFailure {
+  url: string;
+  error: string;
+}
 
-export const getAlertsData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<AlertItem[]> => alerts,
-);
-
-export const getReportsData = createServerFn({ method: "GET" }).handler(
-  async (): Promise<ReportSummary[]> => reports,
-);
-
-// ---------------------------------------------------------------------------
-// Crawler
-// ---------------------------------------------------------------------------
-
-export interface CrawlRunInput {
+/** A persisted crawl snapshot, one per origin (latest run wins). */
+export interface SavedCrawl {
+  _id: string;
   origin: string;
-  /** Collection handles to scope the crawl to (e.g. ["silicone-toys"]). */
   collections: string[];
-}
-
-export interface CrawlRunResult {
   stats: {
     discovered: number;
     fetched: number;
@@ -189,71 +94,40 @@ export interface CrawlRunResult {
     failed: number;
     durationMs: number;
   };
-  failures: Array<{ url: string; error: string }>;
-  products: Array<{
-    name: string;
-    brand: string;
-    price: number;
-    available: boolean;
-    url: string;
-  }>;
-  /** Set when the crawl itself threw before producing a result. */
-  error?: string;
+  products: SavedCrawlProduct[];
+  failures: SavedCrawlFailure[];
+  createdAt: string;
+  updatedAt: string;
 }
 
-/**
- * Runs the real crawler on the server for a store origin. The crawler is
- * imported dynamically so the rest of the API layer stays light.
- */
-export const runCrawlNow = createServerFn({ method: "POST" })
-  .validator((input: CrawlRunInput) => {
-    // Guard against non-HTTP origins: the crawler fetches server-side, so an
-    // arbitrary scheme here would be an SSRF-style risk if this ever leaves
-    // the demo. Only http(s) origins are accepted.
-    const origin = input.origin.trim();
-    if (!/^https?:\/\/\S+/i.test(origin)) {
-      throw new Error("Origin must be a valid http(s) URL");
-    }
-    return { ...input, origin };
-  })
-  .handler(async ({ data }): Promise<CrawlRunResult> => {
-    try {
-      const { runCrawl } = await import("@/lib/crawler/index.ts");
-      const result = await runCrawl({
-        origin: data.origin,
-        collections: data.collections,
-        maxRetries: 1,
-        maxConcurrencyPerHost: 2,
-      });
-      return {
-        stats: {
-          discovered: result.stats.discovered,
-          fetched: result.stats.fetched,
-          skippedUnchanged: result.stats.skippedUnchanged,
-          failed: result.stats.failed,
-          durationMs: result.stats.durationMs,
-        },
-        failures: result.stats.failures,
-        products: result.products.slice(0, 100).map((p) => ({
-          name: p.name,
-          brand: p.brand,
-          price: p.price,
-          available: p.available,
-          url: p.url,
-        })),
-      };
-    } catch (error) {
-      return {
-        stats: {
-          discovered: 0,
-          fetched: 0,
-          skippedUnchanged: 0,
-          failed: 0,
-          durationMs: 0,
-        },
-        failures: [],
-        products: [],
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  });
+/** Wrapper shape returned by `GET /api/data/crawl-results`. */
+export interface CrawlResultsResponse {
+  success: boolean;
+  count: number;
+  data: SavedCrawl[];
+}
+
+export const getWorkspaceData = () => http.get<Workspace>("/data/workspace");
+
+export const getAnalyticsData = () =>
+  http.get<AnalyticsData>("/data/analytics");
+
+export const getCompetitorsData = () =>
+  http.get<Competitor[]>("/data/competitors");
+
+export const getMatchedProductsData = () =>
+  http.get<MatchedProduct[]>("/data/matched-products");
+
+export const getPricingData = () => http.get<PricingData>("/data/pricing");
+
+export const getCatalogueData = () =>
+  http.get<CatalogueData>("/data/catalogue");
+
+export const getInsightsData = () => http.get<Insight[]>("/data/insights");
+
+export const getAlertsData = () => http.get<AlertItem[]>("/data/alerts");
+
+export const getReportsData = () => http.get<ReportSummary[]>("/data/reports");
+
+export const getCrawlResultsData = () =>
+  http.get<CrawlResultsResponse>("/data/crawl-results");

@@ -89,7 +89,13 @@ export async function discoverProducts(
       `${config.origin}/sitemap.xml`,
       opts,
     );
-    for (const u of filterProductSitemapEntries(sitemapUrls)) {
+    // Product-only mode (default) skips blog/help/policy pages; off means
+    // every sitemap URL is crawled (non-product pages usually fail parse).
+    const entries =
+      config.productOnly === false
+        ? sitemapUrls
+        : filterProductSitemapEntries(sitemapUrls);
+    for (const u of entries) {
       urlSet.add(u.loc);
       if (u.lastmod) {
         lastmod.set(u.loc, u.lastmod);

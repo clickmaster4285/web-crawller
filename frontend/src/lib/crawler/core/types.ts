@@ -28,6 +28,24 @@ export interface CrawlConfig {
    * `core/queue.ts`; the adaptive throttle still gates request timing.
    */
   maxConcurrencyPerHost?: number;
+  /**
+   * Hard cap on the number of product URLs fetched per run (default:
+   * unlimited). Discovery still reports the full count in `stats.discovered`;
+   * only the fetch loop is limited to the first `maxPages` URLs.
+   */
+  maxPages?: number;
+  /**
+   * Whether to fetch and enforce robots.txt for the origin (default true).
+   * The adaptive throttle still runs either way — only the robots gate and
+   * crawl-delay are skipped when false.
+   */
+  respectRobotsTxt?: boolean;
+  /**
+   * Product-only mode (default true): sitemap entries are filtered to
+   * product-page patterns (blog/help/policy pages skipped). When false, every
+   * sitemap URL is crawled (non-product pages usually fail extraction).
+   */
+  productOnly?: boolean;
   /** Called after each product is fetched. */
   onProgress?: (fetched: number, discovered: number) => void;
 }

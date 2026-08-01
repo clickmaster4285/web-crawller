@@ -3,19 +3,23 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const mongoose = require('mongoose');
 
 const { connectDatabase } = require('./config/database');
 const errorHandler = require('./middleware/errorHandler');
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
+const dataRoutes = require('./routes/data');
+const { ensureDemoUser } = require('./seed');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Rate limiting
+// Rate limiting — generous enough for a demo where every page fires several
+// /api/data calls plus a live crawl in one session.
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: 500,
   message: 'Too many requests from this IP, please try again later.'
 });
 
@@ -40,6 +44,7 @@ app.get('/health', (req, res) => {
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/data', dataRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
@@ -56,9 +61,22 @@ app.use(errorHandler);
 async function startServer() {
   try {
     await connectDatabase();
+    // The CrawlResult model moved from one-doc-per-origin (unique origin
+    // index) to snapshot history (multiple docs per origin). Drop the legacy
+    // unique index on boot so history inserts don't collide. Best-effort.
+    try {
+      await mongoose.connection
+        .collection('crawlresults')
+        .dropIndex('origin_1');
+      console.log('🧹 Dropped legacy crawlresults unique index');
+    } catch {
+      // Index already absent — nothing to do.
+    }
+    await ensureDemoUser();
     app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
       console.log(`📊 Health check available at http://localhost:${PORT}/health`);
+      console.log(`📦 Demo data available at http://localhost:${PORT}/api/data/workspace`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

@@ -77,15 +77,20 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   let fetchedCount = 0;
   let skippedUnchanged = 0;
 
-  // Step 5 politeness: robots.txt (fetched once) + adaptive throttle + bounded
-  // per-host concurrency. Every HTTP request in this crawl flows through them.
+  // Step 5 politeness: robots.txt (fetched once, unless disabled) + adaptive
+  // throttle + bounded per-host concurrency. Every HTTP request in this crawl
+  // flows through them.
+  const respectRobots = config.respectRobotsTxt !== false;
   const politeness = await Politeness.load(config.origin, {
     userAgent: config.userAgent,
     delayMs: config.delayMs,
+    respectRobots,
   });
   const opts = httpOptions(config, {
     throttle: politeness,
-    isAllowed: (url) => politeness.isUrlAllowed(url),
+    isAllowed: respectRobots
+      ? (url) => politeness.isUrlAllowed(url)
+      : undefined,
   });
   const concurrency = config.maxConcurrencyPerHost ?? DEFAULT_MAX_PER_HOST;
   const limiter = new HostLimiter(concurrency);
@@ -100,12 +105,20 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     ]);
   }
 
+  // Optional page cap: crawl at most `maxPages` of the discovered URLs.
+  // `stats.discovered` still reports the full discovery; only the fetch
+  // loop is limited.
+  const urlsToFetch =
+    config.maxPages != null && config.maxPages > 0
+      ? discovered.urls.slice(0, config.maxPages)
+      : discovered.urls;
+
   // `onProgress` first arg = products in hand (freshly fetched + cache-reused),
   // i.e. progress through the run; `stats.fetched` is the fresh-only count.
   // try/finally guarantees the checkpoint store is closed even if a worker
   // throws (e.g. a user onProgress callback).
   try {
-    await runWithConcurrency(discovered.urls, concurrency, async (url) => {
+    await runWithConcurrency(urlsToFetch, concurrency, async (url) => {
       // Checkpoint fast-path: content unchanged since the last successful run
       // (sitemap lastmod match) → reuse the cached product instead of refetching.
       const lastmod = discovered.lastmod.get(url) ?? undefined;
@@ -117,7 +130,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
         if (cached) {
           products.push(cached);
           skippedUnchanged++;
-          config.onProgress?.(products.length, discovered.urls.length);
+          config.onProgress?.(products.length, urlsToFetch.length);
           return;
         }
         // Row exists but carries no product JSON — fall through and refetch.
@@ -159,7 +172,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
           failures.push({ url, error: String(error) });
           store?.recordFailure(config.origin, url);
         }
-        config.onProgress?.(products.length, discovered.urls.length);
+        config.onProgress?.(products.length, urlsToFetch.length);
       } finally {
         limiter.release(host);
       }

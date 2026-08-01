@@ -2,7 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
 
-const User = require('./models/User');
+const User = require('../models/User');
 
 const registerSchema = Joi.object({
   name: Joi.string().min(2).max(50).required(),

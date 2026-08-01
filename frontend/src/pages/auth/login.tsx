@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ROUTES } from "@/constants";
-import { DEMO_CREDENTIALS, signIn } from "@/lib/mock-auth";
+import { DEMO_CREDENTIALS, signIn } from "@/lib/auth";
 
 export const Route = createFileRoute("/auth/login")({
   head: () => ({
@@ -38,12 +38,15 @@ function LoginPage() {
     e.preventDefault();
     setBusy(true);
     try {
-      signIn(email.trim() || DEMO_CREDENTIALS.email);
+      await signIn(
+        email.trim() || DEMO_CREDENTIALS.email,
+        password || DEMO_CREDENTIALS.password,
+      );
       toast.success("Signed in");
       await navigate({ to: ROUTES.overview });
     } catch (error) {
       console.error(error);
-      toast.error("Could not sign in — please try again.");
+      toast.error(error instanceof Error ? error.message : "Could not sign in");
       setBusy(false);
     }
   }
@@ -69,7 +72,8 @@ function LoginPage() {
             <span className="font-mono text-foreground">
               {DEMO_CREDENTIALS.password}
             </span>
-            . Any credentials work.
+            . Create your own account via the backend{" "}
+            <span className="font-mono">/api/auth/register</span> endpoint.
           </p>
         </div>
 
@@ -94,7 +98,7 @@ function LoginPage() {
             />
           </div>
           <Button type="submit" className="w-full" disabled={busy}>
-            {busy ? "Please wait…" : "Sign in"}
+            {busy ? "Signing in…" : "Sign in"}
           </Button>
         </form>
       </div>
