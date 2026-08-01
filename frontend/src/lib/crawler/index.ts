@@ -48,6 +48,8 @@ import type {
   CrawledProduct,
   CrawlFailure,
   CrawlResult,
+  RobotsInfo,
+  RobotsSnapshot,
 } from "./core/types.ts";
 
 /** Product payload as returned by a Shopify /products/{handle}.json call. */
@@ -95,20 +97,33 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   const concurrency = config.maxConcurrencyPerHost ?? DEFAULT_MAX_PER_HOST;
   const limiter = new HostLimiter(concurrency);
 
+  // Pass the robots.txt snapshot politeness already fetched so platform
+  // detection doesn't refetch it and the presence/crawl-delay is recorded
+  // in the discovery diagnostics. Hoisted above the try so a failed
+  // discovery still reports the true robots outcome in its empty result.
+  const robotsSnapshot: RobotsSnapshot | null = respectRobots
+    ? {
+        body: politeness.robotsBody,
+        status: politeness.robotsStatus,
+        crawlDelayMs: politeness.robotsCrawlDelayMs,
+      }
+    : null;
   let discovered;
   try {
-    // Pass the robots.txt body politeness already fetched so platform
-    // detection doesn't refetch it.
-    discovered = await discoverProducts(
-      config,
-      opts,
-      respectRobots ? politeness.robotsBody : null,
-    );
+    discovered = await discoverProducts(config, opts, robotsSnapshot);
   } catch (error) {
     store?.close();
-    return emptyResult(config, startedAt, [
-      { url: config.origin, error: `Discovery failed: ${String(error)}` },
-    ]);
+    return emptyResult(
+      config,
+      startedAt,
+      [{ url: config.origin, error: `Discovery failed: ${String(error)}` }],
+      robotsSnapshot
+        ? {
+            status: robotsSnapshot.status,
+            crawlDelayMs: robotsSnapshot.crawlDelayMs,
+          }
+        : undefined,
+    );
   }
 
   // Optional page cap: crawl at most `maxPages` of the discovered URLs.
@@ -274,6 +289,7 @@ function emptyResult(
   config: CrawlConfig,
   startedAt: number,
   failures: CrawlFailure[],
+  robots: RobotsInfo = { status: "skipped", crawlDelayMs: null },
 ): CrawlResult {
   return {
     config: { origin: config.origin, collections: config.collections },
@@ -293,6 +309,7 @@ function emptyResult(
       sitemap: { urls: 0, lastmod: 0 },
       htmlCrawl: { urls: 0, pagesVisited: 0, truncated: false },
       platform: { platform: "Unknown", signal: "Crawl did not run" },
+      robots,
     },
   };
 }

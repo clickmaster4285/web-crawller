@@ -110,6 +110,25 @@ export interface CrawlFailure {
   error: string;
 }
 
+/** robots.txt fetch outcome for the origin. */
+export type RobotsStatus = "found" | "absent" | "unreachable" | "skipped";
+
+/**
+ * robots.txt presence + declared crawl-delay, captured by the politeness
+ * layer so the UI can show a real robots row (instead of omitting it).
+ */
+export interface RobotsInfo {
+  status: RobotsStatus;
+  /** Declared Crawl-delay in ms (`null` = none declared). */
+  crawlDelayMs: number | null;
+}
+
+/** robots.txt snapshot as fetched by politeness (body reused by detection). */
+export interface RobotsSnapshot extends RobotsInfo {
+  /** Raw robots.txt body ("" when absent/unreachable). */
+  body: string;
+}
+
 /**
  * What each discovery strategy contributed (and whether it failed). Mirrors
  * `ProductDiscovery.diagnostics` so a run's discovery phase can be surfaced
@@ -126,6 +145,8 @@ export interface DiscoveryDiagnostics {
   };
   /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
   platform: { platform: string; signal: string };
+  /** robots.txt presence + declared crawl-delay (found/absent/unreachable/skipped). */
+  robots: RobotsInfo;
 }
 
 export interface CrawlStats {

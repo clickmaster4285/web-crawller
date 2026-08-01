@@ -17,7 +17,7 @@ import { discoverCollectionHandles } from "../adapters/shopify-discover.ts";
 import { discoverByHtmlCrawl } from "./html-crawl.ts";
 import { detectPlatform } from "./platform.ts";
 import { fetchSitemapUrls, type DiscoveredUrl } from "./sitemap.ts";
-import type { CrawlConfig } from "../core/types.ts";
+import type { CrawlConfig, RobotsInfo, RobotsSnapshot } from "../core/types.ts";
 import type { HttpOptions } from "../core/http.ts";
 import { httpOptions } from "../core/http.ts";
 
@@ -40,6 +40,7 @@ export interface ProductDiscovery {
       error?: string;
     };
     platform: { platform: string; signal: string };
+    robots: RobotsInfo;
   };
 }
 
@@ -53,8 +54,8 @@ export interface ProductDiscovery {
 export async function discoverProducts(
   config: CrawlConfig,
   opts: HttpOptions = httpOptions(config),
-  /** robots.txt body already fetched by the politeness layer (avoids a refetch). */
-  robotsBody?: string | null,
+  /** robots.txt snapshot already fetched by the politeness layer (no refetch). */
+  robots?: RobotsSnapshot | null,
 ): Promise<ProductDiscovery> {
   const urlSet = new Set<string>();
   const lastmod = new Map<string, string>();
@@ -63,6 +64,9 @@ export async function discoverProducts(
     sitemap: { urls: 0, lastmod: 0 },
     htmlCrawl: { urls: 0, pagesVisited: 0, truncated: false },
     platform: { platform: "Unknown", signal: "Not detected" },
+    robots: robots
+      ? { status: robots.status, crawlDelayMs: robots.crawlDelayMs }
+      : { status: "skipped", crawlDelayMs: null },
   };
 
   // Platform detection (robots.txt body + one polite homepage fetch when the
@@ -72,7 +76,7 @@ export async function discoverProducts(
     diagnostics.platform = await detectPlatform(
       config.origin,
       opts,
-      robotsBody,
+      robots?.body,
     );
   } catch (error) {
     diagnostics.platform = {

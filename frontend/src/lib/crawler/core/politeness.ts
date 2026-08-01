@@ -21,6 +21,7 @@
 
 import { fetchWithRetry, sleep } from "./http.ts";
 import type { RequestThrottle } from "./http.ts";
+import type { RobotsStatus } from "./types.ts";
 import robotsParser from "robots-parser";
 
 const USER_AGENT_TOKEN = "ParityBot";
@@ -104,15 +105,24 @@ export class Politeness implements RequestThrottle {
   private readonly throttle: AdaptiveThrottle;
   /** Raw robots.txt body ("" when absent/unreachable) — reused by platform detection. */
   readonly robotsBody: string;
+  /** robots.txt fetch outcome — "found" (2xx + parsed), "absent" (non-2xx),
+   * "unreachable" (network/429), or "skipped" (respectRobots off). */
+  readonly robotsStatus: RobotsStatus;
+  /** Declared Crawl-delay in ms (`null` when none / not found / skipped). */
+  readonly robotsCrawlDelayMs: number | null;
 
   private constructor(
     robots: ParsedRobots | null,
     throttle: AdaptiveThrottle,
     robotsBody: string,
+    robotsStatus: RobotsStatus,
+    robotsCrawlDelayMs: number | null,
   ) {
     this.robots = robots;
     this.throttle = throttle;
     this.robotsBody = robotsBody;
+    this.robotsStatus = robotsStatus;
+    this.robotsCrawlDelayMs = robotsCrawlDelayMs;
   }
 
   /**
@@ -133,6 +143,9 @@ export class Politeness implements RequestThrottle {
     const baseDelay = options.delayMs ?? 1000;
     let robots: ParsedRobots | null = null;
     let robotsBody = "";
+    let robotsStatus: RobotsStatus =
+      options.respectRobots === false ? "skipped" : "absent";
+    let robotsCrawlDelayMs: number | null = null;
     if (options.respectRobots !== false) {
       try {
         const response = await fetchWithRetry(`${origin}/robots.txt`, {
@@ -148,10 +161,13 @@ export class Politeness implements RequestThrottle {
             `${origin}/robots.txt`,
             USER_AGENT_TOKEN,
           );
+          robotsStatus = "found";
+          robotsCrawlDelayMs = robots.crawlDelayMs;
         }
       } catch {
         // 429 / network error fetching robots.txt → stay permissive; the
         // adaptive throttle will handle the rate limiting anyway.
+        robotsStatus = "unreachable";
       }
     }
     const baseline = Math.max(baseDelay, robots?.crawlDelayMs ?? 0);
@@ -162,6 +178,8 @@ export class Politeness implements RequestThrottle {
         options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS,
       ),
       robotsBody,
+      robotsStatus,
+      robotsCrawlDelayMs,
     );
   }
 

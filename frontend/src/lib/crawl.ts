@@ -85,6 +85,11 @@ export interface CrawlRunResult {
     };
     /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
     platform: { platform: string; signal: string };
+    /** robots.txt presence + declared crawl-delay (found/absent/unreachable/skipped). */
+    robots: {
+      status: "found" | "absent" | "unreachable" | "skipped";
+      crawlDelayMs: number | null;
+    };
   };
 }
 

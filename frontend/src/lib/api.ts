@@ -108,6 +108,11 @@ export interface SavedCrawl {
     };
     /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
     platform?: { platform: string; signal: string };
+    /** robots.txt presence + declared crawl-delay (absent for old crawls). */
+    robots?: {
+      status: "found" | "absent" | "unreachable" | "skipped";
+      crawlDelayMs: number | null;
+    };
   };
   createdAt: string;
   updatedAt: string;

@@ -56,6 +56,14 @@ const discoverySchema = new mongoose.Schema(
     platform: {
       platform: { type: String, default: 'Unknown' },
       signal: { type: String, default: '' }
+    },
+    robots: {
+      status: {
+        type: String,
+        enum: ['found', 'absent', 'unreachable', 'skipped'],
+        default: 'skipped'
+      },
+      crawlDelayMs: { type: Number, default: null }
     }
   },
   { _id: false }

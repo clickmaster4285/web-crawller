@@ -92,7 +92,7 @@ src/
 │   ├── http.ts               # token-aware fetch client (/api prefix + Bearer JWT)
 │   ├── api.ts                # REST getters for GET /api/data/* (workspace, analytics, … + crawl-results)
 │   ├── auth.ts               # real JWT auth (signIn → POST /api/auth/login; token + session in localStorage)
-│   ├── crawl.ts              # startCrawl/getCrawlProgress job API + scheduleCrawl/getCrawlSchedules/cancelCrawlSchedule (checkpointed crawler, persisted to backend)
+│   ├── crawl.ts              # startCrawl/getCrawlProgress job API (live discovery+fetch progress, params snapshot) + scheduleCrawl/getCrawlSchedules/cancelCrawlSchedule (checkpointed crawler, persisted to backend)
 │   ├── error-page.ts         # SSR error HTML
 │   ├── error-capture.ts      # SSR error capture used by server.ts
 │   └── utils.ts
@@ -197,7 +197,7 @@ no page imports local mock data. There are no placeholder shells left:
 | AI insights      | `/insights`    | `NoRealDataState` (needs the insight engine)                                                     |
 | Alerts           | `/alerts`      | `NoRealDataState` (needs the alert engine)                                                       |
 | Reports          | `/reports`     | `NoRealDataState` (needs the report generator)                                                   |
-| Data sources     | `/sources`     | Workspace summary + **Live crawl** panel (full config) + **Frequency scheduler** + **Saved crawls** panel |
+| Data sources     | `/sources`     | "Your website" card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %) + **Live crawl** panel (full config, live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning) + **Frequency scheduler** + **Saved crawls** panel |
 
 Existing shared primitives: `PageHeader`/`DashboardLayout`/`Sidebar`
 (`components/layout/`), `StatCard`/`SectionTitle` (`components/cards/`),
@@ -266,6 +266,24 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   `src/lib/api.ts`) with expandable stats/products/failures; it auto-
   refreshes when a finished crawl persists (`queryClient.invalidateQueries`
   on `job.persisted`) and polls every 30s so scheduled runs appear.
+- **Progress-panel diagnostics** — the live-crawl panel shows **real discovery
+  numbers while discovery runs** (sitemap URLs found, HTML pages visited,
+  product URLs so far, collection handles via `CrawlJob.discovery`), then a
+  **fetch-phase ETA** (`Discovery X · Fetch Y` split — discovery time never
+  inflates the estimate, 5s warm-up floor), and a **Running with** row of
+  parameter badges plus a **Config changed mid-run** warning when the panel
+  config diverges from the job's captured `params`.
+- **Detection from the last crawl** — the "Your website" card is rebuilt from
+  the latest saved crawl: **platform** (detected via robots.txt markers +
+  homepage signals in `discover/platform.ts`, persisted as
+  `discovery.platform` with a signal tooltip), **product URL pattern**
+  (derived from a real crawled product URL), **sitemap** status, **robots.txt
+  presence + declared crawl-delay** (`discovery.robots`, status
+  `found|absent|unreachable|skipped`), and a **parse-rate %** — with honest
+  `—` fallbacks for fields the crawler doesn't capture, and a conditional
+  Verified / Detected from crawl / Not connected badge. The **Discovery
+  engine** card shows real per-strategy counts (sitemap URLs, HTML pages
+  visited, collections) instead of the old hardcoded numbers.
 - Persistence: crawl results are saved to MongoDB (backend `CrawlResult`
   model, `POST/GET /api/data/crawl-results`) plus per-origin SQLite
   checkpoints (`.crawler/crawl-<host>.db`) for skip-unchanged re-crawls and
@@ -592,6 +610,17 @@ step, pause and confirm before moving on.
   steps 2–3 — the earlier "lint green" checks used a grep pattern that never
   matched eslint's Windows backslash paths. Verified with `tsc` + lint +
   build.
+- Step 5.5 (discovery diagnostics + platform + robots capture) — **done**.
+  `discover/platform.ts` (`detectPlatform`: robots.txt markers → generator
+  meta → asset fingerprints, never throws, degrades to "Unknown" + signal);
+  `Politeness` now exposes the robots.txt fetch outcome (`robotsStatus`:
+  `found|absent|unreachable|skipped`) and the declared `robotsCrawlDelayMs`;
+  the snapshot flows into `DiscoveryDiagnostics.robots` (plus `platform`),
+  through `CrawlRunResult.discovery`, the backend `CrawlResult` schema
+  (enum-validated), and `SavedCrawl.discovery` (optional so old crawls
+  don't crash). The Sources "Your website" card surfaces both with tooltips
+  and honest `—` fallbacks. Verified with `tsc` + lint + backend schema
+  round-trip.
 - Step 6 (Playwright fallback) — **next**
 
 ---
