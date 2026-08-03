@@ -133,6 +133,37 @@ export const getAnalyticsData = () =>
 export const getCompetitorsData = () =>
   http.get<Competitor[]>("/data/competitors");
 
+export interface CreateCompetitorInput {
+  /** Display name; falls back to a readable name derived from the domain. */
+  name: string;
+  /** Full origin URL, e.g. https://store.example.com */
+  origin: string;
+  notes?: string;
+}
+
+/** Adds a competitor to the monitored list (persisted on the backend). */
+export const createCompetitor = (input: CreateCompetitorInput) =>
+  http.post<{ success: boolean; data: unknown }>("/data/competitors", input);
+
+/** Removes a manually-added competitor (crawled origins are auto-derived). */
+export const deleteCompetitor = (id: string) =>
+  http.del<{
+    success: boolean;
+    data: { deleted: boolean; id: string; name: string };
+  }>(`/data/competitors/${id}`);
+
+/** The user's own store (single document) — used to compare against competitors. */
+export interface MyStore {
+  origin: string;
+  name: string;
+}
+
+export const getMyStoreData = () =>
+  http.get<{ success: boolean; data: MyStore | null }>("/data/my-store");
+
+export const setMyStoreData = (input: { origin: string; name?: string }) =>
+  http.put<{ success: boolean; data: MyStore }>("/data/my-store", input);
+
 export const getMatchedProductsData = () =>
   http.get<MatchedProduct[]>("/data/matched-products");
 
@@ -149,3 +180,24 @@ export const getReportsData = () => http.get<ReportSummary[]>("/data/reports");
 
 export const getCrawlResultsData = () =>
   http.get<CrawlResultsResponse>("/data/crawl-results");
+
+/** Response shape of the DELETE crawl-results endpoints. */
+export interface DeleteCrawlResultResponse {
+  success: boolean;
+  data: {
+    deleted: boolean;
+    id?: string;
+    origin: string;
+    deletedCount?: number;
+  };
+}
+
+/** Deletes a single saved crawl snapshot by its Mongo id. */
+export const deleteCrawlResult = (id: string) =>
+  http.del<DeleteCrawlResultResponse>(`/data/crawl-results/${id}`);
+
+/** Deletes every saved snapshot for an origin (clears that store's history). */
+export const deleteCrawlResultsByOrigin = (origin: string) =>
+  http.del<DeleteCrawlResultResponse>(
+    `/data/crawl-results?origin=${encodeURIComponent(origin)}`,
+  );

@@ -1,27 +1,47 @@
+import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
-export function EmptyState({
+/**
+ * The standard dashed-card state shell used for loading/empty/error
+ * messages across pages. Override the margins with `className` where a
+ * page's layout differs (e.g. `mx-6 mb-8`).
+ */
+export function StateCard({
   title,
   description,
-  actionLabel = "Add a competitor",
-  actionTo = "/competitors",
+  icon,
+  action,
+  destructive = false,
+  className,
 }: {
   title: string;
-  description: string;
-  actionLabel?: string;
-  actionTo?: string;
+  description: ReactNode;
+  /** Optional icon rendered above the title. */
+  icon?: ReactNode;
+  /** Optional action row (buttons / links) rendered below the text. */
+  action?: ReactNode;
+  destructive?: boolean;
+  className?: string;
 }) {
   return (
-    <div className="mx-6 my-10 border border-dashed border-border bg-card p-10 text-center">
+    <div
+      className={cn(
+        "mx-6 border border-dashed bg-card p-10 text-center",
+        destructive ? "border-destructive/40" : "border-border",
+        className,
+      )}
+    >
+      {icon ? <div className="mb-3 flex justify-center">{icon}</div> : null}
       <h2 className="font-display text-2xl">{title}</h2>
       <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
         {description}
       </p>
-      <Button asChild className="mt-6">
-        <Link to={actionTo}>{actionLabel}</Link>
-      </Button>
+      {action ? (
+        <div className="mt-6 flex flex-wrap justify-center gap-3">{action}</div>
+      ) : null}
     </div>
   );
 }
@@ -47,12 +67,12 @@ export function ErrorState({
   description?: string;
 }) {
   return (
-    <div className="mx-6 my-10 border border-dashed border-destructive/40 bg-card p-10 text-center">
-      <h2 className="font-display text-2xl">{title}</h2>
-      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-        {description}
-      </p>
-    </div>
+    <StateCard
+      destructive
+      title={title}
+      description={description}
+      className="my-10"
+    />
   );
 }
 
@@ -69,14 +89,15 @@ export function NoRealDataState({
   description?: string;
 }) {
   return (
-    <div className="mx-6 my-10 border border-dashed border-border bg-card p-10 text-center">
-      <h2 className="font-display text-2xl">{title}</h2>
-      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-        {description}
-      </p>
-      <Button asChild className="mt-6">
-        <Link to="/sources">Run a crawl</Link>
-      </Button>
-    </div>
+    <StateCard
+      className="my-10"
+      title={title}
+      description={description}
+      action={
+        <Button asChild>
+          <Link to="/sources">Run a crawl</Link>
+        </Button>
+      }
+    />
   );
 }

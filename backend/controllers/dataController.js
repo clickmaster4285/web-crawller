@@ -21,6 +21,8 @@
  */
 
 const CrawlResult = require('../models/CrawlResult');
+const Competitor = require('../models/Competitor');
+const MyStore = require('../models/MyStore');
 
 /** "8 min ago"-style relative time from a timestamp. */
 function relativeTime(ts) {
@@ -37,9 +39,9 @@ function relativeTime(ts) {
 /** The host of an origin, e.g. https://shop.com/products -> shop.com */
 function originHost(origin) {
   try {
-    return new URL(origin).host.replace(/^www\./, '');
+    return new URL(origin).host.replace(/^www\./, '').toLowerCase();
   } catch {
-    return origin;
+    return String(origin).toLowerCase();
   }
 }
 
@@ -64,18 +66,39 @@ async function loadLatestPerOrigin() {
   return { latest, rows };
 }
 
-/** Computes competitor rows (one per crawled origin) from saved crawls. */
-function computeCompetitors(latest) {
+/**
+ * Computes competitor rows: one per crawled origin, merged with the
+ * manually-added `Competitor` docs (which may not have been crawled yet) and
+ * the user's own store (a special "my store" row, `isMine: true`).
+ */
+function computeCompetitors(latest, manual, myStore) {
+  const manualByHost = new Map();
+  for (const m of manual) {
+    manualByHost.set(originHost(m.origin), m);
+  }
+  const myStoreHost = myStore && myStore.origin ? originHost(myStore.origin) : null;
   const competitors = [];
+  const crawledHosts = new Set();
   for (const [origin, doc] of latest) {
+    const host = originHost(origin);
+    crawledHosts.add(host);
     const products = doc.products || [];
+    const manualDoc = manualByHost.get(host);
+    const isMine = !!myStoreHost && host === myStoreHost;
     // No "your price" to index against yet, so every competitor sits at the
     // neutral baseline of 100 (their own average). Honest, not fabricated.
     const avgPriceIndex = 100;
     competitors.push({
-      id: `crawl-${originHost(origin)}`,
-      name: originName(origin),
-      website: originHost(origin),
+      id: isMine ? 'my-store' : manualDoc ? String(manualDoc._id) : `crawl-${host}`,
+      name: isMine
+        ? myStore.name || 'My store'
+        : manualDoc
+          ? manualDoc.name
+          : originName(origin),
+      origin,
+      manual: isMine ? false : !!manualDoc,
+      isMine,
+      website: host,
       country: '—',
       currency: '—',
       language: '—',
@@ -90,6 +113,55 @@ function computeCompetitors(latest) {
       priceChanges: 0,
       outOfStock: products.filter((p) => p.available === false).length,
       avgPriceIndex,
+      frequency: 'Daily',
+    });
+  }
+  // Manually-added competitors that haven't been crawled yet.
+  for (const [host, m] of manualByHost) {
+    if (crawledHosts.has(host)) continue;
+    competitors.push({
+      id: String(m._id),
+      name: m.name,
+      origin: m.origin,
+      manual: true,
+      isMine: false,
+      website: host,
+      country: '—',
+      currency: '—',
+      language: '—',
+      industry: 'E-commerce',
+      platform: '—',
+      status: 'pending',
+      lastCrawl: 'Not crawled yet',
+      products: 0,
+      newToday: 0,
+      priceChanges: 0,
+      outOfStock: 0,
+      avgPriceIndex: 100,
+      frequency: 'Daily',
+    });
+  }
+  // The user's own store, set but not crawled yet.
+  if (myStoreHost && !crawledHosts.has(myStoreHost)) {
+    competitors.push({
+      id: 'my-store',
+      name: myStore.name || 'My store',
+      origin: myStore.origin,
+      manual: false,
+      isMine: true,
+      website: myStoreHost,
+      country: '—',
+      currency: '—',
+      language: '—',
+      industry: 'E-commerce',
+      platform: '—',
+      status: 'pending',
+      lastCrawl: 'Not crawled yet',
+      products: 0,
+      newToday: 0,
+      priceChanges: 0,
+      outOfStock: 0,
+      avgPriceIndex: 100,
       frequency: 'Daily',
     });
   }
@@ -165,6 +237,16 @@ function computeDashboardStats(competitors, matchedProducts) {
   };
 }
 
+/** Manually-added competitor docs, newest first. */
+async function loadManualCompetitors() {
+  return Competitor.find({}).sort({ createdAt: -1 });
+}
+
+/** The user's own store doc (single document), or null when unset. */
+async function loadMyStore() {
+  return MyStore.findById(MyStore.MY_STORE_ID);
+}
+
 /** Every route handler below. */
 const dataController = {
   async workspace(req, res) {
@@ -188,7 +270,11 @@ const dataController = {
 
   async analytics(req, res) {
     const { latest } = await loadLatestPerOrigin();
-    const competitors = computeCompetitors(latest);
+    const competitors = computeCompetitors(
+      latest,
+      await loadManualCompetitors(),
+      await loadMyStore()
+    );
     const matchedProducts = computeMatchedProducts(latest);
     const stats = computeDashboardStats(competitors, matchedProducts);
     res.json({
@@ -229,7 +315,13 @@ const dataController = {
 
   async competitors(req, res) {
     const { latest } = await loadLatestPerOrigin();
-    res.json(computeCompetitors(latest));
+    res.json(
+      computeCompetitors(
+        latest,
+        await loadManualCompetitors(),
+        await loadMyStore()
+      )
+    );
   },
 
   async matchedProducts(req, res) {
@@ -239,7 +331,11 @@ const dataController = {
 
   async pricing(req, res) {
     const { latest } = await loadLatestPerOrigin();
-    const competitors = computeCompetitors(latest);
+    const competitors = computeCompetitors(
+      latest,
+      await loadManualCompetitors(),
+      await loadMyStore()
+    );
     const matchedProducts = computeMatchedProducts(latest);
     res.json({
       competitors,
@@ -251,7 +347,11 @@ const dataController = {
 
   async catalogue(req, res) {
     const { latest } = await loadLatestPerOrigin();
-    const competitors = computeCompetitors(latest);
+    const competitors = computeCompetitors(
+      latest,
+      await loadManualCompetitors(),
+      await loadMyStore()
+    );
     res.json({
       categoryGaps: [], // needs your catalogue + matching
       brandGaps: [], // needs your catalogue + matching

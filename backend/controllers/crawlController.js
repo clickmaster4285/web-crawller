@@ -10,6 +10,7 @@
  * optionally filtered by origin.
  */
 
+const mongoose = require('mongoose');
 const CrawlResult = require('../models/CrawlResult');
 
 /** Max snapshots kept per origin in history mode. */
@@ -110,4 +111,67 @@ const getCrawlResults = async (req, res) => {
   }
 };
 
-module.exports = { saveCrawlResult, getCrawlResults };
+/** Deletes a single saved crawl snapshot by id. */
+const deleteCrawlResult = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid crawl result id'
+      });
+    }
+    const doc = await CrawlResult.findByIdAndDelete(id);
+    if (!doc) {
+      return res.status(404).json({
+        success: false,
+        message: 'Crawl result not found'
+      });
+    }
+    console.log(`🗑️ Deleted crawl result ${id} for ${doc.origin}`);
+    res.json({
+      success: true,
+      data: { deleted: true, id, origin: doc.origin }
+    });
+  } catch (error) {
+    console.error('Delete crawl result error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+/** Deletes every saved snapshot for an origin (`DELETE /crawl-results?origin=`). */
+const deleteCrawlResultsByOrigin = async (req, res) => {
+  try {
+    const origin = req.query.origin;
+    if (typeof origin !== 'string' || !origin.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'origin query param is required'
+      });
+    }
+    const result = await CrawlResult.deleteMany({ origin });
+    console.log(
+      `🗑️ Cleared ${result.deletedCount} crawl result(s) for ${origin}`
+    );
+    res.json({
+      success: true,
+      data: { deleted: true, origin, deletedCount: result.deletedCount }
+    });
+  } catch (error) {
+    console.error('Delete crawl results by origin error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+module.exports = {
+  saveCrawlResult,
+  getCrawlResults,
+  deleteCrawlResult,
+  deleteCrawlResultsByOrigin
+};

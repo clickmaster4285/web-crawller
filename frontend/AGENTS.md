@@ -42,7 +42,7 @@ seeded into MongoDB on backend boot.
 | `npm run build`     | Production build: client + Nitro SSR server →`dist/client`, `dist/server`                                                                    |
 | `npm run build:dev` | Build with development mode                                                                                                                       |
 | `npm run preview`   | Preview the production build                                                                                                                      |
-| `npm run lint`      | ESLint (run this after every change; currently 0 errors, 4 pre-existing`react-refresh/only-export-components` warnings in shadcn UI components) |
+| `npm run lint`      | ESLint (run this after every change; currently 0 errors, 3 pre-existing`react-refresh/only-export-components` warnings in shadcn UI components) |
 | `npm run format`    | Prettier write                                                                                                                                    |
 | `npx tsc --noEmit`  | Typecheck (strict mode)                                                                                                                           |
 | `npm run crawl`    | CLI crawl against obdesignsusa.com, checkpointing to `.crawler/` (gitignored)                                                                  |
@@ -73,12 +73,18 @@ src/
 │       ├── insights/         # /insights
 │       ├── alerts/           # /alerts
 │       ├── reports/          # /reports
-│       └── sources/          # /sources
+│       ├── crawls/           # /crawls   (Saved crawls history)
+│       ├── stores/           # /stores/$origin (full store catalogue page)
+│       └── sources/          # /sources  (Crawler)
 ├── components/
 │   ├── ui/                   # shadcn primitives (Radix + CVA + tailwind-merge)
-│   ├── common/               # shared app components
+│   ├── common/               # shared atoms + state cards (states/StateCard, stock-badge, product-cell, price-delta)
+│   ├── cards/                # StatCard/SectionTitle, CrawlStat, CrawlStatsGrid, CrawlDiffTile, CrawlDiffSummary
+│   ├── crawls/               # saved-crawl UI (store-profile)
+│   ├── competitors/          # add-competitor-dialog, compare-stores
 │   └── layout/               # layout components
 ├── constants/
+│   ├── index.ts              # barrel: ROUTES + sidebar nav groups (INTELLIGENCE_NAV, OPERATIONS_NAV)
 │   ├── routes.ts             # central ROUTES map (incl. ROUTES.login)
 │   └── sidebar.ts
 ├── hooks/
@@ -100,7 +106,10 @@ src/
 ├── types/                    # common.ts (incl. DashboardStats), competitor.ts, product.ts, report.ts
 ├── utils/
 │   ├── formatCurrency.ts
-│   └── index.ts
+│   ├── crawls.ts             # origin/URL helpers, prefill-crawler, crawl diff, robots text
+│   ├── format.ts             # formatPrice, formatDuration (shared number/formatting helpers)
+│   ├── compare.ts            # cross-store comparison (exact + fuzzy name matching, threshold)
+│   └── index.ts              # barrel re-export (gbp)
 ├── styles.css
 ├── router.tsx                # getRouter() factory (routeTree + QueryClient) — REQUIRED by Start
 ├── routeTree.gen.ts          # AUTO-GENERATED from src/pages — never hand-edit
@@ -191,19 +200,28 @@ no page imports local mock data. There are no placeholder shells left:
 | Page             | Route            | What it shows today                                                                                |
 | ---------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
 | Overview         | `/`            | Stat cards + competitor snapshot via`useAnalytics()`; `NoRealDataState` when no crawls exist yet  |
-| Competitors      | `/competitors` | One card + table row per **crawled origin** via`useCompetitors()` (derived from saved crawls)   |
+| Competitors      | `/competitors` | Manual + crawled stores merged via`useCompetitors()` (deduped by lowercase host; a custom name wins): **Add competitor** dialog (`POST /api/data/competitors`), per-row Crawl / Delete actions, a **"Your store"** row (`isMine`, set once via `GET/PUT /api/data/my-store`, never deletable), and a **Compare stores** section — Store A/B pickers, in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with a **Cheapest** column, and a **Fuzzy matching** toggle + **Similarity threshold** slider (both persisted under `parity.competitors.*`). The compare bar doubles as the "Your store" setter with a Crawl-your-store shortcut |
+| Saved crawls     | `/crawls`      | Snapshot history per store via`useSavedCrawls()`: history **hidden by default** with a per-store **Show history / Hide history** toggle, "+N new / removed · price changed / no change / first snapshot" badges, expandable rows (stats, changes vs previous, discovery, first-8 products, failures), a **View all N products** link to the full **Store catalogue** page, **Re-crawl** (prefills the crawler via `prefillCrawlerOrigin`), **Delete snapshot** / **Clear history** (`DELETE /api/data/crawl-results/:id` / `/crawl-results?origin=`) |
+| Store catalogue  | `/stores/$origin` | Full-page product list for one store via`useSavedCrawls()` (dynamic route keyed by **normalized origin**): newest-snapshot default with a **snapshot picker** (a stale id falls back to the newest), a crawl **stats row** + **Store profile** card, and a **searchable + sortable** Products table (name/brand/URL search, Product/Price column sorting, parse-rate badge, stock badges, "Showing X of Y" count). Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler) and a **Saved crawls** back link; dynamic `document.title` |
 | Matched products | `/products`    | Searchable/filterable table via`useMatchedProducts()` — real crawled products; your-price/gap matching placeholder until the matching layer lands |
 | Pricing          | `/pricing`     | Positioning + market average from crawled data via`usePricing()`; history empty until time-series  |
 | Catalogue gaps   | `/catalogue`   | Charts/gaps empty until your catalogue + matching exist; honest`NoRealDataState`               |
 | AI insights      | `/insights`    | `NoRealDataState` (needs the insight engine)                                                     |
 | Alerts           | `/alerts`      | `NoRealDataState` (needs the alert engine)                                                       |
 | Reports          | `/reports`     | `NoRealDataState` (needs the report generator)                                                   |
-| Data sources     | `/sources`     | "Your website" card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %) + **Live crawl** panel (full config, live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning) + **Frequency scheduler** + **Saved crawls** panel. Panel state is **refresh-proof**: config, running `jobId`, expanded saved-crawl row and schedules cache persist via `useLocalStorageState`, and the job id is mirrored to `?job=` so a reload (even in another tab) reconnects to the running crawl ("Reconnected to running crawl" badge) |
+| Data sources     | `/sources`     | Domain-first **Start a crawl** card (domain + collections + run/schedule + "Recently crawled" chips) + a **Store profile** card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %, product count) + **Live crawl** panel (live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning) + **"What's new since the last crawl"** diff vs the previous snapshot + **Frequency scheduler**. Full snapshot history now lives on the separate **`/crawls`** page. Panel state is **refresh-proof**: config, running `jobId`, expanded saved-crawl row and schedules cache persist via `useLocalStorageState`, and the job id is mirrored to `?job=` so a reload (even in another tab) reconnects to the running crawl ("Reconnected to running crawl" badge) |
 
 Existing shared primitives: `PageHeader`/`DashboardLayout`/`Sidebar`
-(`components/layout/`), `StatCard`/`SectionTitle` (`components/cards/`),
-`EmptyState`/`LoadingState`/`ErrorState`/`NoRealDataState`
-(`components/common/`), and the shadcn set in `components/ui/`.
+(`components/layout/`), `StatCard`/`SectionTitle`/`CrawlStat`/`CrawlStatsGrid`/
+`CrawlDiffTile`/`CrawlDiffSummary` (`components/cards/`),
+`LoadingState`/`ErrorState`/`NoRealDataState`/`StateCard`/`PriceDelta`/
+`StockBadge`/`ProductCell` (`components/common/`), the saved-crawl and
+competitor feature components (`components/crawls/`,
+`components/competitors/`), and the shadcn set in `components/ui/`. Shared
+helpers live in `utils/crawls.ts` (origin/URL utils, `computeCrawlDiff`,
+`robotsText`), `utils/format.ts` (`formatPrice`, `formatDuration`) and
+`utils/compare.ts` (`compareStores` — exact + fuzzy name matching with a
+tunable threshold).
 
 ## What's next (the plan)
 
@@ -222,9 +240,14 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 
 - Add page-level interactions: filtering, sorting, pagination, drill-downs
   (e.g. product → price history, competitor → profile).
+  *(Partly done — the Store catalogue page (`/stores/$origin`) has search +
+  column sorting and is the product-list drill-down; price history and
+  pagination remain.)*
 - Add global search + command palette over competitors/products/insights.
 - Add create/edit flows (e.g. add a competitor, subscribe to a data source,
   configure an alert) using `react-hook-form` + `zod` (already installed).
+  *(Partly done — adding a competitor and setting your "my store" are live on
+  `/competitors`; alerts / data-source flows remain.)*
 - (The old `src/data/mock` layer is gone — interactions now run on the real
   backend-derived data.)
 
@@ -262,11 +285,10 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   politeness warning when concurrency is raised), Product-only mode, and
   Store full snapshots. A **Frequency scheduler** section registers
   recurring crawls (`scheduleCrawl`, 1h/6h/daily/weekly) with an active-
-  schedules list + cancel. A **Saved crawls** panel below lists persisted
-  results via `useSavedCrawls()` (`GET /api/data/crawl-results`, types in
-  `src/lib/api.ts`) with expandable stats/products/failures; it auto-
-  refreshes when a finished crawl persists (`queryClient.invalidateQueries`
-  on `job.persisted`) and polls every 30s so scheduled runs appear.
+  schedules list + cancel. Finished results are saved to the backend
+  `CrawlResult` collection and the saved-crawls query cache is invalidated on
+  `job.persisted`, so the **`/crawls`** page (Saved crawls history) stays
+  fresh without a reload.
 - **Progress-panel diagnostics** — the live-crawl panel shows **real discovery
   numbers while discovery runs** (sitemap URLs found, HTML pages visited,
   product URLs so far, collection handles via `CrawlJob.discovery`), then a
@@ -280,8 +302,7 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   collections, **job id**, delay, concurrency, **max-pages mode with a
   Custom… free number input** (strict positive integer via `Number()` +
   `Number.isInteger`; empty falls back to unlimited), robots/product-only/
-  snapshot toggles, and frequency. Also persisted: the expanded saved-crawl
-  row id (`parity.sources.expandedCrawlId`) and a schedules cache
+  snapshot toggles, and frequency. Also persisted: a schedules cache
   (`parity.sources.schedules`) that renders silently while the live query
   loads and shows an honest "Server unreachable — showing the last known
   schedules from memory" note only on error (`isError && !data` — live
@@ -299,8 +320,9 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   restored job is still running: `startedInThisSession` ref records jobs this
   page session started itself (`start.onSuccess`), so a fresh run never shows
   it, and it auto-hides when the crawl finishes.
-- **Detection from the last crawl** — the "Your website" card is rebuilt from
-  the latest saved crawl: **platform** (detected via robots.txt markers +
+- **Detection from the last crawl** — the "Store profile" card (the
+  `StoreProfile` component in `components/crawls/`) is rebuilt from the latest
+  saved crawl: **platform** (detected via robots.txt markers +
   homepage signals in `discover/platform.ts`, persisted as
   `discovery.platform` with a signal tooltip), **product URL pattern**
   (derived from a real crawled product URL), **sitemap** status, **robots.txt
@@ -311,19 +333,27 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   engine** card shows real per-strategy counts (sitemap URLs, HTML pages
   visited, collections) instead of the old hardcoded numbers.
 - Persistence: crawl results are saved to MongoDB (backend `CrawlResult`
-  model, `POST/GET /api/data/crawl-results`) plus per-origin SQLite
-  checkpoints (`.crawler/crawl-<host>.db`) for skip-unchanged re-crawls and
-  crash-safe incremental saves. The backend keeps **snapshot history** (up to
-  20 per origin, `createdAt`-sorted) when `storeSnapshots` is true, or
-  replaces the latest result when false. **Dashboard wiring is done**: the
-  demo dataset is deleted and `backend/controllers/dataController.js`
-  derives competitors/products/stats from the real `CrawlResult` collection,
+  model; `POST/GET /api/data/crawl-results`, `DELETE` one
+  `/api/data/crawl-results/:id` or a whole store
+  `/api/data/crawl-results?origin=`) plus per-origin SQLite checkpoints
+  (`.crawler/crawl-<host>.db`) for skip-unchanged re-crawls and crash-safe
+  incremental saves. The backend keeps **snapshot history** (up to 20 per
+  origin, `createdAt`-sorted) when `storeSnapshots` is true, or replaces the
+  latest result when false. **Manual competitors + your store**: a
+  `Competitor` model with `POST/DELETE /api/data/competitors` and a `MyStore`
+  singleton with `GET/PUT /api/data/my-store`;
+  `dataController.competitors` merges crawled origins + manual entries
+  (deduped by lowercase host; a manual name wins) plus a special `isMine`
+  row for your own store. **Dashboard wiring is done**: the demo dataset is
+  deleted and `backend/controllers/dataController.js` derives
+  competitors/products/stats from the real `CrawlResult` collection,
   returning honest empty states for features with no source yet. Still TODO:
-  your-store workspace setup, the product-matching layer (GTIN > SKU > slug
-  > fuzzy), price-history time-series, category/brand gaps, the
-  insights/alerts/reports engines, auth for `/api/data` routes, and
-  production `vite preview` needs a reverse proxy in front of the backend
-  (the `/api` proxy is dev-only).
+  the full your-store workspace/catalogue import (the MyStore row stores
+  only the origin), the product-matching layer (GTIN > SKU > slug > fuzzy),
+  price-history time-series, category/brand gaps, the insights/alerts/
+  reports engines, auth for `/api/data` routes, and production
+  `vite preview` needs a reverse proxy in front of the backend (the `/api`
+  proxy is dev-only).
 
 ### Layer 4 — Data ingestion & alerts
 
@@ -644,9 +674,9 @@ step, pause and confirm before moving on.
   the snapshot flows into `DiscoveryDiagnostics.robots` (plus `platform`),
   through `CrawlRunResult.discovery`, the backend `CrawlResult` schema
   (enum-validated), and `SavedCrawl.discovery` (optional so old crawls
-  don't crash). The Sources "Your website" card surfaces both with tooltips
+  don't crash). The Sources "Store profile" card surfaces both with tooltips
   and honest `—` fallbacks. Verified with `tsc` + lint + backend schema
-  round-trip.
+  round-trip. *(The Sources card is now titled "Store profile".)*
 - Step 6 (Playwright fallback) — **next**
 
 ---
@@ -696,8 +726,13 @@ the TanStack app fetches data from the Express API and authenticates with JWT.
   and returns honest empty states for unconnected features).
   `POST/GET /api/data/crawl-results` persists/reads saved crawls
   (`crawlController.js`): snapshot history (cap 20/origin) when
-  `storeSnapshots`, else replace-latest.
-- Verification: `tsc` clean · `eslint src` 0 errors (4 pre-existing shadcn
+  `storeSnapshots`, else replace-latest; `DELETE /api/data/crawl-results/:id`
+  and `DELETE /api/data/crawl-results?origin=` remove one snapshot or a
+  store's whole history. **Competitors**: `Competitor` model +
+  `competitorController` (`POST/DELETE /api/data/competitors`), merged with
+  crawled origins and the `MyStore` singleton row (`GET/PUT /api/data/my-store`)
+  in `dataController.competitors`.
+- Verification: `tsc` clean · `eslint src` 0 errors (3 pre-existing shadcn
   `react-refresh` warnings) · `build` clean · backend boots and serves
   `/health`, `/api/data/*`, and `/api/auth/login` (curl-verified).
 

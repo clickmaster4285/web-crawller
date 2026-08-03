@@ -1,11 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
   CalendarClock,
-  ChevronDown,
-  ChevronUp,
   CircleCheck,
+  Eye,
   Globe,
   Loader2,
   Play,
@@ -14,7 +14,12 @@ import {
 } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
+import { StoreProfile } from "@/components/crawls/store-profile";
 import { SectionTitle } from "@/components/cards/stat-card";
+import { CrawlDiffSummary } from "@/components/cards/crawl-diff-summary";
+import { CrawlStatsGrid } from "@/components/cards/crawl-stats-grid";
+import { ProductCell } from "@/components/common/product-cell";
+import { StockBadge } from "@/components/common/stock-badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -48,7 +53,12 @@ import {
   type CrawlSchedule,
   type ScheduleCrawlInput,
 } from "@/lib/crawl";
-import { cn } from "@/lib/utils";
+import {
+  computeCrawlDiff,
+  formatCrawlDate,
+  normalizeOrigin,
+} from "@/utils/crawls";
+import { formatDuration, formatPrice } from "@/utils/format";
 
 /** Route search params — `?job=` reconnects to a specific crawl job. */
 type SourcesSearch = {
@@ -63,18 +73,13 @@ export const Route = createFileRoute("/_authenticated/sources/")({
   }),
   head: () => ({
     meta: [
-      { title: "Sources & crawling — Parity" },
+      { title: "Crawler — Parity" },
       {
         name: "description",
         content:
-          "Connect your store, verify ownership, and configure discovery, crawl frequency, page limits and robots.txt behaviour.",
+          "Crawl any store: enter the domain, tune the configuration, and the engine discovers products via sitemaps, HTML crawling and structured data — politely, respecting robots.txt. Results are saved for history.",
       },
-      { property: "og:title", content: "Sources & crawling — Parity" },
-      {
-        property: "og:description",
-        content:
-          "Connect and verify your store, then configure crawl frequency and discovery rules.",
-      },
+      { property: "og:title", content: "Crawler — Parity" },
     ],
   }),
   component: SourcesPage,
@@ -86,11 +91,6 @@ function SourcesPage() {
   const queryClient = useQueryClient();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
-  // Persisted so an accidental refresh keeps the expanded saved-crawl row open.
-  const [expandedId, setExpandedId] = useLocalStorageState<string | null>(
-    "parity.sources.expandedCrawlId",
-    null,
-  );
 
   // Live crawl controls — persisted to localStorage so an accidental refresh
   // (or restart) restores the panel exactly as it was, and re-attaches to a
@@ -307,204 +307,558 @@ function SourcesPage() {
       job.params.productOnly === productOnly &&
       job.params.storeSnapshots === storeSnapshots);
 
-  if (isError) return <ErrorState />;
-  if (isLoading || !workspace) return <LoadingState label="Loading sources…" />;
+  // The previous saved snapshot for the origin being crawled — everything
+  // saved *after* this run started (including this run's own persistence)
+  // is excluded, so the "what's new" diff is always against the last crawl
+  // that existed before this one.
+  const prevCrawl = useMemo(() => {
+    if (!startedAt) return undefined;
+    const key = normalizeOrigin(crawlOrigin.trim());
+    return (saved.data?.data ?? []).find(
+      (c) =>
+        normalizeOrigin(c.origin) === key &&
+        new Date(c.updatedAt).getTime() < startedAt,
+    );
+  }, [saved.data, crawlOrigin, startedAt]);
 
-  // Real detection values from the latest saved crawl (GET returns newest
-  // first). The workspace isn't connected yet, so store-level fields stay
-  // honest "—" and everything else is measured from the last crawl.
-  const latestCrawl = saved.data?.data?.[0];
-  const d = latestCrawl?.discovery;
-  const parseRate =
-    latestCrawl && latestCrawl.stats.fetched > 0
-      ? Math.round(
-          (latestCrawl.products.length / latestCrawl.stats.fetched) * 100,
-        )
-      : null;
-  const detected: Array<[string, string, string?]> = [
-    [
-      "Platform",
-      latestCrawl?.discovery?.platform?.platform || workspace.platform || "—",
-      latestCrawl?.discovery?.platform?.signal,
-    ],
-    ["Currency", workspace.currency || "—"],
-    ["Language", workspace.language || "—"],
-    [
-      "Products found",
-      latestCrawl ? latestCrawl.stats.discovered.toLocaleString() : "—",
-    ],
-    [
-      "Categories",
-      workspace.categories > 0 ? String(workspace.categories) : "—",
-    ],
-    [
-      "Product URL pattern",
-      latestCrawl?.products?.[0]?.url
-        ? productUrlPattern(latestCrawl.products[0].url)
-        : "—",
-    ],
-    [
-      "Sitemap",
-      d
-        ? d.sitemap.error
-          ? "Not found"
-          : `${d.sitemap.urls.toLocaleString()} product URLs`
-        : "—",
-    ],
-    ["robots.txt", robotsRowText(d)],
-    [
-      "Structured data",
-      parseRate != null ? `${parseRate}% of pages parsed` : "—",
-    ],
-  ];
+  const diff = useMemo(
+    () =>
+      result ? computeCrawlDiff(result.products, prevCrawl?.products) : null,
+    [result, prevCrawl],
+  );
 
-  // Real discovery diagnostics from the latest saved crawl — replaces the
-  // old static "1,284 product URLs"-style placeholders.
-  const discoveryRows: Array<[string, string]> = [];
-  if (latestCrawl && d) {
-    discoveryRows.push([
-      "Sitemap",
-      d.sitemap.error
-        ? "Failed"
-        : `${d.sitemap.urls.toLocaleString()} product URLs`,
-    ]);
-    discoveryRows.push([
-      "HTML crawl",
-      d.htmlCrawl.error
-        ? "Failed"
-        : `${d.htmlCrawl.pagesVisited.toLocaleString()} pages visited`,
-    ]);
-    if (d.collections.length > 0) {
-      discoveryRows.push([
-        "Collections",
-        d.collections.map((c) => `${c.collection}: ${c.handles}`).join(", "),
-      ]);
+  // Unique stores from saved crawls (newest first) — one-click re-runs.
+  const recentDomains = useMemo(() => {
+    const seen = new Set<string>();
+    const out: SavedCrawl[] = [];
+    for (const c of saved.data?.data ?? []) {
+      const key = normalizeOrigin(c.origin);
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(c);
+        if (out.length >= 6) break;
+      }
     }
-    discoveryRows.push([
-      "Platform",
-      latestCrawl.discovery?.platform?.platform ?? "Unknown",
-    ]);
-    discoveryRows.push([
-      "Structured data",
-      parseRate != null ? `${parseRate}% of pages parsed` : "—",
-    ]);
-  }
+    return out;
+  }, [saved.data]);
+
+  const pickRecent = (c: SavedCrawl) => {
+    setCrawlOrigin(c.origin);
+    setCollections(c.collections.join(", "));
+    setJobId(null);
+  };
+
+  // Newest saved snapshot for the domain currently entered — feeds the
+  // compact Store profile card (platform / sitemap / robots.txt detection).
+  const profileKey = normalizeOrigin(crawlOrigin.trim());
+  const profileCrawl = useMemo(
+    () =>
+      (saved.data?.data ?? []).find(
+        (c) => normalizeOrigin(c.origin) === profileKey,
+      ),
+    [saved.data, profileKey],
+  );
 
   const collectionsList = collections
     .split(",")
     .map((c) => c.trim())
     .filter(Boolean);
 
+  if (isError) return <ErrorState />;
+  if (isLoading || !workspace) return <LoadingState label="Loading crawler…" />;
+
+  const runCrawl = () =>
+    start.mutate({
+      origin: crawlOrigin.trim(),
+      collections: collectionsList,
+      delayMs: crawlDelay,
+      maxConcurrencyPerHost: maxConcurrency,
+      maxPages: maxPages ?? undefined,
+      respectRobotsTxt: respectRobots,
+      productOnly,
+      storeSnapshots,
+    });
+
+  const scheduleIt = () =>
+    schedule.mutate({
+      origin: crawlOrigin.trim(),
+      collections: collectionsList,
+      frequency,
+      delayMs: crawlDelay,
+      maxConcurrencyPerHost: maxConcurrency,
+      maxPages: maxPages ?? undefined,
+      respectRobotsTxt: respectRobots,
+      productOnly,
+      storeSnapshots,
+    });
+
   return (
     <div>
       <PageHeader
-        eyebrow="Configuration"
-        title="Sources & crawling"
-        description="Your own store is scanned in depth after ownership verification. Competitor stores are crawled politely, respecting robots.txt and rate limits."
+        eyebrow="Crawl"
+        title="Crawler"
+        description="Enter a store domain and the engine discovers its catalogue — sitemap + HTML crawl, then per-product extraction with robots.txt and rate-limit respect. Every result is saved, so re-crawling only picks up what's new."
         actions={
-          <Button>
-            <Globe className="size-4" /> Add website
+          <Button asChild variant="outline">
+            <Link to="/crawls">
+              <Archive className="size-4" /> Saved crawls
+            </Link>
           </Button>
         }
       />
 
-      <div className="grid gap-8 px-6 py-8 lg:grid-cols-2">
-        <div>
-          <SectionTitle
-            aside={
-              workspace.verified ? (
-                <Badge variant="secondary" className="gap-1 font-normal">
-                  <CircleCheck className="size-3 text-success" /> Verified
-                </Badge>
-              ) : latestCrawl ? (
-                <Badge variant="secondary" className="font-normal">
-                  Detected from crawl
-                </Badge>
-              ) : (
-                <Badge variant="secondary" className="font-normal">
-                  Not connected
-                </Badge>
-              )
-            }
-          >
-            Your website
-          </SectionTitle>
-          <div className="border border-border bg-card p-5">
-            <p className="font-display text-2xl">{workspace.site || "—"}</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {workspace.verified
-                ? `Ownership confirmed via ${workspace.verificationMethod} · last scan ${workspace.lastScan}`
-                : latestCrawl
-                  ? `Detected from the last crawl · ${formatCrawlDate(latestCrawl.updatedAt)}`
-                  : "No store connected — run a crawl to detect your store."}
-            </p>
-            <dl className="mt-5 space-y-2 text-sm">
-              {detected.map(([k, v, title]) => (
-                <div
-                  key={k}
-                  className="flex justify-between gap-4 border-b border-border pb-2 last:border-0"
-                >
-                  <dt className="text-muted-foreground">{k}</dt>
-                  <dd className="text-right" title={title}>
-                    {v}
-                  </dd>
-                </div>
-              ))}
-            </dl>
+      <div className="space-y-8 px-6 py-8">
+        {/* ── 1. The domain — primary action, top of the page ─────────── */}
+        <section className="border border-border bg-card">
+          <div className="flex items-center gap-2 border-b border-border px-6 py-4">
+            <Globe className="size-4 text-muted-foreground" />
+            <h2 className="font-display text-xl">Start a crawl</h2>
           </div>
-
-          <SectionTitle
-            aside={
-              latestCrawl ? (
-                <Badge variant="secondary" className="font-normal">
-                  Last crawl {formatCrawlDate(latestCrawl.updatedAt)}
-                </Badge>
-              ) : null
-            }
-          >
-            Discovery engine
-          </SectionTitle>
-          {discoveryRows.length > 0 ? (
-            <ul className="divide-y divide-border border border-border bg-card">
-              {discoveryRows.map(([k, v]) => (
-                <li
-                  key={k}
-                  className="flex items-center justify-between gap-4 p-3.5 text-sm"
-                >
-                  <span>{k}</span>
-                  <span className="text-xs text-muted-foreground">{v}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="border border-border bg-card p-5 text-sm text-muted-foreground">
-              No crawl data yet — run a crawl to populate the discovery
-              diagnostics.
-            </p>
-          )}
-        </div>
-
-        <div>
-          <SectionTitle>Crawl configuration</SectionTitle>
-          <div className="space-y-6 border border-border bg-card p-5">
+          <div className="space-y-4 p-6">
             <div className="grid gap-2">
-              <Label>Frequency</Label>
-              <Select
-                value={frequency}
-                onValueChange={(v) => setFrequency(v as CrawlFrequency)}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1h">Every hour</SelectItem>
-                  <SelectItem value="6h">Every 6 hours</SelectItem>
-                  <SelectItem value="daily">Daily</SelectItem>
-                  <SelectItem value="weekly">Weekly</SelectItem>
-                </SelectContent>
-              </Select>
+              <Label htmlFor="crawl-origin">Store domain</Label>
+              <Input
+                id="crawl-origin"
+                value={crawlOrigin}
+                onChange={(e) => {
+                  setCrawlOrigin(e.target.value);
+                  setJobId(null);
+                }}
+                placeholder="https://store.example.com"
+                className="font-mono"
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="crawl-collections">
+                Collections{" "}
+                <span className="font-normal text-muted-foreground">
+                  (optional)
+                </span>
+              </Label>
+              <Input
+                id="crawl-collections"
+                value={collections}
+                onChange={(e) => {
+                  setCollections(e.target.value);
+                  setJobId(null);
+                }}
+                placeholder="silicone-toys, bundles — leave empty for the full catalogue"
+              />
             </div>
 
+            {recentDomains.length > 0 ? (
+              <div className="border-t border-border pt-4">
+                <p className="label-caps mb-2">Recently crawled</p>
+                <div className="flex flex-wrap gap-2">
+                  {recentDomains.map((c) => (
+                    <button
+                      key={c._id}
+                      type="button"
+                      onClick={() => pickRecent(c)}
+                      className="group flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs transition-colors hover:border-primary/40 hover:bg-muted"
+                    >
+                      <Globe className="size-3 text-muted-foreground group-hover:text-primary" />
+                      <span className="font-mono">
+                        {normalizeOrigin(c.origin)}
+                      </span>
+                      <span className="text-muted-foreground">
+                        · {c.products.length} products
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
+              <Button
+                size="lg"
+                onClick={runCrawl}
+                disabled={start.isPending || isRunning || !crawlOrigin.trim()}
+              >
+                {start.isPending || isRunning ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Play className="size-4" />
+                )}
+                {start.isPending
+                  ? "Starting…"
+                  : isRunning
+                    ? "Crawling…"
+                    : "Run crawl"}
+              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  value={frequency}
+                  onValueChange={(v) => setFrequency(v as CrawlFrequency)}
+                >
+                  <SelectTrigger className="w-[150px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1h">Every hour</SelectItem>
+                    <SelectItem value="6h">Every 6 hours</SelectItem>
+                    <SelectItem value="daily">Daily</SelectItem>
+                    <SelectItem value="weekly">Weekly</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  variant="outline"
+                  onClick={scheduleIt}
+                  disabled={schedule.isPending || !crawlOrigin.trim()}
+                >
+                  <CalendarClock className="size-4" />
+                  Schedule recurring
+                </Button>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Recurring crawls run automatically on the server (schedules are
+              in-memory and reset on restart). Re-scheduling an origin replaces
+              its existing schedule.
+            </p>
+          </div>
+        </section>
+
+        {/* ── 1.5 Store profile — detection from the latest crawl ─────── */}
+        <StoreProfile
+          crawl={profileCrawl}
+          domain={profileKey}
+          headerAction={
+            profileCrawl && profileCrawl.products.length > 0 ? (
+              <Button asChild variant="outline" size="sm" className="h-7">
+                <Link to="/stores/$origin" params={{ origin: profileKey }}>
+                  <Eye className="size-3.5" /> View catalogue
+                </Link>
+              </Button>
+            ) : undefined
+          }
+        />
+
+        {/* ── 2. Live progress while a crawl runs ─────────────────────── */}
+        {isRunning && job ? (
+          <section className="space-y-3 border border-border bg-card p-6">
+            {reconnected ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge
+                  variant="secondary"
+                  className="gap-1.5 border-primary/30 font-normal"
+                >
+                  <RefreshCw className="size-3 text-primary" />
+                  Reconnected to running crawl
+                </Badge>
+                <span className="text-xs text-muted-foreground">
+                  Progress resumed from the server — this crawl was started
+                  before this page loaded.
+                </span>
+              </div>
+            ) : null}
+            <div className="flex items-baseline justify-between gap-4 text-sm">
+              <span className="text-muted-foreground">
+                {job.total === 0
+                  ? "Discovering product URLs…"
+                  : "Crawling product URLs…"}
+              </span>
+              <span className="numeric">
+                {job.total > 0
+                  ? `${job.processed.toLocaleString()} / ${job.total.toLocaleString()}`
+                  : "—"}
+              </span>
+            </div>
+            <Progress
+              value={
+                job.total > 0
+                  ? Math.round((job.processed / job.total) * 100)
+                  : 0
+              }
+              aria-label="Crawl progress"
+            />
+            <div className="flex items-center justify-between gap-4 text-xs text-muted-foreground">
+              <span>
+                {fetchStartedAt != null
+                  ? `Discovery ${formatDuration(discoveryMs)} · Fetch ${formatDuration(fetchElapsedMs)}`
+                  : `Discovering ${formatDuration(discoveryMs)}`}
+              </span>
+              <span>
+                {remainingMs != null
+                  ? `~${formatDuration(remainingMs)} remaining`
+                  : "Estimating time…"}
+              </span>
+            </div>
+
+            {/* Live discovery diagnostics — real sitemap/page counts while
+                discovery runs (job.total stays 0 until the fetch phase). */}
+            {job.total === 0 && job.discovery ? (
+              <div className="rounded-md border border-border bg-muted/40 p-3 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-muted-foreground">
+                    {discoveryPhaseLabel(job.discovery.phase)}
+                  </span>
+                  <span className="numeric">
+                    {job.discovery.urlsFound.toLocaleString()} product URLs
+                  </span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+                  {job.discovery.sitemapUrls > 0 ? (
+                    <span>
+                      Sitemap: {job.discovery.sitemapUrls.toLocaleString()}
+                    </span>
+                  ) : null}
+                  {job.discovery.htmlPagesVisited > 0 ? (
+                    <span>
+                      Pages visited:{" "}
+                      {job.discovery.htmlPagesVisited.toLocaleString()}
+                    </span>
+                  ) : null}
+                  {job.discovery.htmlUrls > 0 ? (
+                    <span>
+                      HTML URLs: {job.discovery.htmlUrls.toLocaleString()}
+                    </span>
+                  ) : null}
+                  {job.discovery.collectionHandles > 0 ? (
+                    <span>
+                      Collections:{" "}
+                      {job.discovery.collectionHandles.toLocaleString()}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            {/* The parameters this job actually runs with (captured at
+                start) — so it's clear when the panel config changed. */}
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="label-caps text-muted-foreground">
+                Running with
+              </span>
+              <Badge variant="secondary" className="font-normal">
+                {(job.params.delayMs / 1000).toLocaleString()}s delay
+              </Badge>
+              <Badge variant="secondary" className="font-normal">
+                {job.params.maxConcurrencyPerHost} concurrent
+              </Badge>
+              {job.params.maxPages != null ? (
+                <Badge variant="secondary" className="font-normal">
+                  max {job.params.maxPages.toLocaleString()} pages
+                </Badge>
+              ) : null}
+              <Badge variant="secondary" className="font-normal">
+                {job.params.respectRobotsTxt
+                  ? "robots respected"
+                  : "robots ignored"}
+              </Badge>
+              <Badge variant="secondary" className="font-normal">
+                {job.params.productOnly ? "product-only" : "all pages"}
+              </Badge>
+              <Badge variant="secondary" className="font-normal">
+                {job.params.storeSnapshots ? "snapshots on" : "no snapshots"}
+              </Badge>
+            </div>
+
+            {!paramsMatch ? (
+              <Alert className="border-warning/50 [&>svg]:text-warning">
+                <TriangleAlert className="size-4" />
+                <AlertTitle>Config changed mid-run</AlertTitle>
+                <AlertDescription>
+                  This crawl is using the parameters it started with. Your panel
+                  settings changed after it began — they apply to the next
+                  crawl.
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            <p className="text-xs text-muted-foreground">
+              {job.total === 0
+                ? `Reading sitemaps and following internal links — ${job.params.respectRobotsTxt === false ? "robots.txt ignored" : "robots.txt respected"}.`
+                : `Polite crawl (max ${job.params.maxConcurrencyPerHost} concurrent requests, ${(job.params.delayMs / 1000).toLocaleString()}s base delay, ${job.params.respectRobotsTxt === false ? "robots.txt ignored" : "robots.txt respected"}) — the estimate adjusts to the observed speed and any rate limits.${job.params.maxPages != null ? ` Crawl capped at ${job.params.maxPages.toLocaleString()} pages.` : ""}`}
+            </p>
+          </section>
+        ) : null}
+
+        {/* ── Errors ──────────────────────────────────────────────────── */}
+        {start.isError ? (
+          <Alert variant="destructive">
+            <TriangleAlert className="size-4" />
+            <AlertTitle>Request failed</AlertTitle>
+            <AlertDescription className="break-all font-mono text-xs">
+              {start.error instanceof Error
+                ? start.error.message
+                : String(start.error)}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {job?.status === "error" ? (
+          <Alert variant="destructive">
+            <TriangleAlert className="size-4" />
+            <AlertTitle>Crawl failed</AlertTitle>
+            <AlertDescription className="break-all font-mono text-xs">
+              {job.error}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {progress.isError ? (
+          <p className="text-xs text-muted-foreground">
+            Progress updates stopped — check your connection. The crawl may
+            still be running server-side.
+          </p>
+        ) : null}
+        {jobId != null &&
+        progress.isFetched &&
+        progress.data === null &&
+        !start.isPending ? (
+          <p className="text-xs text-muted-foreground">
+            No progress available — the server may have restarted mid-crawl.
+            Start a new crawl.
+          </p>
+        ) : null}
+
+        {/* ── 3. Results once a crawl finishes ────────────────────────── */}
+        {result ? (
+          <section className="space-y-5 border border-border bg-card p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="font-display text-xl">Crawl complete</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {normalizeOrigin(crawlOrigin)} · finished{" "}
+                  {job?.finishedAt
+                    ? formatCrawlDate(new Date(job.finishedAt).toISOString())
+                    : "just now"}
+                </p>
+              </div>
+              {job?.persisted ? (
+                <Badge variant="secondary" className="gap-1 font-normal">
+                  <CircleCheck className="size-3 text-success" /> Saved to
+                  database
+                </Badge>
+              ) : null}
+            </div>
+
+            {diff ? (
+              <div>
+                <p className="label-caps mb-2">
+                  What's new since the last crawl
+                </p>
+                <CrawlDiffSummary
+                  newCount={diff.newProducts.length}
+                  removedCount={diff.removedProducts.length}
+                  priceChangedCount={diff.priceChangedCount}
+                  products={diff.newProducts}
+                  productsFooter={`…and ${diff.newProducts.length - 6} more — see the full list under Saved crawls.`}
+                />
+              </div>
+            ) : null}
+
+            <CrawlStatsGrid stats={result.stats} />
+
+            {/* Detection summary captured from this run. */}
+            {result.discovery ? (
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="secondary" className="font-normal">
+                  {result.discovery.platform?.platform ?? "Unknown platform"}
+                </Badge>
+                {result.discovery.sitemap?.error ? (
+                  <Badge variant="secondary" className="font-normal">
+                    No sitemap
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary" className="font-normal">
+                    {(result.discovery.sitemap?.urls ?? 0).toLocaleString()}{" "}
+                    sitemap URLs
+                  </Badge>
+                )}
+                {result.discovery.robots?.status === "found" ? (
+                  <Badge variant="secondary" className="font-normal">
+                    robots.txt respected
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary" className="font-normal">
+                    robots: {result.discovery.robots?.status ?? "skipped"}
+                  </Badge>
+                )}
+                {result.stats.fetched > 0 ? (
+                  <Badge variant="secondary" className="font-normal">
+                    {Math.round(
+                      (result.products.length / result.stats.fetched) * 100,
+                    )}
+                    % parsed
+                  </Badge>
+                ) : null}
+              </div>
+            ) : null}
+
+            {result.failures.length > 0 ? (
+              <div>
+                <p className="label-caps mb-2">Failures</p>
+                <ul className="max-h-40 space-y-1 overflow-auto text-xs">
+                  {result.failures.slice(0, 12).map((f) => (
+                    <li key={f.url} className="flex justify-between gap-3">
+                      <span className="truncate font-mono text-muted-foreground">
+                        {f.url}
+                      </span>
+                      <span className="shrink-0 text-destructive">
+                        {f.error}
+                      </span>
+                    </li>
+                  ))}
+                  {result.failures.length > 12 ? (
+                    <li className="text-muted-foreground">
+                      …and {result.failures.length - 12} more
+                    </li>
+                  ) : null}
+                </ul>
+              </div>
+            ) : null}
+
+            {result.products.length > 0 ? (
+              <div>
+                <p className="label-caps mb-2">
+                  Products ({result.products.length}) — first{" "}
+                  {Math.min(result.products.length, 8)}
+                </p>
+                <ul className="divide-y divide-border border border-border">
+                  {result.products.slice(0, 8).map((p) => (
+                    <li
+                      key={p.url}
+                      className="flex items-center justify-between gap-3 p-3 text-sm"
+                    >
+                      <ProductCell name={p.name} brand={p.brand} url={p.url} />
+                      <span className="flex shrink-0 items-center gap-3">
+                        <StockBadge available={p.available} />
+                        <span className="text-right">
+                          <span className="numeric block">
+                            {formatPrice(p.price)}
+                          </span>
+                          <span className="block text-[11px] text-muted-foreground">
+                            store price
+                          </span>
+                        </span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No products were parsed — the store may have rate-limited this
+                machine (HTTP 429) or no structured data was found. Check the
+                failures above.
+              </p>
+            )}
+          </section>
+        ) : null}
+
+        {/* ── 4. Configuration — bottom of the page ───────────────────── */}
+        <section>
+          <SectionTitle
+            aside={
+              <Badge variant="secondary" className="font-normal">
+                Applies to the next crawl
+              </Badge>
+            }
+          >
+            Configuration
+          </SectionTitle>
+          <div className="grid gap-6 border border-border bg-card p-6 lg:grid-cols-2">
             <div className="grid gap-2">
               <Label>Maximum pages per crawl</Label>
               <Select
@@ -628,7 +982,7 @@ function SourcesPage() {
               />
             </div>
             {!respectRobots ? (
-              <Alert className="border-warning/50 [&>svg]:text-warning">
+              <Alert className="border-warning/50 [&>svg]:text-warning lg:col-span-2">
                 <TriangleAlert className="size-4" />
                 <AlertTitle>robots.txt disabled</AlertTitle>
                 <AlertDescription>
@@ -653,627 +1007,54 @@ function SourcesPage() {
               />
             </div>
           </div>
+        </section>
 
-          <SectionTitle>Verify a new website</SectionTitle>
-          <div className="space-y-4 border border-border bg-card p-5">
-            <div className="grid gap-2">
-              <Label htmlFor="url">Website URL</Label>
-              <Input id="url" placeholder="https://mystore.com" />
-            </div>
-            <div className="rule-top space-y-3 pt-4 text-sm">
-              <p className="label-caps">Verification methods</p>
-              <p className="text-muted-foreground">
-                Upload <span className="numeric">parity-verify.html</span> to
-                your web root, add a
-                <span className="numeric">
-                  {" "}
-                  &lt;meta name="parity-verify"&gt;
-                </span>{" "}
-                tag, or publish a DNS TXT record.
-              </p>
-            </div>
-            <Button variant="outline" className="w-full">
-              Verify ownership
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      {/* Live crawl — runs the real crawler on the server. */}
-      <div className="px-6 pb-8">
-        <SectionTitle>Live crawl</SectionTitle>
-        <div className="space-y-5 border border-border bg-card p-5">
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            Runs the real crawler against a store — sitemap + HTML discovery,
-            then per-product JSON-LD / OpenGraph extraction with robots.txt and
-            rate-limit respect. Leave collections empty to crawl the full
-            catalogue.
+        {/* ── 5. Active schedules ──────────────────────────────────────── */}
+        {schedulesQuery.isError &&
+        !schedulesQuery.data &&
+        cachedSchedules.length > 0 ? (
+          <p className="text-xs text-muted-foreground">
+            Server unreachable — showing the last known schedules from memory.
+            Recurring crawls live server-side and reset on restart.
           </p>
-          <div className="grid gap-4 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
-            <div className="grid gap-2">
-              <Label htmlFor="crawl-origin">Store origin</Label>
-              <Input
-                id="crawl-origin"
-                value={crawlOrigin}
-                onChange={(e) => {
-                  setCrawlOrigin(e.target.value);
-                  setJobId(null);
-                }}
-                placeholder="https://store.example.com"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="crawl-collections">
-                Collections{" "}
-                <span className="font-normal text-muted-foreground">
-                  (optional)
-                </span>
-              </Label>
-              <Input
-                id="crawl-collections"
-                value={collections}
-                onChange={(e) => {
-                  setCollections(e.target.value);
-                  setJobId(null);
-                }}
-                placeholder="silicone-toys, bundles"
-              />
-            </div>
-            <Button
-              onClick={() =>
-                start.mutate({
-                  origin: crawlOrigin.trim(),
-                  collections: collectionsList,
-                  delayMs: crawlDelay,
-                  maxConcurrencyPerHost: maxConcurrency,
-                  maxPages: maxPages ?? undefined,
-                  respectRobotsTxt: respectRobots,
-                  productOnly,
-                  storeSnapshots,
-                })
-              }
-              disabled={start.isPending || isRunning || !crawlOrigin.trim()}
-            >
-              {start.isPending || isRunning ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Play className="size-4" />
-              )}
-              {start.isPending
-                ? "Starting…"
-                : isRunning
-                  ? "Crawling…"
-                  : "Run crawl"}
-            </Button>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
-            <Button
-              variant="outline"
-              onClick={() =>
-                schedule.mutate({
-                  origin: crawlOrigin.trim(),
-                  collections: collectionsList,
-                  frequency,
-                  delayMs: crawlDelay,
-                  maxConcurrencyPerHost: maxConcurrency,
-                  maxPages: maxPages ?? undefined,
-                  respectRobotsTxt: respectRobots,
-                  productOnly,
-                  storeSnapshots,
-                })
-              }
-              disabled={schedule.isPending || !crawlOrigin.trim()}
-            >
-              <CalendarClock className="size-4" />
-              Schedule every {frequencyLabel(frequency)}
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              Recurring crawls run automatically on the server (schedules are
-              in-memory and reset on restart). Re-scheduling an origin replaces
-              its existing schedule.
-            </span>
-          </div>{" "}
-          {schedulesQuery.isError &&
-          !schedulesQuery.data &&
-          cachedSchedules.length > 0 ? (
-            <p className="text-xs text-muted-foreground">
-              Server unreachable — showing the last known schedules from memory.
-              Recurring crawls live server-side and reset on restart.
-            </p>
-          ) : null}
-          {schedules.length > 0 ? (
-            <div>
-              <p className="label-caps mb-2">Active schedules</p>
-              <ul className="divide-y divide-border border border-border">
-                {schedules.map((s) => (
-                  <li
-                    key={s.origin}
-                    className="flex items-center justify-between gap-3 p-3 text-sm"
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate font-mono">
-                        {s.origin}
-                      </span>
-                      <span className="mt-0.5 block text-xs text-muted-foreground">
-                        Every {frequencyLabel(s.frequency)} · next run{" "}
-                        {formatScheduleTime(s.nextRunAt)} ·{" "}
-                        {s.running
-                          ? "running"
-                          : s.lastRunAt
-                            ? `last ran ${formatScheduleTime(s.lastRunAt)}`
-                            : "never ran"}
-                      </span>
+        ) : null}
+        {schedules.length > 0 ? (
+          <section>
+            <SectionTitle>Active schedules</SectionTitle>
+            <ul className="divide-y divide-border border border-border bg-card">
+              {schedules.map((s) => (
+                <li
+                  key={s.origin}
+                  className="flex items-center justify-between gap-3 p-3.5 text-sm"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-mono">{s.origin}</span>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                      Every {frequencyLabel(s.frequency)} · next run{" "}
+                      {formatScheduleTime(s.nextRunAt)} ·{" "}
+                      {s.running
+                        ? "running"
+                        : s.lastRunAt
+                          ? `last ran ${formatScheduleTime(s.lastRunAt)}`
+                          : "never ran"}
                     </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => cancelSchedule.mutate(s.origin)}
-                      disabled={cancelSchedule.isPending}
-                    >
-                      Cancel
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {isRunning && job ? (
-            <div className="space-y-3">
-              {reconnected ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge
-                    variant="secondary"
-                    className="gap-1.5 border-primary/30 font-normal"
-                  >
-                    <RefreshCw className="size-3 text-primary" />
-                    Reconnected to running crawl
-                  </Badge>
-                  <span className="text-xs text-muted-foreground">
-                    Progress resumed from the server — this crawl was started
-                    before this page loaded.
                   </span>
-                </div>
-              ) : null}
-              <div className="flex items-baseline justify-between gap-4 text-sm">
-                <span className="text-muted-foreground">
-                  {job.total === 0
-                    ? "Discovering product URLs…"
-                    : "Crawling product URLs…"}
-                </span>
-                <span className="numeric">
-                  {job.total > 0
-                    ? `${job.processed.toLocaleString()} / ${job.total.toLocaleString()}`
-                    : "—"}
-                </span>
-              </div>
-              <Progress
-                value={
-                  job.total > 0
-                    ? Math.round((job.processed / job.total) * 100)
-                    : 0
-                }
-                aria-label="Crawl progress"
-              />
-              <div className="flex items-center justify-between gap-4 text-xs text-muted-foreground">
-                <span>
-                  {fetchStartedAt != null
-                    ? `Discovery ${formatDuration(discoveryMs)} · Fetch ${formatDuration(fetchElapsedMs)}`
-                    : `Discovering ${formatDuration(discoveryMs)}`}
-                </span>
-                <span>
-                  {remainingMs != null
-                    ? `~${formatDuration(remainingMs)} remaining`
-                    : "Estimating time…"}
-                </span>
-              </div>
-
-              {/* Live discovery diagnostics — real sitemap/page counts while
-                  discovery runs (job.total stays 0 until the fetch phase). */}
-              {job.total === 0 && job.discovery ? (
-                <div className="rounded-md border border-border bg-muted/40 p-3 text-xs">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">
-                      {discoveryPhaseLabel(job.discovery.phase)}
-                    </span>
-                    <span className="numeric">
-                      {job.discovery.urlsFound.toLocaleString()} product URLs
-                    </span>
-                  </div>
-                  <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
-                    {job.discovery.sitemapUrls > 0 ? (
-                      <span>
-                        Sitemap: {job.discovery.sitemapUrls.toLocaleString()}
-                      </span>
-                    ) : null}
-                    {job.discovery.htmlPagesVisited > 0 ? (
-                      <span>
-                        Pages visited:{" "}
-                        {job.discovery.htmlPagesVisited.toLocaleString()}
-                      </span>
-                    ) : null}
-                    {job.discovery.htmlUrls > 0 ? (
-                      <span>
-                        HTML URLs: {job.discovery.htmlUrls.toLocaleString()}
-                      </span>
-                    ) : null}
-                    {job.discovery.collectionHandles > 0 ? (
-                      <span>
-                        Collections:{" "}
-                        {job.discovery.collectionHandles.toLocaleString()}
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-              ) : null}
-
-              {/* The parameters this job actually runs with (captured at
-                  start) — so it's clear when the panel config changed. */}
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="label-caps text-muted-foreground">
-                  Running with
-                </span>
-                <Badge variant="secondary" className="font-normal">
-                  {(job.params.delayMs / 1000).toLocaleString()}s delay
-                </Badge>
-                <Badge variant="secondary" className="font-normal">
-                  {job.params.maxConcurrencyPerHost} concurrent
-                </Badge>
-                {job.params.maxPages != null ? (
-                  <Badge variant="secondary" className="font-normal">
-                    max {job.params.maxPages.toLocaleString()} pages
-                  </Badge>
-                ) : null}
-                <Badge variant="secondary" className="font-normal">
-                  {job.params.respectRobotsTxt
-                    ? "robots respected"
-                    : "robots ignored"}
-                </Badge>
-                <Badge variant="secondary" className="font-normal">
-                  {job.params.productOnly ? "product-only" : "all pages"}
-                </Badge>
-                <Badge variant="secondary" className="font-normal">
-                  {job.params.storeSnapshots ? "snapshots on" : "no snapshots"}
-                </Badge>
-              </div>
-
-              {!paramsMatch ? (
-                <Alert className="border-warning/50 [&>svg]:text-warning">
-                  <TriangleAlert className="size-4" />
-                  <AlertTitle>Config changed mid-run</AlertTitle>
-                  <AlertDescription>
-                    This crawl is using the parameters it started with. Your
-                    panel settings changed after it began — they apply to the
-                    next crawl.
-                  </AlertDescription>
-                </Alert>
-              ) : null}
-
-              <p className="text-xs text-muted-foreground">
-                {job.total === 0
-                  ? `Reading sitemaps and following internal links — ${job.params.respectRobotsTxt === false ? "robots.txt ignored" : "robots.txt respected"}.`
-                  : `Polite crawl (max ${job.params.maxConcurrencyPerHost} concurrent requests, ${(job.params.delayMs / 1000).toLocaleString()}s base delay, ${job.params.respectRobotsTxt === false ? "robots.txt ignored" : "robots.txt respected"}) — the estimate adjusts to the observed speed and any rate limits.${job.params.maxPages != null ? ` Crawl capped at ${job.params.maxPages.toLocaleString()} pages.` : ""}`}
-              </p>
-            </div>
-          ) : null}
-          {start.isError ? (
-            <Alert variant="destructive">
-              <TriangleAlert className="size-4" />
-              <AlertTitle>Request failed</AlertTitle>
-              <AlertDescription className="break-all font-mono text-xs">
-                {start.error instanceof Error
-                  ? start.error.message
-                  : String(start.error)}
-              </AlertDescription>
-            </Alert>
-          ) : null}
-          {job?.status === "error" ? (
-            <Alert variant="destructive">
-              <TriangleAlert className="size-4" />
-              <AlertTitle>Crawl failed</AlertTitle>
-              <AlertDescription className="break-all font-mono text-xs">
-                {job.error}
-              </AlertDescription>
-            </Alert>
-          ) : null}
-          {progress.isError ? (
-            <p className="text-xs text-muted-foreground">
-              Progress updates stopped — check your connection. The crawl may
-              still be running server-side.
-            </p>
-          ) : null}
-          {jobId != null &&
-          progress.isFetched &&
-          progress.data === null &&
-          !start.isPending ? (
-            <p className="text-xs text-muted-foreground">
-              No progress available — the server may have restarted mid-crawl.
-              Start a new crawl.
-            </p>
-          ) : null}
-          {result ? (
-            <div className="space-y-5">
-              <div className="flex items-center justify-between gap-4">
-                <p className="text-sm font-medium">Crawl complete</p>
-                {job?.persisted ? (
-                  <Badge variant="secondary" className="gap-1 font-normal">
-                    <CircleCheck className="size-3 text-success" /> Saved to
-                    database
-                  </Badge>
-                ) : null}
-              </div>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-                <CrawlStat label="Discovered" value={result.stats.discovered} />
-                <CrawlStat label="Fetched" value={result.stats.fetched} />
-                <CrawlStat
-                  label="Skipped (unchanged)"
-                  value={result.stats.skippedUnchanged}
-                />
-                <CrawlStat
-                  label="Failed"
-                  value={result.stats.failed}
-                  accent={result.stats.failed > 0}
-                />
-                <CrawlStat
-                  label="Duration"
-                  value={`${(result.stats.durationMs / 1000).toFixed(1)}s`}
-                />
-              </div>
-
-              {result.failures.length > 0 ? (
-                <div>
-                  <p className="label-caps mb-2">Failures</p>
-                  <ul className="max-h-40 space-y-1 overflow-auto text-xs">
-                    {result.failures.slice(0, 12).map((f) => (
-                      <li key={f.url} className="flex justify-between gap-3">
-                        <span className="truncate font-mono text-muted-foreground">
-                          {f.url}
-                        </span>
-                        <span className="shrink-0 text-destructive">
-                          {f.error}
-                        </span>
-                      </li>
-                    ))}
-                    {result.failures.length > 12 ? (
-                      <li className="text-muted-foreground">
-                        …and {result.failures.length - 12} more
-                      </li>
-                    ) : null}
-                  </ul>
-                </div>
-              ) : null}
-
-              {result.products.length > 0 ? (
-                <div>
-                  <p className="label-caps mb-2">
-                    Products ({result.products.length}) — first{" "}
-                    {Math.min(result.products.length, 8)}
-                  </p>
-                  <ul className="divide-y divide-border border border-border">
-                    {result.products.slice(0, 8).map((p) => (
-                      <li
-                        key={p.url}
-                        className="flex items-center justify-between gap-3 p-3 text-sm"
-                      >
-                        <span className="min-w-0">
-                          <span className="block truncate font-medium">
-                            {p.name}
-                          </span>
-                          <span className="block truncate text-xs text-muted-foreground">
-                            {p.brand} ·{" "}
-                            <a
-                              href={p.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="font-mono underline-offset-2 hover:underline"
-                            >
-                              {p.url}
-                            </a>
-                          </span>
-                        </span>
-                        <span className="flex shrink-0 items-center gap-3">
-                          <Badge
-                            variant={p.available ? "secondary" : "destructive"}
-                            className="font-normal"
-                          >
-                            {p.available ? "In stock" : "Out of stock"}
-                          </Badge>
-                          <span className="text-right">
-                            <span className="numeric block">
-                              {p.price.toLocaleString("en-US", {
-                                maximumFractionDigits: 2,
-                              })}
-                            </span>
-                            <span className="block text-[11px] text-muted-foreground">
-                              store price
-                            </span>
-                          </span>
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  No products were parsed — the store may have rate-limited this
-                  machine (HTTP 429) or no structured data was found. Check the
-                  failures above.
-                </p>
-              )}
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      {/* Saved crawls — persisted results, reviewable without re-crawling. */}
-      <div className="px-6 pb-8">
-        <SectionTitle
-          aside={
-            <Badge variant="secondary" className="font-normal">
-              {saved.data ? `${saved.data.data.length} saved` : "—"}
-            </Badge>
-          }
-        >
-          Saved crawls
-        </SectionTitle>
-        <div className="border border-border bg-card">
-          {saved.isError ? (
-            <p className="p-5 text-sm text-muted-foreground">
-              Couldn't load saved crawls — check that the API is reachable.
-            </p>
-          ) : saved.isLoading || !saved.data ? (
-            <p className="p-5 text-sm text-muted-foreground">
-              <span className="inline-block size-2 animate-pulse rounded-full bg-accent" />{" "}
-              Loading saved crawls…
-            </p>
-          ) : saved.data.data.length === 0 ? (
-            <div className="p-10 text-center">
-              <p className="font-display text-xl">No saved crawls yet</p>
-              <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-                Run a crawl above — when it finishes, the result is saved to the
-                database and you can review it here without re-crawling.
-              </p>
-            </div>
-          ) : (
-            <ul className="divide-y divide-border">
-              {saved.data.data.map((crawl) => (
-                <li key={crawl._id}>
-                  <button
-                    type="button"
-                    aria-expanded={expandedId === crawl._id}
-                    onClick={() =>
-                      setExpandedId(expandedId === crawl._id ? null : crawl._id)
-                    }
-                    className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-colors hover:bg-muted/50"
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => cancelSchedule.mutate(s.origin)}
+                    disabled={cancelSchedule.isPending}
                   >
-                    <span className="min-w-0">
-                      <span className="block truncate font-mono text-sm font-medium">
-                        {crawl.origin}
-                      </span>
-                      <span className="mt-0.5 block text-xs text-muted-foreground">
-                        {formatCrawlDate(crawl.updatedAt)} ·{" "}
-                        {crawl.products.length} products ·{" "}
-                        {crawl.failures.length} failed
-                      </span>
-                    </span>
-                    <span className="flex shrink-0 items-center gap-3">
-                      <Badge variant="secondary" className="font-normal">
-                        {crawl.stats.discovered.toLocaleString()} URLs
-                      </Badge>
-                      {expandedId === crawl._id ? (
-                        <ChevronUp className="size-4 text-muted-foreground" />
-                      ) : (
-                        <ChevronDown className="size-4 text-muted-foreground" />
-                      )}
-                    </span>
-                  </button>
-                  {expandedId === crawl._id ? (
-                    <div className="space-y-5 border-t border-border px-5 py-4">
-                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-                        <CrawlStat
-                          label="Discovered"
-                          value={crawl.stats.discovered}
-                        />
-                        <CrawlStat
-                          label="Fetched"
-                          value={crawl.stats.fetched}
-                        />
-                        <CrawlStat
-                          label="Skipped"
-                          value={crawl.stats.skippedUnchanged}
-                        />
-                        <CrawlStat
-                          label="Failed"
-                          value={crawl.stats.failed}
-                          accent={crawl.stats.failed > 0}
-                        />
-                        <CrawlStat
-                          label="Duration"
-                          value={`${(crawl.stats.durationMs / 1000).toFixed(1)}s`}
-                        />
-                      </div>
-
-                      {crawl.failures.length > 0 ? (
-                        <div>
-                          <p className="label-caps mb-2">
-                            Failures ({crawl.failures.length})
-                          </p>
-                          <ul className="max-h-40 space-y-1 overflow-auto text-xs">
-                            {crawl.failures.slice(0, 12).map((f) => (
-                              <li
-                                key={f.url}
-                                className="flex justify-between gap-3"
-                              >
-                                <span className="truncate font-mono text-muted-foreground">
-                                  {f.url}
-                                </span>
-                                <span className="shrink-0 text-destructive">
-                                  {f.error}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      ) : null}
-
-                      {crawl.products.length > 0 ? (
-                        <div>
-                          <p className="label-caps mb-2">
-                            Products ({crawl.products.length}) — first{" "}
-                            {Math.min(crawl.products.length, 8)}
-                          </p>
-                          <ul className="divide-y divide-border border border-border">
-                            {crawl.products.slice(0, 8).map((p) => (
-                              <li
-                                key={p.url}
-                                className="flex items-center justify-between gap-3 p-3 text-sm"
-                              >
-                                <span className="min-w-0">
-                                  <span className="block truncate font-medium">
-                                    {p.name}
-                                  </span>
-                                  <span className="block truncate text-xs text-muted-foreground">
-                                    {p.brand}
-                                  </span>
-                                </span>
-                                <span className="flex shrink-0 items-center gap-3">
-                                  <Badge
-                                    variant={
-                                      p.available ? "secondary" : "destructive"
-                                    }
-                                    className="font-normal"
-                                  >
-                                    {p.available ? "In stock" : "Out of stock"}
-                                  </Badge>
-                                  <span className="numeric text-right">
-                                    {p.price.toLocaleString("en-US", {
-                                      maximumFractionDigits: 2,
-                                    })}
-                                  </span>
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
+                    Cancel
+                  </Button>
                 </li>
               ))}
             </ul>
-          )}
-        </div>
+          </section>
+        ) : null}
       </div>
     </div>
   );
-}
-
-function formatCrawlDate(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
 }
 
 function frequencyLabel(frequency: CrawlFrequency): string {
@@ -1294,43 +1075,6 @@ function formatScheduleTime(ts: number): string {
     dateStyle: "short",
     timeStyle: "short",
   });
-}
-
-function formatDuration(ms: number): string {
-  const totalSec = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-/** Derives a store's product-URL pattern from a real crawled product URL. */
-function productUrlPattern(url: string): string {
-  try {
-    const u = new URL(url);
-    const parts = u.pathname.split("/").filter(Boolean);
-    parts[parts.length - 1] = "{slug}";
-    return `/${parts.join("/")}`;
-  } catch {
-    return url;
-  }
-}
-
-/** robots.txt presence + crawl-delay for the detected card's robots row. */
-function robotsRowText(d: SavedCrawl["discovery"] | undefined): string {
-  const r = d?.robots;
-  if (!r) return "—";
-  switch (r.status) {
-    case "found":
-      return r.crawlDelayMs != null
-        ? `Present, crawl allowed · ${(r.crawlDelayMs / 1000).toLocaleString()}s crawl-delay`
-        : "Present, crawl allowed";
-    case "absent":
-      return "Not found (crawl allowed)";
-    case "unreachable":
-      return "Unreachable — allow-all fallback";
-    case "skipped":
-      return "Not checked (respect off)";
-  }
 }
 
 /** Human label for the live discovery phase shown in the progress panel. */
@@ -1354,30 +1098,4 @@ type MaxPagesMode = "500" | "1000" | "5000" | "custom" | "unlimited";
 function parseCustomMaxPages(value: string): number | null {
   const n = Number(value);
   return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-function CrawlStat({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: number | string;
-  accent?: boolean;
-}) {
-  return (
-    <div className="border border-border p-3">
-      <p className="numeric text-xl" aria-label={label}>
-        {value}
-      </p>
-      <p
-        className={cn(
-          "mt-0.5 text-xs",
-          accent ? "text-destructive" : "text-muted-foreground",
-        )}
-      >
-        {label}
-      </p>
-    </div>
-  );
 }

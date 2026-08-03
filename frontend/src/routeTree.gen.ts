@@ -16,11 +16,13 @@ import { Route as AuthLoginRouteImport } from './pages/auth/login'
 import { Route as AuthenticatedAlertsIndexRouteImport } from './pages/_authenticated/alerts/index'
 import { Route as AuthenticatedCatalogueIndexRouteImport } from './pages/_authenticated/catalogue/index'
 import { Route as AuthenticatedCompetitorsIndexRouteImport } from './pages/_authenticated/competitors/index'
+import { Route as AuthenticatedCrawlsIndexRouteImport } from './pages/_authenticated/crawls/index'
 import { Route as AuthenticatedInsightsIndexRouteImport } from './pages/_authenticated/insights/index'
 import { Route as AuthenticatedPricingIndexRouteImport } from './pages/_authenticated/pricing/index'
 import { Route as AuthenticatedProductsIndexRouteImport } from './pages/_authenticated/products/index'
 import { Route as AuthenticatedReportsIndexRouteImport } from './pages/_authenticated/reports/index'
 import { Route as AuthenticatedSourcesIndexRouteImport } from './pages/_authenticated/sources/index'
+import { Route as AuthenticatedStoresOriginRouteImport } from './pages/_authenticated/stores/$origin'
 
 const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
   id: '/_authenticated',
@@ -59,6 +61,12 @@ const AuthenticatedCompetitorsIndexRoute =
     path: '/competitors/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedCrawlsIndexRoute =
+  AuthenticatedCrawlsIndexRouteImport.update({
+    id: '/crawls/',
+    path: '/crawls/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedInsightsIndexRoute =
   AuthenticatedInsightsIndexRouteImport.update({
     id: '/insights/',
@@ -89,14 +97,22 @@ const AuthenticatedSourcesIndexRoute =
     path: '/sources/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedStoresOriginRoute =
+  AuthenticatedStoresOriginRouteImport.update({
+    id: '/stores/$origin',
+    path: '/stores/$origin',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/auth/login': typeof AuthLoginRoute
+  '/stores/$origin': typeof AuthenticatedStoresOriginRoute
   '/alerts/': typeof AuthenticatedAlertsIndexRoute
   '/catalogue/': typeof AuthenticatedCatalogueIndexRoute
   '/competitors/': typeof AuthenticatedCompetitorsIndexRoute
+  '/crawls/': typeof AuthenticatedCrawlsIndexRoute
   '/insights/': typeof AuthenticatedInsightsIndexRoute
   '/pricing/': typeof AuthenticatedPricingIndexRoute
   '/products/': typeof AuthenticatedProductsIndexRoute
@@ -107,9 +123,11 @@ export interface FileRoutesByTo {
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/auth/login': typeof AuthLoginRoute
   '/': typeof AuthenticatedIndexRoute
+  '/stores/$origin': typeof AuthenticatedStoresOriginRoute
   '/alerts': typeof AuthenticatedAlertsIndexRoute
   '/catalogue': typeof AuthenticatedCatalogueIndexRoute
   '/competitors': typeof AuthenticatedCompetitorsIndexRoute
+  '/crawls': typeof AuthenticatedCrawlsIndexRoute
   '/insights': typeof AuthenticatedInsightsIndexRoute
   '/pricing': typeof AuthenticatedPricingIndexRoute
   '/products': typeof AuthenticatedProductsIndexRoute
@@ -122,9 +140,11 @@ export interface FileRoutesById {
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/auth/login': typeof AuthLoginRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/stores/$origin': typeof AuthenticatedStoresOriginRoute
   '/_authenticated/alerts/': typeof AuthenticatedAlertsIndexRoute
   '/_authenticated/catalogue/': typeof AuthenticatedCatalogueIndexRoute
   '/_authenticated/competitors/': typeof AuthenticatedCompetitorsIndexRoute
+  '/_authenticated/crawls/': typeof AuthenticatedCrawlsIndexRoute
   '/_authenticated/insights/': typeof AuthenticatedInsightsIndexRoute
   '/_authenticated/pricing/': typeof AuthenticatedPricingIndexRoute
   '/_authenticated/products/': typeof AuthenticatedProductsIndexRoute
@@ -137,9 +157,11 @@ export interface FileRouteTypes {
     | '/'
     | '/sitemap.xml'
     | '/auth/login'
+    | '/stores/$origin'
     | '/alerts/'
     | '/catalogue/'
     | '/competitors/'
+    | '/crawls/'
     | '/insights/'
     | '/pricing/'
     | '/products/'
@@ -150,9 +172,11 @@ export interface FileRouteTypes {
     | '/sitemap.xml'
     | '/auth/login'
     | '/'
+    | '/stores/$origin'
     | '/alerts'
     | '/catalogue'
     | '/competitors'
+    | '/crawls'
     | '/insights'
     | '/pricing'
     | '/products'
@@ -164,9 +188,11 @@ export interface FileRouteTypes {
     | '/sitemap.xml'
     | '/auth/login'
     | '/_authenticated/'
+    | '/_authenticated/stores/$origin'
     | '/_authenticated/alerts/'
     | '/_authenticated/catalogue/'
     | '/_authenticated/competitors/'
+    | '/_authenticated/crawls/'
     | '/_authenticated/insights/'
     | '/_authenticated/pricing/'
     | '/_authenticated/products/'
@@ -231,6 +257,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedCompetitorsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/crawls/': {
+      id: '/_authenticated/crawls/'
+      path: '/crawls'
+      fullPath: '/crawls/'
+      preLoaderRoute: typeof AuthenticatedCrawlsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/insights/': {
       id: '/_authenticated/insights/'
       path: '/insights'
@@ -266,14 +299,23 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSourcesIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/stores/$origin': {
+      id: '/_authenticated/stores/$origin'
+      path: '/stores/$origin'
+      fullPath: '/stores/$origin'
+      preLoaderRoute: typeof AuthenticatedStoresOriginRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
   }
 }
 
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedStoresOriginRoute: typeof AuthenticatedStoresOriginRoute
   AuthenticatedAlertsIndexRoute: typeof AuthenticatedAlertsIndexRoute
   AuthenticatedCatalogueIndexRoute: typeof AuthenticatedCatalogueIndexRoute
   AuthenticatedCompetitorsIndexRoute: typeof AuthenticatedCompetitorsIndexRoute
+  AuthenticatedCrawlsIndexRoute: typeof AuthenticatedCrawlsIndexRoute
   AuthenticatedInsightsIndexRoute: typeof AuthenticatedInsightsIndexRoute
   AuthenticatedPricingIndexRoute: typeof AuthenticatedPricingIndexRoute
   AuthenticatedProductsIndexRoute: typeof AuthenticatedProductsIndexRoute
@@ -283,9 +325,11 @@ interface AuthenticatedRouteRouteChildren {
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedStoresOriginRoute: AuthenticatedStoresOriginRoute,
   AuthenticatedAlertsIndexRoute: AuthenticatedAlertsIndexRoute,
   AuthenticatedCatalogueIndexRoute: AuthenticatedCatalogueIndexRoute,
   AuthenticatedCompetitorsIndexRoute: AuthenticatedCompetitorsIndexRoute,
+  AuthenticatedCrawlsIndexRoute: AuthenticatedCrawlsIndexRoute,
   AuthenticatedInsightsIndexRoute: AuthenticatedInsightsIndexRoute,
   AuthenticatedPricingIndexRoute: AuthenticatedPricingIndexRoute,
   AuthenticatedProductsIndexRoute: AuthenticatedProductsIndexRoute,

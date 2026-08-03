@@ -1,4 +1,5 @@
 import {
+  Archive,
   Bell,
   FileText,
   Layers,
@@ -28,8 +29,9 @@ export const INTELLIGENCE_NAV: NavItem[] = [
 ];
 
 export const OPERATIONS_NAV: NavItem[] = [
+  { title: "Crawler", url: ROUTES.sources, icon: Settings2 },
+  { title: "Saved crawls", url: ROUTES.crawls, icon: Archive },
   { title: "AI insights", url: ROUTES.insights, icon: Sparkles },
   { title: "Alerts", url: ROUTES.alerts, icon: Bell },
   { title: "Reports", url: ROUTES.reports, icon: FileText },
-  { title: "Sources & crawling", url: ROUTES.sources, icon: Settings2 },
 ];
