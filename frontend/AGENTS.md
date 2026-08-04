@@ -200,11 +200,11 @@ no page imports local mock data. There are no placeholder shells left:
 | Page             | Route            | What it shows today                                                                                |
 | ---------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
 | Overview         | `/`            | Stat cards + competitor snapshot via`useAnalytics()`; `NoRealDataState` when no crawls exist yet  |
-| Competitors      | `/competitors` | Manual + crawled stores merged via`useCompetitors()` (deduped by lowercase host; a custom name wins): **Add competitor** dialog (`POST /api/data/competitors`), per-row Crawl / Delete actions, a **"Your store"** row (`isMine`, set once via `GET/PUT /api/data/my-store`, never deletable), and a **Compare stores** section — Store A/B pickers, in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with a **Cheapest** column, and a **Fuzzy matching** toggle + **Similarity threshold** slider (both persisted under `parity.competitors.*`). The compare bar doubles as the "Your store" setter with a Crawl-your-store shortcut |
+| Competitors      | `/competitors` | **Empty-by-default slot flow**: a "Your website" picker (persisted via `GET/PUT /api/data/my-store`, used as store A everywhere) + **4 competitor slot cards** (selections persisted under `parity.competitors.slots`), each opening a searchable `StorePickerDialog` of crawled stores that excludes already-used ones. Every filled slot renders its own **ComparePanel** (your website vs that competitor): in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with a **Cheapest** column, all **paginated** (25/page). One **Fuzzy matching** toggle + **Similarity threshold** slider applies to every comparison (both persisted under `parity.competitors.*`); fuzzy matching is **on by default**. A manual **Add competitor** dialog still exists |
 | Saved crawls     | `/crawls`      | Snapshot history per store via`useSavedCrawls()`: history **hidden by default** with a per-store **Show history / Hide history** toggle, "+N new / removed · price changed / no change / first snapshot" badges, expandable rows (stats, changes vs previous, discovery, first-8 products, failures), a **View all N products** link to the full **Store catalogue** page, **Re-crawl** (prefills the crawler via `prefillCrawlerOrigin`), **Delete snapshot** / **Clear history** (`DELETE /api/data/crawl-results/:id` / `/crawl-results?origin=`) |
-| Store catalogue  | `/stores/$origin` | Full-page product list for one store via`useSavedCrawls()` (dynamic route keyed by **normalized origin**): newest-snapshot default with a **snapshot picker** (a stale id falls back to the newest), a crawl **stats row** + **Store profile** card, and a **searchable + sortable** Products table (name/brand/URL search, Product/Price column sorting, parse-rate badge, stock badges, "Showing X of Y" count). Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler) and a **Saved crawls** back link; dynamic `document.title` |
+| Store catalogue  | `/stores/$origin` | Full-page product list for one store via`useSavedCrawls()` (dynamic route keyed by **normalized origin**): newest-snapshot default with a **snapshot picker** (a stale id falls back to the newest), a crawl **stats row** + **Store profile** card + **Discovery log** (the specific per-candidate reasons behind a crawl result), and **searchable + sortable + paginated** Products tables (50 rows/page, 25/50/100 selector) in two views: a single snapshot, or **All snapshots** — the union of every product with a per-product **price sparkline** + price range + "seen in N snapshots". Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler), **Delete store** (clears all snapshots) and a **Saved crawls** back link; dynamic `document.title` |
 | Matched products | `/products`    | Searchable/filterable table via`useMatchedProducts()` — real crawled products; your-price/gap matching placeholder until the matching layer lands |
-| Pricing          | `/pricing`     | Positioning + market average from crawled data via`usePricing()`; history empty until time-series  |
+| Pricing          | `/pricing`     | **Real price history**: market/cheapest/your-store trend chart + market-relative price index + "biggest price movements" list, all derived from saved snapshots via `computePriceHistory` (same data feeds the dashboard trend). Honest "crawl again" hint when <2 snapshot events |
 | Catalogue gaps   | `/catalogue`   | Charts/gaps empty until your catalogue + matching exist; honest`NoRealDataState`               |
 | AI insights      | `/insights`    | `NoRealDataState` (needs the insight engine)                                                     |
 | Alerts           | `/alerts`      | `NoRealDataState` (needs the alert engine)                                                       |
@@ -665,10 +665,25 @@ step, pause and confirm before moving on.
   removed long-hidden formatting errors in `extract/*` and `parse.ts` from
   steps 2–3 — the earlier "lint green" checks used a grep pattern that never
   matched eslint's Windows backslash paths. Verified with `tsc` + lint +
-  build.
-- Step 5.5 (discovery diagnostics + platform + robots capture) — **done**.
-  `discover/platform.ts` (`detectPlatform`: robots.txt markers → generator
-  meta → asset fingerprints, never throws, degrades to "Unknown" + signal);
+  build.- Step 5.5 (discovery diagnostics + platform + robots capture) — **done**.
+  `discover/platform.ts` (`detectPlatform`: robots.txt markers → generator meta
+  → asset fingerprints, never throws, degrades to "Unknown" + signal);
+  **extended (verbose site intelligence)** — detection now also reports the
+  platform **kind** (store / corporate site / unknown), CMS (e.g. WordPress),
+  page-builder (Elementor), SEO plugin (Rank Math) and server stack from
+  response headers (e.g. Apache · PHP 8.2.33); a bare `mage/` substring no
+  longer false-positives as Magento (must be `/static/version` or literal
+  "magento"). `discover/homepage.ts` (`analyzeHomepage`) classifies the
+  homepage as store vs corporate from its product/category links and detects
+  out-links to other store hosts (e.g. a `shop.` subdomain). Sitemap discovery
+  (`discover/sitemap.ts`) is **multi-candidate**: robots.txt `Sitemap:`
+  directives first, then `/sitemap.xml`, then `/sitemap_index.xml` — an HTML
+  response (sitemap redirecting to the homepage) is detected and skipped, and
+  index walks skip non-product children (images/media/news). Every run emits a
+  **verbose discovery log** + **findings/suggestions** (e.g. "this looks like a
+  corporate site — crawl its linked store instead") surfaced live in the
+  Sources progress panel and the Store profile card; all persisted through
+  `CrawlRunResult.discovery` → backend `CrawlResult.discovery`.
   `Politeness` now exposes the robots.txt fetch outcome (`robotsStatus`:
   `found|absent|unreachable|skipped`) and the declared `robotsCrawlDelayMs`;
   the snapshot flows into `DiscoveryDiagnostics.robots` (plus `platform`),
@@ -677,7 +692,24 @@ step, pause and confirm before moving on.
   don't crash). The Sources "Store profile" card surfaces both with tooltips
   and honest `—` fallbacks. Verified with `tsc` + lint + backend schema
   round-trip. *(The Sources card is now titled "Store profile".)*
-- Step 6 (Playwright fallback) — **next**
+- Step 5.6 (discovery & extraction hardening) — **done**. WordPress core
+  sitemap **indexes** (`wp-sitemap.xml`) now resolve to their product post-type
+  files (`wp-sitemap-posts-product-*.xml`); entries from a *known product
+  sitemap* are trusted wholesale (`isProductSitemap` → `productOnly`), covering
+  WooCommerce `/shop/<cat>/<product>/` permalinks that no URL pattern can
+  classify — but only when **every** retained index child is a product sitemap
+  (mixed indexes like Rank Math's `sitemap_index.xml` fall back to pattern
+  filtering so pages don't leak in). Default sitemap candidates strip a
+  trailing `/` from the origin (no more `//sitemap.xml`). HTML crawl follows
+  `/product-category/` + `?product_cat=` and multi-segment `/shop/…` product
+  links. JSON-LD extraction reads the WooCommerce/Yoast **`priceSpecification`**
+  (`UnitPriceSpecification`) shape, normalizes thousands separators, and skips
+  unparseable offers instead of saving fake `0`s (real zero prices are kept).
+  Verified live: `atonline.com.pk` 0 → 120 products; fitnessdepot.pk prices
+  extract (1400/300/4900 PKR vs all-0 before). `tsc`/`lint`/`build` clean.
+- Step 6 (Playwright browser fallback) — **next**. After that, the tiered
+  unlocks run in the order **Tier 3 (per-site adapters) → Tier 2 (residential
+  proxies) → Tier 4 (commercial platform, e.g. Apify)** — see `plan.md` §6.
 
 ---
 

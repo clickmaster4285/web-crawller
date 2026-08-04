@@ -141,19 +141,21 @@ export function PageHeader({
   description,
   actions,
 }: {
-  eyebrow: string;
+  eyebrow?: string;
   title: string;
-  description: string;
+  description?: string;
   actions?: React.ReactNode;
 }) {
   return (
     <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border px-6 py-8">
       <div className="max-w-2xl">
-        <p className="label-caps">{eyebrow}</p>
+        {eyebrow ? <p className="label-caps">{eyebrow}</p> : null}
         <h1 className="display-xl mt-2">{title}</h1>
-        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-          {description}
-        </p>
+        {description ? (
+          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+            {description}
+          </p>
+        ) : null}
       </div>
       {actions ? <div className="flex gap-2">{actions}</div> : null}
     </div>

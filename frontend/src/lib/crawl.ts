@@ -55,6 +55,12 @@ export interface CrawlRunInput {
    * latest result for the origin.
    */
   storeSnapshots?: boolean;
+  /**
+   * Tier 1 — Playwright browser rendering (default false). Renders JS-shell
+   * pages in a headless browser before discovery/extraction, unlocking
+   * JS-rendered stores. Slower; requires playwright + Chrome installed.
+   */
+  useBrowser?: boolean;
 }
 
 export interface CrawlRunResult {
@@ -76,7 +82,20 @@ export interface CrawlRunResult {
   /** What each discovery strategy contributed, for the Discovery engine card. */
   discovery: {
     collections: Array<{ collection: string; handles: number; error?: string }>;
-    sitemap: { urls: number; lastmod: number; error?: string };
+    sitemap: {
+      urls: number;
+      lastmod: number;
+      error?: string;
+      /** Sitemap candidates tried (robots.txt-declared first), with outcomes. */
+      candidates?: Array<{
+        url: string;
+        source: "robots.txt" | "default";
+        status: "ok" | "html" | "error";
+        urls: number;
+        productUrls: number;
+        error?: string;
+      }>;
+    };
     htmlCrawl: {
       urls: number;
       pagesVisited: number;
@@ -84,12 +103,37 @@ export interface CrawlRunResult {
       error?: string;
     };
     /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
-    platform: { platform: string; signal: string };
+    platform: {
+      platform: string;
+      signal: string;
+      kind?: "store" | "corporate" | "unknown";
+      cms?: string;
+      builder?: string;
+      seoPlugin?: string;
+      server?: string;
+      generator?: string;
+    };
     /** robots.txt presence + declared crawl-delay (found/absent/unreachable/skipped). */
     robots: {
       status: "found" | "absent" | "unreachable" | "skipped";
       crawlDelayMs: number | null;
     };
+    /** Homepage analysis (store vs corporate, external store links). */
+    homepage?: {
+      productLinks: number;
+      categoryLinks: number;
+      looksLikeStore: boolean;
+      externalStoreLinks: Array<{ url: string; host: string; label: string }>;
+      note: string;
+    };
+    /** Human-readable findings/suggestions surfaced to the user. */
+    findings: Array<{
+      level: "info" | "warning" | "success";
+      message: string;
+      action?: { label: string; url: string };
+    }>;
+    /** Verbose discovery log (what the crawler did, in order). */
+    log: string[];
   };
 }
 
@@ -107,6 +151,10 @@ export interface CrawlJobDiscovery {
   collectionHandles: number;
   /** Detected store platform (set once detection runs, usually at "done"). */
   platform?: string;
+  /** Human-readable line describing what discovery is doing right now. */
+  step?: string;
+  /** Accumulated verbose log of discovery steps so far (oldest first). */
+  log: string[];
 }
 
 /** Crawl parameters the job was started with (captured at start). */
@@ -117,6 +165,7 @@ export interface CrawlJobParams {
   respectRobotsTxt: boolean;
   productOnly: boolean;
   storeSnapshots: boolean;
+  useBrowser: boolean;
 }
 
 export type CrawlFrequency = "1h" | "6h" | "daily" | "weekly";
@@ -149,6 +198,7 @@ export interface ScheduleCrawlInput {
   respectRobotsTxt?: boolean;
   productOnly?: boolean;
   storeSnapshots?: boolean;
+  useBrowser?: boolean;
 }
 
 /** Live snapshot of a crawl job, returned by `getCrawlProgress`. */
@@ -233,6 +283,7 @@ function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
     respectRobotsTxt: input.respectRobotsTxt !== false,
     productOnly: input.productOnly !== false,
     storeSnapshots: input.storeSnapshots !== false,
+    useBrowser: input.useBrowser === true,
   };
 }
 
@@ -260,6 +311,7 @@ export const startCrawl = createServerFn({ method: "POST" })
         respectRobotsTxt: data.respectRobotsTxt !== false,
         productOnly: data.productOnly !== false,
         storeSnapshots: data.storeSnapshots !== false,
+        useBrowser: data.useBrowser === true,
       },
     });
     // Fire and forget — the client polls progress. The event loop stays
@@ -305,6 +357,7 @@ function validateScheduleInput(input: ScheduleCrawlInput): ScheduleCrawlInput {
     respectRobotsTxt: input.respectRobotsTxt !== false,
     productOnly: input.productOnly !== false,
     storeSnapshots: input.storeSnapshots !== false,
+    useBrowser: input.useBrowser === true,
   };
 }
 
@@ -329,6 +382,7 @@ export const scheduleCrawl = createServerFn({ method: "POST" })
         respectRobotsTxt: data.respectRobotsTxt !== false,
         productOnly: data.productOnly !== false,
         storeSnapshots: data.storeSnapshots !== false,
+        useBrowser: data.useBrowser === true,
       },
       lastRunAt: null,
       nextRunAt: now + FREQUENCY_MS[data.frequency],
@@ -392,6 +446,7 @@ async function runScheduledCrawl(
       respectRobotsTxt: sched.params.respectRobotsTxt,
       productOnly: sched.params.productOnly,
       storeSnapshots: sched.params.storeSnapshots,
+      useBrowser: sched.params.useBrowser,
     });
   } finally {
     // Clear the running flag in a finally so an unexpected throw (e.g. a
@@ -435,6 +490,7 @@ async function runJob(jobId: string, input: CrawlRunInput): Promise<void> {
       maxPages: input.maxPages,
       respectRobotsTxt: input.respectRobotsTxt,
       productOnly: input.productOnly,
+      useBrowser: input.useBrowser === true,
       maxRetries: 1,
       // Per-product incremental saves + skip-unchanged on re-runs. The
       // engine writes each product to SQLite as it is fetched, so a crash
@@ -473,8 +529,11 @@ async function runJob(jobId: string, input: CrawlRunInput): Promise<void> {
           failed: result.stats.failed,
           durationMs: result.stats.durationMs,
         },
+        // The full catalogue is saved — comparisons and every product view
+        // need all of it, not a sample. Failures stay capped (they're retried
+        // on the next run anyway).
         failures: result.stats.failures.slice(0, 100),
-        products: result.products.slice(0, 100).map((p) => ({
+        products: result.products.map((p) => ({
           name: p.name,
           brand: p.brand,
           price: p.price,

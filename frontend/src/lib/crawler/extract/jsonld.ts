@@ -261,26 +261,27 @@ function collectOffers(value: unknown): ExtractedOffer[] {
     if (!item || typeof item !== "object") continue;
     const obj = item as Record<string, unknown>;
     const type = obj["@type"];
-    // Skip nested offers that are themselves AggregateOffer (we want leaves)
+    // AggregateOffer (variable products) — use lowPrice/highPrice as the two
+    // ends of the range and let pickPrimaryOffer choose the cheapest.
     if (
       typeof type === "string" &&
       type.toLowerCase().includes("aggregateoffer")
     ) {
-      const low = obj["lowPrice"];
-      const high = obj["highPrice"];
-      if (typeof low === "number" || typeof low === "string") {
+      const low = parsePriceValue(obj["lowPrice"]);
+      const high = parsePriceValue(obj["highPrice"]);
+      if (low != null) {
         out.push({
-          price: toNumber(low),
-          priceCurrency: stringField(obj, "priceCurrency") ?? "USD",
+          price: low,
+          priceCurrency: offerCurrency(obj),
           availability: stringField(obj, "availability") ?? "InStock",
           url: stringField(obj, "url"),
           sku: stringField(obj, "sku"),
         });
       }
-      if (typeof high === "number" || typeof high === "string") {
+      if (high != null) {
         out.push({
-          price: toNumber(high),
-          priceCurrency: stringField(obj, "priceCurrency") ?? "USD",
+          price: high,
+          priceCurrency: offerCurrency(obj),
           availability: stringField(obj, "availability") ?? "InStock",
           url: stringField(obj, "url"),
           sku: stringField(obj, "sku"),
@@ -288,15 +289,61 @@ function collectOffers(value: unknown): ExtractedOffer[] {
       }
       continue;
     }
+    const price = offerPrice(obj);
+    // Offers without a usable price are skipped — emitting a fake 0-priced
+    // offer poisons the whole comparison.
+    if (price == null) continue;
     out.push({
-      price: toNumber(obj["price"] ?? obj["Price"]),
-      priceCurrency: stringField(obj, "priceCurrency") ?? "USD",
+      price,
+      priceCurrency: offerCurrency(obj),
       availability: stringField(obj, "availability") ?? "InStock",
       url: stringField(obj, "url"),
       sku: stringField(obj, "sku"),
     });
   }
   return out;
+}
+
+/**
+ * Resolves an Offer's price. WooCommerce/Yoast nest it under
+ * `priceSpecification` → `UnitPriceSpecification.price` instead of a direct
+ * `price` field, so both shapes are supported.
+ */
+function offerPrice(obj: Record<string, unknown>): number | undefined {
+  const direct = obj["price"] ?? obj["Price"];
+  if (direct !== undefined) return parsePriceValue(direct);
+  for (const spec of asArray(obj["priceSpecification"])) {
+    if (!spec || typeof spec !== "object") continue;
+    const p = (spec as Record<string, unknown>)["price"];
+    if (p !== undefined) return parsePriceValue(p);
+  }
+  return undefined;
+}
+
+/**
+ * Parses a JSON-LD price into a finite number, or `undefined` when it isn't a
+ * real price (e.g. "call for pricing") so it can't become a fake 0. Real zero
+ * prices (free items) are kept.
+ */
+function parsePriceValue(value: unknown): number | undefined {
+  const n = toNumber(value);
+  if (typeof value === "string" && n === 0) {
+    const s = value.trim();
+    if (s !== "0" && s !== "0.00" && s !== "0,00") return undefined;
+  }
+  return n;
+}
+
+/** Resolves an Offer's currency (direct, or nested in priceSpecification). */
+function offerCurrency(obj: Record<string, unknown>): string {
+  const direct = stringField(obj, "priceCurrency");
+  if (direct) return direct;
+  for (const spec of asArray(obj["priceSpecification"])) {
+    if (!spec || typeof spec !== "object") continue;
+    const c = stringField(spec as Record<string, unknown>, "priceCurrency");
+    if (c) return c;
+  }
+  return "USD";
 }
 
 function pickPrimaryOffer(
@@ -343,7 +390,18 @@ function asArray(value: unknown): unknown[] {
 function toNumber(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
-    const n = Number(value);
+    // Normalize thousands separators: "1,400.00" → "1400.00", "1,400" → 1400.
+    // When both separators appear, the last one is the decimal point.
+    let s = value.trim();
+    if (s.includes(",") && s.includes(".")) {
+      s =
+        s.lastIndexOf(",") > s.lastIndexOf(".")
+          ? s.replace(/\./g, "").replace(",", ".")
+          : s.replace(/,/g, "");
+    } else {
+      s = s.replace(/,/g, "");
+    }
+    const n = Number(s);
     return Number.isFinite(n) ? n : 0;
   }
   return 0;

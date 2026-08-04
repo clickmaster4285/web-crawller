@@ -3,7 +3,6 @@ import { useMemo, useState } from "react";
 import { Download, Search } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
@@ -22,6 +21,8 @@ import {
   NoRealDataState,
 } from "@/components/common/states";
 import { useMatchedProducts } from "@/hooks/useData";
+import { usePagination } from "@/hooks/usePagination";
+import { PaginationBar } from "@/components/common/pagination";
 import { gbp } from "@/utils/formatCurrency";
 import { cn } from "@/lib/utils";
 
@@ -32,7 +33,7 @@ export const Route = createFileRoute("/_authenticated/products/")({
       {
         name: "description",
         content:
-          "Every product matched across your catalogue and competitor stores, with confidence scores, price gaps, stock and delivery comparison.",
+          "Every product matched across your catalogue and competitor stores, with confidence scores and price gaps.",
       },
       { property: "og:title", content: "Matched products — Parity" },
       {
@@ -68,6 +69,8 @@ function ProductsPage() {
       return true;
     });
   }, [query, filter, matchedProducts]);
+
+  const pager = usePagination(rows, 50);
 
   if (isError) return <ErrorState />;
   if (isLoading || !matchedProducts) return <LoadingState />;
@@ -127,12 +130,10 @@ function ProductsPage() {
                 <TableHead className="text-right">Competitor</TableHead>
                 <TableHead className="text-right">Gap</TableHead>
                 <TableHead className="text-right">24h</TableHead>
-                <TableHead>Stock</TableHead>
-                <TableHead>Delivery</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.map((p) => {
+              {pager.pageItems.map((p) => {
                 const gap =
                   p.yourPrice === null ? null : p.competitorPrice - p.yourPrice;
                 return (
@@ -187,26 +188,19 @@ function ProductsPage() {
                         ? "—"
                         : `${p.priceChange24h > 0 ? "+" : ""}${gbp(p.priceChange24h)}`}
                     </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={
-                          p.stock === "Out of stock"
-                            ? "destructive"
-                            : "secondary"
-                        }
-                        className="font-normal"
-                      >
-                        {p.stock}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {p.delivery}
-                    </TableCell>
                   </TableRow>
                 );
               })}
             </TableBody>
           </Table>
+          <PaginationBar
+            page={pager.page}
+            totalPages={pager.totalPages}
+            total={pager.total}
+            pageSize={pager.pageSize}
+            onPageChange={pager.setPage}
+            onPageSizeChange={pager.setPageSize}
+          />
         </div>
       </div>
     </div>

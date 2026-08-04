@@ -15,7 +15,6 @@
  *   - workspace        → no "your store" input exists yet
  *   - matched products → needs the product-matching layer (GTIN > SKU > slug
  *                        > fuzzy) against your own catalogue
- *   - price history    → needs time-series price points per product
  *   - category/brand gaps → needs your catalogue + matching
  *   - insights/alerts/reports → need analysis/alert/report engines
  */
@@ -53,6 +52,60 @@ function originName(origin) {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/** Average of a product list's prices (skips zero/unknown), or null. */
+function avgPrice(products) {
+  const prices = (products || [])
+    .map((p) => Number(p.price))
+    .filter((p) => Number.isFinite(p) && p > 0);
+  return prices.length
+    ? prices.reduce((a, b) => a + b, 0) / prices.length
+    : null;
+}
+
+/**
+ * Builds the market price time-series from every saved snapshot. Each
+ * `CrawlResult` doc is one store's catalogue at one point in time; events are
+ * walked oldest → newest and at each event the latest known average for every
+ * store contributes to the market average / cheapest lines — the series
+ * reflects what was known at that moment. `you` is the user's own store
+ * average (when their store has been crawled), otherwise null. Same-date
+ * events coalesce into a single point.
+ */
+function computePriceHistory(rows, myStoreHost) {
+  const events = rows
+    .map((row) => ({
+      t: new Date(row.createdAt).getTime(),
+      host: originHost(row.origin),
+      row,
+    }))
+    .filter((e) => Number.isFinite(e.t) && avgPrice(e.row.products) != null)
+    .sort((a, b) => a.t - b.t);
+  const latestAvg = new Map();
+  const points = [];
+  for (const ev of events) {
+    const avg = avgPrice(ev.row.products);
+    latestAvg.set(ev.host, avg);
+    const values = [...latestAvg.values()];
+    const round2 = (n) => Math.round(n * 100) / 100;
+    const point = {
+      date: new Date(ev.t).toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+      }),
+      you:
+        myStoreHost && latestAvg.has(myStoreHost)
+          ? round2(latestAvg.get(myStoreHost))
+          : null,
+      market: round2(values.reduce((a, b) => a + b, 0) / values.length),
+      cheapest: round2(Math.min(...values)),
+    };
+    const prev = points[points.length - 1];
+    if (prev && prev.date === point.date) points[points.length - 1] = point;
+    else points.push(point);
+  }
+  return points;
+}
+
 /**
  * Loads every saved crawl, grouped per origin, keeping the latest snapshot
  * per origin. Returns `{ latest: Map<origin, doc>, rows: CrawlResult[] }`.
@@ -79,15 +132,27 @@ function computeCompetitors(latest, manual, myStore) {
   const myStoreHost = myStore && myStore.origin ? originHost(myStore.origin) : null;
   const competitors = [];
   const crawledHosts = new Set();
+  // Market-relative price index: each crawled store's average product price
+  // vs the average of every crawled store (index 100 = at market level).
+  const storeAvg = new Map();
+  for (const [origin, doc] of latest) {
+    const a = avgPrice(doc.products);
+    if (a != null) storeAvg.set(originHost(origin), a);
+  }
+  const marketAvg =
+    storeAvg.size > 0
+      ? [...storeAvg.values()].reduce((a, b) => a + b, 0) / storeAvg.size
+      : 0;
   for (const [origin, doc] of latest) {
     const host = originHost(origin);
     crawledHosts.add(host);
     const products = doc.products || [];
     const manualDoc = manualByHost.get(host);
     const isMine = !!myStoreHost && host === myStoreHost;
-    // No "your price" to index against yet, so every competitor sits at the
-    // neutral baseline of 100 (their own average). Honest, not fabricated.
-    const avgPriceIndex = 100;
+    const avgPriceIndex =
+      marketAvg > 0 && storeAvg.has(host)
+        ? Math.round((storeAvg.get(host) / marketAvg) * 100)
+        : 100;
     competitors.push({
       id: isMine ? 'my-store' : manualDoc ? String(manualDoc._id) : `crawl-${host}`,
       name: isMine
@@ -269,14 +334,25 @@ const dataController = {
   },
 
   async analytics(req, res) {
-    const { latest } = await loadLatestPerOrigin();
+    const { latest, rows } = await loadLatestPerOrigin();
+    const myStore = await loadMyStore();
     const competitors = computeCompetitors(
       latest,
       await loadManualCompetitors(),
-      await loadMyStore()
+      myStore
     );
     const matchedProducts = computeMatchedProducts(latest);
     const stats = computeDashboardStats(competitors, matchedProducts);
+    const myStoreHost =
+      myStore && myStore.origin ? originHost(myStore.origin) : null;
+    // Real "your price" — the user's own store's average product price.
+    if (myStoreHost) {
+      const mine = [...latest.values()].find(
+        (doc) => originHost(doc.origin) === myStoreHost
+      );
+      const a = mine ? avgPrice(mine.products) : null;
+      if (a != null) stats.yourAvgPrice = Math.round(a * 100) / 100;
+    }
     res.json({
       hasData: competitors.length > 0,
       stats: {
@@ -307,7 +383,7 @@ const dataController = {
         yourPrice: p.yourPrice,
         gap: p.yourPrice === null ? null : p.competitorPrice - p.yourPrice,
       })),
-      priceHistory: [], // needs time-series price points per product
+      priceHistory: computePriceHistory(rows, myStoreHost),
       categoryGaps: [], // needs your catalogue + matching
       brandGaps: [], // needs your catalogue + matching
     });
@@ -330,18 +406,30 @@ const dataController = {
   },
 
   async pricing(req, res) {
-    const { latest } = await loadLatestPerOrigin();
+    const { latest, rows } = await loadLatestPerOrigin();
+    const myStore = await loadMyStore();
     const competitors = computeCompetitors(
       latest,
       await loadManualCompetitors(),
-      await loadMyStore()
+      myStore
     );
     const matchedProducts = computeMatchedProducts(latest);
+    const stats = computeDashboardStats(competitors, matchedProducts);
+    const myStoreHost =
+      myStore && myStore.origin ? originHost(myStore.origin) : null;
+    // Real "your price" — the user's own store's average product price.
+    if (myStoreHost) {
+      const mine = [...latest.values()].find(
+        (doc) => originHost(doc.origin) === myStoreHost
+      );
+      const a = mine ? avgPrice(mine.products) : null;
+      if (a != null) stats.yourAvgPrice = Math.round(a * 100) / 100;
+    }
     res.json({
       competitors,
       matchedProducts,
-      priceHistory: [],
-      stats: computeDashboardStats(competitors, matchedProducts),
+      priceHistory: computePriceHistory(rows, myStoreHost),
+      stats,
     });
   },
 

@@ -3,18 +3,23 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
+  ArrowUpRight,
   CalendarClock,
   CircleCheck,
   Eye,
   Globe,
+  Link2,
   Loader2,
   Play,
   RefreshCw,
   TriangleAlert,
 } from "lucide-react";
 
+import { cn } from "@/lib/utils";
+
 import { PageHeader } from "@/components/layout/app-shell";
 import { StoreProfile } from "@/components/crawls/store-profile";
+import { DiscoveryLog } from "@/components/crawls/discovery-log";
 import { SectionTitle } from "@/components/cards/stat-card";
 import { CrawlDiffSummary } from "@/components/cards/crawl-diff-summary";
 import { CrawlStatsGrid } from "@/components/cards/crawl-stats-grid";
@@ -238,6 +243,10 @@ function SourcesPage() {
 
   const job: CrawlJob | undefined = progress.data ?? undefined;
   const isRunning = job?.status === "running";
+  // Live discovery snapshot — non-null while the discovery phase runs
+  // (job.total stays 0 until the fetch phase begins).
+  const liveDiscovery =
+    job && job.total === 0 && job.discovery ? job.discovery : null;
   // True when we restored (from localStorage or ?job=) a crawl that is still
   // running — the page reconnected to it instead of starting it fresh here.
   const reconnected =
@@ -395,9 +404,9 @@ function SourcesPage() {
   return (
     <div>
       <PageHeader
-        eyebrow="Crawl"
+        // eyebrow="Crawl"
         title="Crawler"
-        description="Enter a store domain and the engine discovers its catalogue — sitemap + HTML crawl, then per-product extraction with robots.txt and rate-limit respect. Every result is saved, so re-crawling only picks up what's new."
+        // description="Enter a store domain and the engine discovers its catalogue — sitemap + HTML crawl, then per-product extraction with robots.txt and rate-limit respect. Every result is saved, so re-crawling only picks up what's new."
         actions={
           <Button asChild variant="outline">
             <Link to="/crawls">
@@ -524,6 +533,13 @@ function SourcesPage() {
         <StoreProfile
           crawl={profileCrawl}
           domain={profileKey}
+          onSuggestionClick={(url) => {
+            // "Crawl {linked store}" — prefill the crawler with the store
+            // this site links out to (e.g. a corporate site → its shop).
+            setCrawlOrigin(url);
+            setCollections("");
+            setJobId(null);
+          }}
           headerAction={
             profileCrawl && profileCrawl.products.length > 0 ? (
               <Button asChild variant="outline" size="sm" className="h-7">
@@ -587,41 +603,71 @@ function SourcesPage() {
             </div>
 
             {/* Live discovery diagnostics — real sitemap/page counts while
-                discovery runs (job.total stays 0 until the fetch phase). */}
-            {job.total === 0 && job.discovery ? (
+                discovery runs (job.total stays 0 until the fetch phase), plus
+                a verbose step-by-step log of what the engine is doing. */}
+            {liveDiscovery ? (
               <div className="rounded-md border border-border bg-muted/40 p-3 text-xs">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-muted-foreground">
-                    {discoveryPhaseLabel(job.discovery.phase)}
+                    {discoveryPhaseLabel(liveDiscovery.phase)}
                   </span>
                   <span className="numeric">
-                    {job.discovery.urlsFound.toLocaleString()} product URLs
+                    {liveDiscovery.urlsFound.toLocaleString()} product URLs
                   </span>
                 </div>
                 <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
-                  {job.discovery.sitemapUrls > 0 ? (
+                  {liveDiscovery.sitemapUrls > 0 ? (
                     <span>
-                      Sitemap: {job.discovery.sitemapUrls.toLocaleString()}
+                      Sitemap: {liveDiscovery.sitemapUrls.toLocaleString()}
                     </span>
                   ) : null}
-                  {job.discovery.htmlPagesVisited > 0 ? (
+                  {liveDiscovery.htmlPagesVisited > 0 ? (
                     <span>
                       Pages visited:{" "}
-                      {job.discovery.htmlPagesVisited.toLocaleString()}
+                      {liveDiscovery.htmlPagesVisited.toLocaleString()}
                     </span>
                   ) : null}
-                  {job.discovery.htmlUrls > 0 ? (
+                  {liveDiscovery.htmlUrls > 0 ? (
                     <span>
-                      HTML URLs: {job.discovery.htmlUrls.toLocaleString()}
+                      HTML URLs: {liveDiscovery.htmlUrls.toLocaleString()}
                     </span>
                   ) : null}
-                  {job.discovery.collectionHandles > 0 ? (
+                  {liveDiscovery.collectionHandles > 0 ? (
                     <span>
                       Collections:{" "}
-                      {job.discovery.collectionHandles.toLocaleString()}
+                      {liveDiscovery.collectionHandles.toLocaleString()}
                     </span>
                   ) : null}
                 </div>
+
+                {/* Verbose live log — the current step bolded, then the trail. */}
+                {liveDiscovery.log.length > 0 ? (
+                  <div className="mt-2.5 max-h-36 space-y-1 overflow-auto border-t border-border pt-2.5">
+                    {liveDiscovery.log.slice(-8).map((line, i) => {
+                      const isLast =
+                        i === Math.min(liveDiscovery.log.length, 8) - 1;
+                      return (
+                        <p
+                          key={`${line}-${i}`}
+                          className={cn(
+                            "flex gap-2",
+                            isLast
+                              ? "font-medium text-foreground"
+                              : "text-muted-foreground",
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "mt-1.5 size-1 shrink-0 rounded-full",
+                              isLast ? "animate-pulse bg-accent" : "bg-border",
+                            )}
+                          />
+                          <span className="leading-snug">{line}</span>
+                        </p>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
@@ -755,6 +801,11 @@ function SourcesPage() {
               <div className="flex flex-wrap gap-2">
                 <Badge variant="secondary" className="font-normal">
                   {result.discovery.platform?.platform ?? "Unknown platform"}
+                  {result.discovery.platform?.kind === "store"
+                    ? " · store"
+                    : result.discovery.platform?.kind === "corporate"
+                      ? " · corporate site"
+                      : ""}
                 </Badge>
                 {result.discovery.sitemap?.error ? (
                   <Badge variant="secondary" className="font-normal">
@@ -785,6 +836,56 @@ function SourcesPage() {
                 ) : null}
               </div>
             ) : null}
+
+            {/* Verbose findings + full discovery log from this run. */}
+            {result.discovery?.findings?.length ? (
+              <div>
+                <p className="label-caps mb-2">What the crawler found</p>
+                <ul className="space-y-1.5">
+                  {result.discovery.findings.map((f, i) => (
+                    <li
+                      key={`${f.message}-${i}`}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs"
+                    >
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-full px-2 py-0.5 font-medium",
+                          f.level === "success" && "bg-success/10 text-success",
+                          f.level === "warning" && "bg-warning/10 text-warning",
+                          f.level === "info" && "bg-accent/10 text-accent",
+                        )}
+                      >
+                        {f.level === "success"
+                          ? "Found"
+                          : f.level === "warning"
+                            ? "Heads up"
+                            : "Suggestion"}
+                      </span>
+                      <span className="min-w-0 flex-1 text-muted-foreground">
+                        {f.message}
+                      </span>
+                      {f.action ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-6 gap-1 text-xs"
+                          onClick={() => {
+                            setCrawlOrigin(f.action!.url);
+                            setCollections("");
+                            setJobId(null);
+                          }}
+                        >
+                          <Link2 className="size-3" />
+                          {f.action.label}
+                          <ArrowUpRight className="size-3" />
+                        </Button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <DiscoveryLog lines={result.discovery?.log ?? []} />
 
             {result.failures.length > 0 ? (
               <div>

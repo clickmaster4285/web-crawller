@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
-import { Store } from "lucide-react";
+import { ArrowUpRight, Home, Link2, Store } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type { SavedCrawl } from "@/lib/api";
 import { formatCrawlDate, productUrlPattern, robotsText } from "@/utils/crawls";
 import { cn } from "@/lib/utils";
@@ -33,16 +34,41 @@ function ProfileCell({
   );
 }
 
+/** Platform kind badge — store / corporate site / unknown. */
+function PlatformKindBadge({
+  kind,
+}: {
+  kind: "store" | "corporate" | "unknown" | undefined;
+}) {
+  if (!kind || kind === "unknown") return null;
+  return (
+    <Badge
+      variant={kind === "store" ? "secondary" : "outline"}
+      className="ml-1.5 align-middle font-normal"
+      title={
+        kind === "store"
+          ? "This site sells products directly"
+          : "Marketing/brochure site — products may live elsewhere"
+      }
+    >
+      {kind === "store" ? "Store" : "Corporate site"}
+    </Badge>
+  );
+}
+
 /**
  * Compact store profile for the Crawler page — the platform, sitemap,
  * robots.txt, URL pattern, parse rate and product count detected from the
- * latest saved crawl of the domain being crawled. Renders an honest empty
- * state when that domain hasn't been crawled yet.
+ * latest saved crawl of the domain being crawled. Surfaces the verbose
+ * discovery analysis (platform kind, homepage signals, sitemap candidates,
+ * findings/suggestions). Renders an honest empty state when that domain
+ * hasn't been crawled yet.
  */
 export function StoreProfile({
   crawl,
   domain,
   headerAction,
+  onSuggestionClick,
 }: {
   /** Newest saved snapshot for the domain being crawled (or undefined). */
   crawl: SavedCrawl | undefined;
@@ -50,6 +76,8 @@ export function StoreProfile({
   domain: string;
   /** Optional action rendered in the header row (e.g. a "View catalogue" link). */
   headerAction?: ReactNode;
+  /** Called when the user clicks a suggestion action (e.g. crawl the linked store). */
+  onSuggestionClick?: (url: string) => void;
 }) {
   const d = crawl?.discovery;
   const parseRate =
@@ -75,6 +103,40 @@ export function StoreProfile({
     );
   }
 
+  const platform = d.platform?.platform ?? "Unknown";
+  const platformTitle = [
+    d.platform?.signal,
+    d.platform?.builder && `Built with ${d.platform.builder}`,
+    d.platform?.seoPlugin && `SEO: ${d.platform.seoPlugin}`,
+    d.platform?.server && `Server: ${d.platform.server}`,
+    d.platform?.generator && `Generator: ${d.platform.generator}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  // Sitemap analysis — the candidate outcomes explain why products were/were
+  // not found (e.g. /sitemap.xml redirected, product sitemap present or not).
+  const sitemapCells = (d.sitemap.candidates ?? []).filter(
+    (c) => c.status !== "error" || c.urls > 0,
+  );
+  const sitemapSummary =
+    sitemapCells.length > 0
+      ? sitemapCells
+          .map((c) => {
+            const name = c.url.split("/").pop() ?? c.url;
+            if (c.status === "html") return `${name} redirected to a page`;
+            if (c.status === "error") return `${name} error`;
+            return c.productUrls > 0
+              ? `${name}: ${c.productUrls.toLocaleString()} products`
+              : `${name}: no products`;
+          })
+          .join(" · ")
+      : d.sitemap?.error
+        ? "Not found"
+        : `${(d.sitemap?.urls ?? 0).toLocaleString()} product URLs`;
+
+  const homepage = d.homepage;
+
   return (
     <section className="border border-border bg-card">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
@@ -93,19 +155,8 @@ export function StoreProfile({
         </div>
       </div>
       <div className="grid grid-cols-2 gap-px bg-border sm:grid-cols-3 lg:grid-cols-6">
-        <ProfileCell
-          label="Platform"
-          value={d.platform?.platform ?? "Unknown"}
-          title={d.platform?.signal}
-        />
-        <ProfileCell
-          label="Sitemap"
-          value={
-            d.sitemap?.error
-              ? "Not found"
-              : `${(d.sitemap?.urls ?? 0).toLocaleString()} product URLs`
-          }
-        />
+        <ProfileCell label="Platform" value={platform} title={platformTitle} />
+        <ProfileCell label="Sitemap" value={sitemapSummary} />
         <ProfileCell label="robots.txt" value={robotsText(d.robots)} />
         <ProfileCell
           label="URL pattern"
@@ -123,6 +174,77 @@ export function StoreProfile({
           value={crawl.products.length.toLocaleString()}
         />
       </div>
+
+      {/* Platform kind + homepage analysis row. */}
+      {d.platform?.kind || homepage ? (
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-border px-5 py-3 text-xs text-muted-foreground">
+          {d.platform?.kind ? (
+            <span className="inline-flex items-center gap-1.5">
+              <Store className="size-3.5" />
+              Detected as
+              <PlatformKindBadge kind={d.platform.kind} />
+              <span className="sr-only">{platformTitle}</span>
+            </span>
+          ) : null}
+          {homepage ? (
+            <span
+              className="inline-flex min-w-0 items-center gap-1.5"
+              title={`${homepage.productLinks} product links · ${homepage.categoryLinks} category links on the homepage`}
+            >
+              <Home className="size-3.5 shrink-0" />
+              <span className="truncate">
+                {homepage.looksLikeStore
+                  ? `${homepage.productLinks} product link${homepage.productLinks === 1 ? "" : "s"} on the homepage`
+                  : homepage.externalStoreLinks.length > 0
+                    ? "Corporate site — no product links"
+                    : "No product links on the homepage"}
+              </span>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Verbose findings / suggestions (external store links, corporate-site notes). */}
+      {d.findings && d.findings.length > 0 ? (
+        <ul className="space-y-1.5 border-t border-border px-5 py-3">
+          {d.findings.map((f, i) => (
+            <li
+              key={`${f.message}-${i}`}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs"
+            >
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-2 py-0.5 font-medium",
+                  f.level === "success" && "bg-success/10 text-success",
+                  f.level === "warning" && "bg-warning/10 text-warning",
+                  f.level === "info" && "bg-accent/10 text-accent",
+                )}
+              >
+                {f.level === "success"
+                  ? "Found"
+                  : f.level === "warning"
+                    ? "Heads up"
+                    : "Suggestion"}
+              </span>
+              <span className="min-w-0 flex-1 text-muted-foreground">
+                {f.message}
+              </span>
+              {f.action ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 gap-1 text-xs"
+                  onClick={() => onSuggestionClick?.(f.action!.url)}
+                >
+                  <Link2 className="size-3" />
+                  {f.action.label}
+                  <ArrowUpRight className="size-3" />
+                </Button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </section>
   );
 }

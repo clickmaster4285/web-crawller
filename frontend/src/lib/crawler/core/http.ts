@@ -41,6 +41,14 @@ export interface HttpOptions {
    * disallows before fetching them.
    */
   isAllowed?: (url: string) => boolean;
+  /**
+   * Tier 1 — Playwright fallback (opt-in per crawl). When set, `fetchText`
+   * re-renders HTML pages that look like a client-side JS shell (Nuxt/Next/
+   * Vue/React app mounts, near-empty server HTML) and returns the rendered
+   * DOM instead, so discovery + extraction see the real content. Sitemap
+   * XML and JSON responses are never re-rendered.
+   */
+  renderWithBrowser?: (url: string) => Promise<string>;
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -145,7 +153,60 @@ export async function fetchText(
   options: HttpOptions = {},
 ): Promise<string> {
   const response = await fetchWithRetry(url, options);
-  return await response.text();
+  const body = await response.text();
+  // Tier 1 (Playwright) fallback: when enabled and the server HTML looks like
+  // a JS shell, render it in a browser and use the hydrated DOM. A renderer
+  // failure keeps the raw HTML — the crawl reports it honestly.
+  if (
+    options.renderWithBrowser &&
+    isProbablyHtml(body) &&
+    looksLikeJsShell(body)
+  ) {
+    try {
+      return await options.renderWithBrowser(url);
+    } catch {
+      return body;
+    }
+  }
+  return body;
+}
+
+/** True when a body is HTML (not sitemap XML / JSON). */
+function isProbablyHtml(body: string): boolean {
+  const head = body.slice(0, 1024).trimStart().toLowerCase();
+  if (head.startsWith("<?xml")) return false;
+  if (head.startsWith("<urlset") || head.startsWith("<sitemapindex")) {
+    return false;
+  }
+  return (
+    head.startsWith("<!doctype") ||
+    head.startsWith("<html") ||
+    head.startsWith("<!DOCTYPE") ||
+    body.includes("<head")
+  );
+}
+
+/**
+ * True when server HTML looks like a client-rendered shell that needs JS:
+ * an app-mount element (`#__nuxt`, `#__next`, `#root`, `#app`…) paired with a
+ * JS bundle, or a page with almost no links and no structured data (a shell
+ * or a bot-block page).
+ */
+function looksLikeJsShell(body: string): boolean {
+  const head = body.slice(0, 200_000);
+  if (
+    /id=["']?(__nuxt|__next|__gatsby|root|app|app-root)["']?/i.test(head) &&
+    /<script[^>]+src=[^>]*(\.mjs|\.js)/i.test(head)
+  ) {
+    return true;
+  }
+  if (
+    (body.match(/<a\s/g)?.length ?? 0) < 5 &&
+    !/application\/ld\+json|og:title|itemprop=/i.test(head)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /** Derives crawl-scoped HTTP options from a CrawlConfig, plus overrides. */

@@ -33,6 +33,7 @@
 
 import { discoverProducts } from "./discover/index.ts";
 import { fetchWithRetry, httpOptions } from "./core/http.ts";
+import { closeBrowser, renderWithBrowser } from "./core/browser.ts";
 import { parseShopifyProduct, type RawProduct } from "./adapters/shopify.ts";
 import { extractFromHtml } from "./extract/mapper.ts";
 import { openCheckpointStore } from "./core/checkpoint.ts";
@@ -93,6 +94,15 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     isAllowed: respectRobots
       ? (url) => politeness.isUrlAllowed(url)
       : undefined,
+    // Tier 1 (Playwright): when opted in, discovery (homepage analysis,
+    // HTML BFS) and product fetches re-render JS-shell pages so the engine
+    // sees the hydrated DOM. Lazy — browser.ts only loads playwright on use.
+    ...(config.useBrowser
+      ? {
+          renderWithBrowser: (url: string) =>
+            renderWithBrowser(url, { userAgent: config.userAgent }),
+        }
+      : {}),
   });
   const concurrency = config.maxConcurrencyPerHost ?? DEFAULT_MAX_PER_HOST;
   const limiter = new HostLimiter(concurrency);
@@ -113,6 +123,9 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     discovered = await discoverProducts(config, opts, robotsSnapshot);
   } catch (error) {
     store?.close();
+    // Tier 1: release the shared browser so the process can exit / the job
+    // finishes cleanly (no-op when browser rendering was never used).
+    if (config.useBrowser) await closeBrowser();
     return emptyResult(
       config,
       startedAt,
@@ -201,6 +214,10 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   } finally {
     store?.close();
   }
+
+  // Tier 1: release the shared browser once the crawl is done so the job
+  // finishes cleanly and the Chromium process isn't left running.
+  if (config.useBrowser) await closeBrowser();
 
   return {
     config: { origin: config.origin, collections: config.collections },
@@ -308,8 +325,19 @@ function emptyResult(
       collections: [],
       sitemap: { urls: 0, lastmod: 0 },
       htmlCrawl: { urls: 0, pagesVisited: 0, truncated: false },
-      platform: { platform: "Unknown", signal: "Crawl did not run" },
+      platform: {
+        platform: "Unknown",
+        signal: "Crawl did not run",
+        kind: "unknown",
+      },
       robots,
+      findings: [
+        {
+          level: "warning",
+          message: "Discovery failed before any product URLs were found.",
+        },
+      ],
+      log: ["Discovery failed."],
     },
   };
 }

@@ -99,7 +99,20 @@ export interface SavedCrawl {
   /** Per-strategy discovery diagnostics captured during the run. */
   discovery?: {
     collections: Array<{ collection: string; handles: number; error?: string }>;
-    sitemap: { urls: number; lastmod: number; error?: string };
+    sitemap: {
+      urls: number;
+      lastmod: number;
+      error?: string;
+      /** Sitemap candidates tried (robots.txt-declared first), with outcomes. */
+      candidates?: Array<{
+        url: string;
+        source: "robots.txt" | "default";
+        status: "ok" | "html" | "error";
+        urls: number;
+        productUrls: number;
+        error?: string;
+      }>;
+    };
     htmlCrawl: {
       urls: number;
       pagesVisited: number;
@@ -107,12 +120,37 @@ export interface SavedCrawl {
       error?: string;
     };
     /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
-    platform?: { platform: string; signal: string };
+    platform?: {
+      platform: string;
+      signal: string;
+      kind?: "store" | "corporate" | "unknown";
+      cms?: string;
+      builder?: string;
+      seoPlugin?: string;
+      server?: string;
+      generator?: string;
+    };
     /** robots.txt presence + declared crawl-delay (absent for old crawls). */
     robots?: {
       status: "found" | "absent" | "unreachable" | "skipped";
       crawlDelayMs: number | null;
     };
+    /** Homepage analysis (store vs corporate, external store links). */
+    homepage?: {
+      productLinks: number;
+      categoryLinks: number;
+      looksLikeStore: boolean;
+      externalStoreLinks: Array<{ url: string; host: string; label: string }>;
+      note: string;
+    };
+    /** Human-readable findings/suggestions surfaced to the user. */
+    findings?: Array<{
+      level: "info" | "warning" | "success";
+      message: string;
+      action?: { label: string; url: string };
+    }>;
+    /** Verbose discovery log (what the crawler did, in order). */
+    log?: string[];
   };
   createdAt: string;
   updatedAt: string;

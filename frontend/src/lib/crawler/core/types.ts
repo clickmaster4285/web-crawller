@@ -46,6 +46,14 @@ export interface CrawlConfig {
    * sitemap URL is crawled (non-product pages usually fail extraction).
    */
   productOnly?: boolean;
+  /**
+   * Tier 1 — Playwright browser rendering (default false). When true, pages
+   * whose server HTML looks like a client-side JS shell are rendered in a
+   * headless browser before discovery + extraction see them, unlocking
+   * JS-rendered stores (Nuxt/Next/SPA). Opt-in per crawl: it is slower and
+   * requires playwright + Chrome (see `core/browser.ts`).
+   */
+  useBrowser?: boolean;
   /** Called after each product is fetched. */
   onProgress?: (fetched: number, discovered: number) => void;
   /**
@@ -72,6 +80,10 @@ export interface DiscoveryProgress {
   collectionHandles: number;
   /** Detected store platform (set once detection runs, usually at "done"). */
   platform?: string;
+  /** Human-readable line describing what discovery is doing right now. */
+  step?: string;
+  /** Accumulated verbose log of discovery steps so far (oldest first). */
+  log: string[];
 }
 
 export interface CrawledVariant {
@@ -129,6 +141,36 @@ export interface RobotsSnapshot extends RobotsInfo {
   body: string;
 }
 
+/** A link on the homepage pointing at a different host that looks store-like. */
+export interface ExternalStoreLink {
+  url: string;
+  host: string;
+  /** Anchor text (trimmed) when present — helps the UI explain the link. */
+  label: string;
+}
+
+/** What the homepage analysis learned about the site (store vs corporate). */
+export interface HomepageDiagnostics {
+  /** Number of product-page-ish links on the homepage. */
+  productLinks: number;
+  /** Number of category/catalogue-ish links on the homepage. */
+  categoryLinks: number;
+  /** True when the homepage meaningfully links to product pages. */
+  looksLikeStore: boolean;
+  /** Out-links to other hosts that look like stores (max 5, deduped). */
+  externalStoreLinks: ExternalStoreLink[];
+  /** Human-readable summary of what the homepage looks like. */
+  note: string;
+}
+
+/** A human-readable finding/suggestion surfaced to the user after a crawl. */
+export interface CrawlFinding {
+  level: "info" | "warning" | "success";
+  message: string;
+  /** Optional action — e.g. "Crawl shop.example.com instead". */
+  action?: { label: string; url: string };
+}
+
 /**
  * What each discovery strategy contributed (and whether it failed). Mirrors
  * `ProductDiscovery.diagnostics` so a run's discovery phase can be surfaced
@@ -136,7 +178,20 @@ export interface RobotsSnapshot extends RobotsInfo {
  */
 export interface DiscoveryDiagnostics {
   collections: Array<{ collection: string; handles: number; error?: string }>;
-  sitemap: { urls: number; lastmod: number; error?: string };
+  sitemap: {
+    urls: number;
+    lastmod: number;
+    error?: string;
+    /** Sitemap candidates tried (robots.txt-declared first), with outcomes. */
+    candidates?: Array<{
+      url: string;
+      source: "robots.txt" | "default";
+      status: "ok" | "html" | "error";
+      urls: number;
+      productUrls: number;
+      error?: string;
+    }>;
+  };
   htmlCrawl: {
     urls: number;
     pagesVisited: number;
@@ -144,9 +199,30 @@ export interface DiscoveryDiagnostics {
     error?: string;
   };
   /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
-  platform: { platform: string; signal: string };
+  platform: {
+    platform: string;
+    signal: string;
+    /** "store" — sells products; "corporate" — marketing site; "unknown". */
+    kind?: "store" | "corporate" | "unknown";
+    /** CMS the site is built on, when identifiable (e.g. "WordPress"). */
+    cms?: string;
+    /** Page-builder/theme marker (e.g. "Elementor"). */
+    builder?: string;
+    /** SEO plugin marker (e.g. "Rank Math SEO"). */
+    seoPlugin?: string;
+    /** Server stack from response headers (e.g. "Apache · PHP 8.2.33"). */
+    server?: string;
+    /** Raw generator meta tags joined. */
+    generator?: string;
+  };
   /** robots.txt presence + declared crawl-delay (found/absent/unreachable/skipped). */
   robots: RobotsInfo;
+  /** Homepage analysis (product links, corporate-vs-store, external stores). */
+  homepage?: HomepageDiagnostics;
+  /** Human-readable findings/suggestions surfaced to the user. */
+  findings: CrawlFinding[];
+  /** Verbose discovery log (what the crawler did, in order). */
+  log: string[];
 }
 
 export interface CrawlStats {

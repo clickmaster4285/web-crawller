@@ -7,9 +7,10 @@
  * sitemap or where the sitemap is incomplete.
  *
  * Heuristics (no DOM — pure regex over HTML):
- *   - Category-ish link paths: /category, /categories, /c, /collection,
- *     /collections, /shop, /products, /catalog
- *   - Product-ish link paths: /product, /p, /dp, /item, /products
+ *   - Category-ish link paths: /category, /collection(s), /shop, /catalog,
+ *     /product-category (WooCommerce), ?product_cat= filters
+ *   - Product-ish link paths: /product(s), /p, /dp, /item, and WooCommerce
+ *     /shop/<cat>/<product>/ permalinks (two segments after /shop/)
  *   - Anchor extraction: <a href="...">
  *
  * Hard caps to keep it bounded:
@@ -21,10 +22,17 @@
 import { fetchText } from "../core/http.ts";
 import type { HttpOptions } from "../core/http.ts";
 
+// Category-ish paths: WooCommerce `/product-category/` (its category base),
+// `?product_cat=` filters, and the classic /category|collections|shop|catalog
+// patterns. `/shop/` itself (and `/shop/<one-segment>/`) is a category
+// archive candidate — but see PRODUCT_BARE_RE for multi-segment /shop/ URLs.
 const CATEGORY_RE =
-  /\/(category|categories|collection|collections|shop|catalog)(\/|\?|#|$)/i;
+  /\/product-category\/|[?&]product_cat=|\/(category|categories|collection|collections|shop|catalog)(\/|\?|#|$)/i;
 const PRODUCT_RE = /\/(product|products|item|dp|p)\/[a-z0-9_-]+/i;
-const PRODUCT_BARE_RE = /\/(product|item)\/[a-z0-9_-]+/i;
+// WooCommerce permalink-with-category product URLs: `/shop/<cat>/<product>/`
+// (two or more segments after /shop/). Single-segment `/shop/<slug>/` stays a
+// category candidate — those are archives, not products, on most setups.
+const PRODUCT_BARE_RE = /\/shop\/(?:[a-z0-9_-]+\/)+[a-z0-9_-]+/i;
 
 const ANCHOR_RE = /<a\s+[^>]*href=["']([^"'#]+)["']/gi;
 

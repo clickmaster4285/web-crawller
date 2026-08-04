@@ -28,8 +28,10 @@ app.use(helmet());
 app.use(cors());
 
 app.use(limiter);
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Generous payloads: crawl results now carry the full catalogue (thousands
+// of products per snapshot, capped history per origin).
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Health check endpoint
 app.get('/health', (req, res) => {

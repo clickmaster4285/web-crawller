@@ -1,26 +1,28 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { Loader2, Play, Plus, Trash2 } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { GitCompareArrows, Play, Plus, Store, UserPlus, X } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { AddCompetitorDialog } from "@/components/competitors/add-competitor-dialog";
-import { CompareStores } from "@/components/competitors/compare-stores";
+import {
+  ComparePanel,
+  CompareSectionHeading,
+} from "@/components/competitors/compare-stores";
+import { StorePickerDialog } from "@/components/competitors/store-picker-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Switch } from "@/components/ui/switch";
 import { ErrorState, LoadingState } from "@/components/common/states";
-import { useCompetitors } from "@/hooks/useData";
-import { deleteCompetitor } from "@/lib/api";
-import { prefillCrawlerOrigin } from "@/utils/crawls";
-import type { Competitor } from "@/types";
+import { useSavedCrawls } from "@/hooks/useData";
+import { useLocalStorageState } from "@/hooks/useLocalStorage";
+import { getMyStoreData, setMyStoreData, type SavedCrawl } from "@/lib/api";
+import {
+  formatCrawlDate,
+  normalizeOrigin,
+  prefillCrawlerOrigin,
+} from "@/utils/crawls";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authenticated/competitors/")({
   head: () => ({
@@ -29,58 +31,152 @@ export const Route = createFileRoute("/_authenticated/competitors/")({
       {
         name: "description",
         content:
-          "Every competitor store you monitor: platform, crawl frequency, catalogue size, price index and last crawl status.",
+          "Pick your website and up to four competitors to compare catalogues side by side — matched products, price differences and availability.",
       },
       { property: "og:title", content: "Competitors — Parity" },
       {
         property: "og:description",
         content:
-          "Monitor competitor stores, crawl schedules and catalogue movement in one place.",
+          "Compare your store's catalogue against any crawled competitor in one place.",
       },
     ],
   }),
   component: CompetitorsPage,
 });
 
-const statusTone: Record<
-  Competitor["status"],
-  "secondary" | "destructive" | "outline"
-> = {
-  active: "secondary",
-  paused: "outline",
-  error: "destructive",
-  pending: "outline",
-};
+/** How many competitor slots the page offers. */
+const SLOT_COUNT = 4;
 
 function CompetitorsPage() {
-  const { data: competitors, isLoading, isError } = useCompetitors();
-  const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  // Every crawled website (one latest snapshot per origin) — the source list
+  // for both "your website" and the competitor slots.
+  const { data: saved, isLoading, isError } = useSavedCrawls();
+  const stores = useMemo(() => {
+    const latest = new Map<string, SavedCrawl>();
+    for (const c of saved?.data ?? []) {
+      const key = normalizeOrigin(c.origin);
+      if (!latest.has(key)) latest.set(key, c);
+    }
+    return [...latest.entries()].map(([key, crawl]) => ({ key, crawl }));
+  }, [saved]);
+
+  // Your website — a single persisted selection, used as store A everywhere.
+  const myStoreQuery = useQuery({
+    queryKey: ["my-store"],
+    queryFn: () => getMyStoreData(),
+  });
+  const myStore = myStoreQuery.data?.data ?? null;
+  const myStoreKey = myStore?.origin ? normalizeOrigin(myStore.origin) : null;
+
+  // Four competitor slots — all empty by default, persisted locally so the
+  // selection survives a reload. Invalid keys (snapshots deleted) render empty.
+  const [slots, setSlots] = useLocalStorageState<string[]>(
+    "parity.competitors.slots",
+    ["", "", "", ""],
+  );
+  // Always exactly SLOT_COUNT entries — invalid/removed keys (e.g. a snapshot
+  // was deleted) render as empty so the slot can be re-picked.
+  const validSlots = useMemo(() => {
+    const out: string[] = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const k = slots[i];
+      out.push(k && stores.some((s) => s.key === k) ? k : "");
+    }
+    return out;
+  }, [slots, stores]);
+
+  // Fuzzy matching + similarity floor — one toggle applies to every
+  // competitor's comparison at once. On by default so similar product names
+  // pair up without the manual toggle; a saved choice is still respected.
+  const [fuzzy, setFuzzy] = useLocalStorageState(
+    "parity.competitors.fuzzy",
+    true,
+  );
+  const [rawThreshold, setThreshold] = useLocalStorageState(
+    "parity.competitors.fuzzyThreshold",
+    0.8,
+  );
+  const threshold = Number.isFinite(rawThreshold)
+    ? Math.min(0.95, Math.max(0.5, rawThreshold))
+    : 0.8;
+
+  // Which picker is open: "mine" for your website, a number for a slot index.
+  const [pickerFor, setPickerFor] = useState<"mine" | number | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
-  const remove = useMutation({
-    mutationFn: (id: string) => deleteCompetitor(id),
-    onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ["competitors"] }),
-  });
+  const pickerExcludeKeys = useMemo(() => {
+    if (pickerFor === "mine") return validSlots.filter(Boolean);
+    if (typeof pickerFor === "number") {
+      // Exclude the other filled slots (by their actual slot position) and
+      // your website, so a store can't be picked twice.
+      const others = validSlots.filter((k, i) => i !== pickerFor && k);
+      return myStoreKey ? [...others, myStoreKey] : others;
+    }
+    return [];
+  }, [pickerFor, validSlots, myStoreKey]);
 
-  /** Prefills the crawler page with this competitor's origin and navigates. */
-  const crawlNow = (c: Competitor) => {
-    prefillCrawlerOrigin(c.origin);
+  const selectMyStore = async (crawl: SavedCrawl) => {
+    try {
+      await setMyStoreData({ origin: crawl.origin });
+      void queryClient.invalidateQueries({ queryKey: ["my-store"] });
+      void queryClient.invalidateQueries({ queryKey: ["competitors"] });
+    } catch (error) {
+      // The dialog already closed on select; surface failures to the console.
+      console.error("Failed to set your website:", error);
+    }
+  };
+
+  const selectSlot = (index: number) => (crawl: SavedCrawl) => {
+    const key = normalizeOrigin(crawl.origin);
+    setSlots((prev) => {
+      const next = [...prev];
+      while (next.length < SLOT_COUNT) next.push("");
+      next[index] = key;
+      return next;
+    });
+  };
+
+  const removeSlot = (index: number) =>
+    setSlots((prev) => {
+      const next = [...prev];
+      while (next.length < SLOT_COUNT) next.push("");
+      next[index] = "";
+      return next;
+    });
+
+  const crawlNow = (origin: string) => {
+    prefillCrawlerOrigin(origin);
     navigate({ to: "/sources" });
   };
 
-  if (isError) return <ErrorState />;
-  if (isLoading || !competitors) return <LoadingState />;
+  const myCrawl = myStoreKey
+    ? stores.find((s) => s.key === myStoreKey)?.crawl
+    : undefined;
+  const filledSlots = useMemo(() => {
+    const out: Array<{ index: number; key: string; crawl: SavedCrawl }> = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const key = validSlots[i];
+      if (!key) continue;
+      const crawl = stores.find((s) => s.key === key)?.crawl;
+      if (crawl) out.push({ index: i, key, crawl });
+    }
+    return out;
+  }, [validSlots, stores]);
 
-  const hasAny = competitors.length > 0;
+  const myLabel = myStoreKey ? `My website (${myStoreKey})` : "Your website";
+
+  if (isError) return <ErrorState />;
+  if (isLoading || !saved) return <LoadingState />;
 
   return (
     <div>
       <PageHeader
         eyebrow="Sources"
         title="Competitors"
-        description="Stores you monitor — added manually or discovered from crawls. Add a store, crawl it to capture its catalogue, then compare any two stores side by side."
+        description="Choose your website, then pick up to four competitors from your crawled stores. Every comparison runs your catalogue against one competitor at a time."
         actions={
           <Button onClick={() => setAddOpen(true)}>
             <Plus className="size-4" /> Add competitor
@@ -88,180 +184,332 @@ function CompetitorsPage() {
         }
       />
 
-      {!hasAny ? (
+      {stores.length === 0 ? (
         <div className="mx-6 my-10 border border-dashed border-border bg-card p-10 text-center">
-          <h2 className="font-display text-2xl">No competitors yet</h2>
+          <h2 className="font-display text-2xl">Nothing to compare yet</h2>
           <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-            Add a store you want to monitor — it appears instantly — or run a
-            crawl, and the store will be added automatically from its saved
-            result.
+            Crawl a store (your own or a competitor's) and it will show up in
+            the website picker here. With at least one crawled store you can set
+            your website and fill the competitor slots below.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
-            <Button onClick={() => setAddOpen(true)}>
-              <Plus className="size-4" /> Add competitor
-            </Button>
             <Button asChild variant="outline">
               <Link to="/sources">
                 <Play className="size-4" /> Run a crawl
               </Link>
             </Button>
+            <Button variant="outline" onClick={() => setAddOpen(true)}>
+              <Plus className="size-4" /> Add competitor
+            </Button>
           </div>
         </div>
-      ) : null}
-
-      {hasAny ? (
-        <div className="grid gap-px bg-border px-6 pt-8 lg:grid-cols-4">
-          {competitors.map((c) => (
-            <div key={c.id} className="bg-card p-5">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <h2 className="flex items-center gap-2 text-lg leading-tight">
-                    <span className="truncate">{c.name}</span>
-                    {c.isMine ? (
-                      <Badge
-                        variant="secondary"
-                        className="shrink-0 border-primary/40 font-normal"
-                      >
-                        Your store
-                      </Badge>
-                    ) : null}
-                  </h2>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {c.website}
-                  </p>
-                </div>
-                <Badge
-                  variant={statusTone[c.status]}
-                  className="shrink-0 font-normal capitalize"
-                >
-                  {c.status}
-                </Badge>
+      ) : (
+        <>
+          {/* Your website — the reference side of every comparison. */}
+          <section className="mx-6 mt-8 border border-border bg-card">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <Store className="size-4 shrink-0 text-muted-foreground" />
+                <h3 className="font-display text-lg">Your website</h3>
+                {myStoreKey ? (
+                  <Badge variant="secondary" className="font-normal">
+                    Selected
+                  </Badge>
+                ) : null}
               </div>
-              {c.status === "pending" ? (
-                <div className="mt-4 space-y-3">
-                  <p className="text-xs text-muted-foreground">
-                    {c.isMine
-                      ? "Crawl your store to compare its catalogue against competitors."
-                      : "Not crawled yet — capture its catalogue to start monitoring."}
-                  </p>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full"
-                    onClick={() => crawlNow(c)}
-                  >
-                    <Play className="size-3.5" /> Crawl now
+              <div className="flex items-center gap-2">
+                {myStoreKey ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setPickerFor("mine")}
+                    >
+                      Change
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => myStore && crawlNow(myStore.origin)}
+                    >
+                      <Play className="size-3.5" />
+                      {myCrawl ? "Crawl again" : "Crawl your website"}
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" onClick={() => setPickerFor("mine")}>
+                    <Store className="size-3.5" /> Choose website
                   </Button>
-                </div>
-              ) : (
-                <dl className="mt-4 space-y-1.5 text-xs">
-                  {[
-                    ["Products", c.products.toLocaleString()],
-                    ["Out of stock", c.outOfStock.toString()],
-                    ["Price index", c.avgPriceIndex.toString()],
-                    ["Last crawl", c.lastCrawl],
-                  ].map(([k, v]) => (
-                    <div key={k} className="flex justify-between gap-2">
-                      <dt className="text-muted-foreground">{k}</dt>
-                      <dd className="numeric truncate">{v}</dd>
-                    </div>
-                  ))}
-                </dl>
-              )}
+                )}
+              </div>
             </div>
-          ))}
-        </div>
-      ) : null}
+            {myStoreKey ? (
+              <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-5 py-4">
+                <div className="min-w-0">
+                  <p className="label-caps">Domain</p>
+                  <p className="mt-1 truncate font-mono text-sm">
+                    {myStoreKey}
+                  </p>
+                </div>
+                <div>
+                  <p className="label-caps">Products</p>
+                  <p className="mt-1 numeric">
+                    {myCrawl ? myCrawl.products.length.toLocaleString() : "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="label-caps">Platform</p>
+                  <p className="mt-1">
+                    {myCrawl?.discovery?.platform?.platform ?? "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="label-caps">Last crawl</p>
+                  <p className="mt-1">
+                    {myCrawl ? formatCrawlDate(myCrawl.updatedAt) : "—"}
+                  </p>
+                </div>
+                {!myCrawl ? (
+                  <p className="w-full text-xs text-muted-foreground">
+                    Your website hasn't been crawled yet — crawl it so its
+                    catalogue can be compared against competitors.
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <p className="px-5 py-6 text-sm text-muted-foreground">
+                Choose your website from the list of crawled stores. Every
+                comparison below runs{" "}
+                <span className="font-medium text-foreground">
+                  your website
+                </span>{" "}
+                against one selected competitor.
+              </p>
+            )}
+          </section>
 
-      {hasAny ? (
-        <div className="px-6 py-8">
-          <div className="border border-border bg-card">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Company</TableHead>
-                  <TableHead>Platform</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Products</TableHead>
-                  <TableHead className="text-right">Last crawl</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {competitors.map((c) => (
-                  <TableRow key={c.id}>
-                    <TableCell className="font-medium">
-                      <span className="flex items-center gap-2">
-                        {c.name}
-                        {c.isMine ? (
-                          <Badge
-                            variant="secondary"
-                            className="border-primary/40 font-normal"
-                          >
-                            Your store
-                          </Badge>
-                        ) : null}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {c.platform}
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={statusTone[c.status]}
-                        className="font-normal capitalize"
+          {/* Four competitor slots — empty until a website is chosen. */}
+          <div className="grid gap-px bg-border px-6 pt-6 lg:grid-cols-4">
+            {Array.from({ length: SLOT_COUNT }).map((_, i) => {
+              const slot = filledSlots.find((s) => s.index === i);
+              if (!slot) {
+                return (
+                  <div key={i} className="bg-card p-5">
+                    <p className="label-caps">Competitor {i + 1}</p>
+                    <div className="mt-4 flex flex-col items-center border border-dashed border-border px-4 py-8 text-center">
+                      <UserPlus className="size-5 text-muted-foreground" />
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        Select a competitor website to compare against yours.
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-4"
+                        onClick={() => setPickerFor(i)}
                       >
-                        {c.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="numeric text-right">
-                      {c.products.toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right text-muted-foreground">
-                      {c.lastCrawl}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-1">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => crawlNow(c)}
-                        >
-                          <Play className="size-3.5" /> Crawl
-                        </Button>
-                        {c.manual ? (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={`Remove ${c.name}`}
-                            className="text-muted-foreground hover:text-destructive"
-                            disabled={
-                              remove.isPending && remove.variables === c.id
-                            }
-                            onClick={() => remove.mutate(c.id)}
-                          >
-                            {remove.isPending && remove.variables === c.id ? (
-                              <Loader2 className="size-4 animate-spin" />
-                            ) : (
-                              <Trash2 className="size-4" />
-                            )}
-                          </Button>
-                        ) : null}
+                        Select competitor
+                      </Button>
+                    </div>
+                  </div>
+                );
+              }
+              return (
+                <div key={i} className="bg-card p-5">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="label-caps">Competitor {i + 1}</p>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      aria-label={`Remove competitor ${i + 1}`}
+                      onClick={() => removeSlot(i)}
+                    >
+                      <X className="size-3.5" />
+                    </Button>
+                  </div>
+                  <h3 className="mt-2 truncate font-mono text-sm font-medium">
+                    {slot.key}
+                  </h3>
+                  <dl className="mt-3 space-y-1.5 text-xs">
+                    {[
+                      ["Products", slot.crawl.products.length.toLocaleString()],
+                      [
+                        "Platform",
+                        slot.crawl.discovery?.platform?.platform ?? "—",
+                      ],
+                      ["Last crawl", formatCrawlDate(slot.crawl.updatedAt)],
+                    ].map(([k, v]) => (
+                      <div key={k} className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">{k}</dt>
+                        <dd className="numeric truncate">{v}</dd>
                       </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                    ))}
+                  </dl>
+                  <div className="mt-4 flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1"
+                      onClick={() => setPickerFor(i)}
+                    >
+                      Change
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => crawlNow(slot.crawl.origin)}
+                    >
+                      <Play className="size-3.5" /> Crawl
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </div>
-      ) : null}
 
-      <div className="px-6 pb-8">
-        <CompareStores />
-      </div>
+          {/* Comparisons — your website vs each selected competitor. */}
+          <div className="space-y-5 px-6 py-8">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <GitCompareArrows className="size-4 text-muted-foreground" />
+                <h2 className="font-display text-xl">Comparisons</h2>
+              </div>
+              {myCrawl && filledSlots.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <label
+                    htmlFor="compare-fuzzy"
+                    className="flex cursor-pointer items-center gap-2"
+                  >
+                    <Switch
+                      id="compare-fuzzy"
+                      checked={fuzzy}
+                      onCheckedChange={setFuzzy}
+                    />
+                    <span className="text-xs font-medium">Fuzzy matching</span>
+                  </label>
+                  <label
+                    htmlFor="fuzzy-threshold"
+                    className="flex items-center gap-2"
+                    aria-disabled={!fuzzy}
+                  >
+                    <span
+                      className={`text-xs text-muted-foreground${fuzzy ? "" : " opacity-50"}`}
+                    >
+                      Similarity
+                    </span>
+                    <input
+                      id="fuzzy-threshold"
+                      type="range"
+                      min={50}
+                      max={95}
+                      step={5}
+                      value={Math.round(threshold * 100)}
+                      onChange={(e) =>
+                        setThreshold(Number(e.target.value) / 100)
+                      }
+                      disabled={!fuzzy}
+                      aria-label="Similarity threshold for fuzzy name matching"
+                      className="w-32 accent-primary disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                    <span
+                      className={`numeric w-9 text-right text-xs${fuzzy ? "" : " opacity-50"}`}
+                    >
+                      {Math.round(threshold * 100)}%
+                    </span>
+                  </label>
+                </div>
+              ) : null}
+            </div>
+
+            {!myStoreKey ? (
+              <EmptyStateCard message="Choose your website above to compare it against competitors." />
+            ) : !myCrawl ? (
+              <EmptyStateCard
+                message="Your website hasn't been crawled yet. Crawl it to compare catalogues."
+                actionLabel="Crawl your website"
+                onAction={() => myStore && crawlNow(myStore.origin)}
+              />
+            ) : filledSlots.length === 0 ? (
+              <EmptyStateCard message="Select a competitor card above to see the comparison." />
+            ) : (
+              filledSlots.map((slot) => (
+                <section
+                  key={slot.key}
+                  className="border border-border bg-card"
+                >
+                  <div className="border-b border-border px-5 py-3.5">
+                    <CompareSectionHeading labelA={myLabel} labelB={slot.key} />
+                  </div>
+                  <div className="p-5">
+                    <ComparePanel
+                      storeA={myCrawl}
+                      storeB={slot.crawl}
+                      labelA={myLabel}
+                      labelB={slot.key}
+                      fuzzy={fuzzy}
+                      threshold={threshold}
+                    />
+                  </div>
+                </section>
+              ))
+            )}
+          </div>
+        </>
+      )}
+
+      <StorePickerDialog
+        open={pickerFor !== null}
+        onOpenChange={(open) => {
+          if (!open) setPickerFor(null);
+        }}
+        stores={stores}
+        excludeKeys={pickerExcludeKeys}
+        onSelect={
+          pickerFor === "mine"
+            ? selectMyStore
+            : typeof pickerFor === "number"
+              ? selectSlot(pickerFor)
+              : () => {}
+        }
+        title={
+          pickerFor === "mine" ? "Choose your website" : "Choose a competitor"
+        }
+        description={
+          pickerFor === "mine"
+            ? "This store's catalogue becomes the reference side of every comparison."
+            : "Pick a crawled store to fill this competitor slot."
+        }
+      />
 
       <AddCompetitorDialog open={addOpen} onOpenChange={setAddOpen} />
+    </div>
+  );
+}
+
+function EmptyStateCard({
+  message,
+  actionLabel,
+  onAction,
+}: {
+  message: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "border border-dashed border-border bg-card p-8 text-center",
+      )}
+    >
+      <GitCompareArrows className="mx-auto size-5 text-muted-foreground" />
+      <p className="mx-auto mt-3 max-w-md text-sm text-muted-foreground">
+        {message}
+      </p>
+      {actionLabel && onAction ? (
+        <Button variant="outline" size="sm" className="mt-4" onClick={onAction}>
+          <Play className="size-3.5" /> {actionLabel}
+        </Button>
+      ) : null}
     </div>
   );
 }
