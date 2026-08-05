@@ -13,7 +13,7 @@ const dataRoutes = require('./routes/data');
 const { ensureDemoUser } = require('./seed');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT;
 
 // Rate limiting — generous enough for a demo where every page fires several
 // /api/data calls plus a live crawl in one session.
