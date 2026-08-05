@@ -17,7 +17,11 @@ const productSchema = new mongoose.Schema(
     brand: String,
     price: Number,
     available: Boolean,
-    url: String
+    url: String,
+    // Identity fields captured by the crawler — the matching layer matches
+    // GTIN > SKU > slug > fuzzy, so exact identity must survive persistence.
+    sku: { type: String, default: '' },
+    gtin: { type: String, default: '' }
   },
   { _id: false }
 );
@@ -122,6 +126,26 @@ const discoverySchema = new mongoose.Schema(
       crawlDelayMs: { type: Number, default: null }
     },
     homepage: { type: homepageSchema, default: null },
+    wooCommerce: {
+      status: {
+        type: String,
+        enum: ['public', 'auth-required', 'unavailable'],
+        default: 'unavailable'
+      },
+      total: { type: Number, default: null },
+      urls: { type: Number, default: 0 },
+      message: String
+    },
+    bigCommerce: {
+      status: {
+        type: String,
+        enum: ['public', 'auth-required', 'unavailable'],
+        default: 'unavailable'
+      },
+      total: { type: Number, default: null },
+      urls: { type: Number, default: 0 },
+      message: String
+    },
     findings: { type: [findingSchema], default: [] },
     log: { type: [String], default: [] }
   },

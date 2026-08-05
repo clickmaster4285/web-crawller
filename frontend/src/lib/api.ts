@@ -75,6 +75,10 @@ export interface SavedCrawlProduct {
   price: number;
   available: boolean;
   url: string;
+  /** Manufacturer SKU / product code (identity tier for matching). */
+  sku?: string;
+  /** GTIN / UPC / EAN barcode (identity tier for matching). */
+  gtin?: string;
 }
 
 export interface SavedCrawlFailure {
@@ -142,6 +146,20 @@ export interface SavedCrawl {
       looksLikeStore: boolean;
       externalStoreLinks: Array<{ url: string; host: string; label: string }>;
       note: string;
+    };
+    /** WooCommerce native REST API outcome (Tier 3), when probed. */
+    wooCommerce?: {
+      status: "public" | "auth-required" | "unavailable";
+      total: number | null;
+      urls: number;
+      message?: string;
+    };
+    /** BigCommerce Storefront API outcome (Tier 3), when probed. */
+    bigCommerce?: {
+      status: "public" | "auth-required" | "unavailable";
+      total: number | null;
+      urls: number;
+      message?: string;
     };
     /** Human-readable findings/suggestions surfaced to the user. */
     findings?: Array<{

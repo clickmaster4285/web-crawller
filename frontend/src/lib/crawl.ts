@@ -61,6 +61,14 @@ export interface CrawlRunInput {
    * JS-rendered stores. Slower; requires playwright + Chrome installed.
    */
   useBrowser?: boolean;
+  /**
+   * Tier 2 — rotating residential proxy gateway URL (default unset = direct
+   * requests). Every request in the crawl exits through this proxy. The URL
+   * is kept in server memory / the caller's own browser storage only — it is
+   * never persisted to crawl results or logs, and job params only record the
+   * boolean (whether proxied) for the UI badge.
+   */
+  proxy?: string;
 }
 
 export interface CrawlRunResult {
@@ -78,6 +86,10 @@ export interface CrawlRunResult {
     price: number;
     available: boolean;
     url: string;
+    /** Manufacturer SKU / product code from the parse (for matching). */
+    sku: string;
+    /** GTIN / UPC / EAN barcode from the parse (for matching). */
+    gtin: string;
   }>;
   /** What each discovery strategy contributed, for the Discovery engine card. */
   discovery: {
@@ -126,6 +138,20 @@ export interface CrawlRunResult {
       externalStoreLinks: Array<{ url: string; host: string; label: string }>;
       note: string;
     };
+    /** WooCommerce native REST API outcome (Tier 3), when probed. */
+    wooCommerce?: {
+      status: "public" | "auth-required" | "unavailable";
+      total: number | null;
+      urls: number;
+      message?: string;
+    };
+    /** BigCommerce Storefront API outcome (Tier 3), when probed. */
+    bigCommerce?: {
+      status: "public" | "auth-required" | "unavailable";
+      total: number | null;
+      urls: number;
+      message?: string;
+    };
     /** Human-readable findings/suggestions surfaced to the user. */
     findings: Array<{
       level: "info" | "warning" | "success";
@@ -166,6 +192,8 @@ export interface CrawlJobParams {
   productOnly: boolean;
   storeSnapshots: boolean;
   useBrowser: boolean;
+  /** True when the crawl was routed through a residential proxy. */
+  proxy: boolean;
 }
 
 export type CrawlFrequency = "1h" | "6h" | "daily" | "weekly";
@@ -186,6 +214,12 @@ export interface CrawlSchedule {
   lastRunAt: number | null;
   nextRunAt: number;
   running: boolean;
+  /**
+   * The proxy gateway URL for scheduled runs. Server-memory only — stripped
+   * from every response (`publicSchedule`) so it never reaches the client or
+   * the schedules cache.
+   */
+  proxyUrl?: string;
 }
 
 export interface ScheduleCrawlInput {
@@ -199,6 +233,8 @@ export interface ScheduleCrawlInput {
   productOnly?: boolean;
   storeSnapshots?: boolean;
   useBrowser?: boolean;
+  /** Tier 2 — residential proxy gateway URL (server-memory only). */
+  proxy?: string;
 }
 
 /** Live snapshot of a crawl job, returned by `getCrawlProgress`. */
@@ -254,6 +290,15 @@ function pruneFinishedJobs(): void {
   }
 }
 
+/** Trims + validates a proxy gateway URL — http(s) only, never echoed back. */
+function normalizeProxy(proxy: string | undefined): string | undefined {
+  const trimmed = proxy?.trim() || undefined;
+  if (trimmed && !/^https?:\/\/\S+/i.test(trimmed)) {
+    throw new Error("Proxy must be a valid http(s) URL");
+  }
+  return trimmed;
+}
+
 function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
   // SSRF guard: the crawler fetches server-side, so only http(s) origins
   // are accepted.
@@ -261,6 +306,7 @@ function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
   if (!/^https?:\/\/\S+/i.test(origin)) {
     throw new Error("Origin must be a valid http(s) URL");
   }
+  const proxy = normalizeProxy(input.proxy);
   // Clamp crawl parameters to sane ranges.
   const delayMs =
     input.delayMs == null
@@ -277,6 +323,7 @@ function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
   return {
     ...input,
     origin,
+    proxy,
     delayMs,
     maxConcurrencyPerHost,
     maxPages,
@@ -312,6 +359,7 @@ export const startCrawl = createServerFn({ method: "POST" })
         productOnly: data.productOnly !== false,
         storeSnapshots: data.storeSnapshots !== false,
         useBrowser: data.useBrowser === true,
+        proxy: !!data.proxy,
       },
     });
     // Fire and forget — the client polls progress. The event loop stays
@@ -335,6 +383,7 @@ function validateScheduleInput(input: ScheduleCrawlInput): ScheduleCrawlInput {
   if (!FREQUENCIES.includes(input.frequency)) {
     throw new Error(`Unsupported frequency: ${String(input.frequency)}`);
   }
+  const proxy = normalizeProxy(input.proxy);
   const delayMs =
     input.delayMs == null
       ? undefined
@@ -351,6 +400,7 @@ function validateScheduleInput(input: ScheduleCrawlInput): ScheduleCrawlInput {
     origin,
     collections: input.collections,
     frequency: input.frequency,
+    proxy,
     delayMs,
     maxConcurrencyPerHost,
     maxPages,
@@ -359,6 +409,16 @@ function validateScheduleInput(input: ScheduleCrawlInput): ScheduleCrawlInput {
     storeSnapshots: input.storeSnapshots !== false,
     useBrowser: input.useBrowser === true,
   };
+}
+
+/**
+ * The schedule as returned to clients — the proxy gateway URL is stripped
+ * so credentials never leave the server (it lives only in the in-memory
+ * schedule record, used to reconstruct the CrawlRunInput on tick).
+ */
+function publicSchedule(sched: CrawlSchedule): CrawlSchedule {
+  const { proxyUrl: _proxyUrl, ...rest } = sched;
+  return rest;
 }
 
 /**
@@ -383,18 +443,20 @@ export const scheduleCrawl = createServerFn({ method: "POST" })
         productOnly: data.productOnly !== false,
         storeSnapshots: data.storeSnapshots !== false,
         useBrowser: data.useBrowser === true,
+        proxy: !!data.proxy,
       },
+      proxyUrl: data.proxy,
       lastRunAt: null,
       nextRunAt: now + FREQUENCY_MS[data.frequency],
       running: false,
     };
     schedules.set(data.origin, sched);
-    return sched;
+    return publicSchedule(sched);
   });
 
 /** Lists the active recurring crawls (newest registration first). */
 export const getCrawlSchedules = createServerFn({ method: "POST" }).handler(
-  (): CrawlSchedule[] => [...schedules.values()].reverse(),
+  (): CrawlSchedule[] => [...schedules.values()].reverse().map(publicSchedule),
 );
 
 /** Removes the recurring crawl for an origin. */
@@ -447,6 +509,7 @@ async function runScheduledCrawl(
       productOnly: sched.params.productOnly,
       storeSnapshots: sched.params.storeSnapshots,
       useBrowser: sched.params.useBrowser,
+      proxy: sched.proxyUrl,
     });
   } finally {
     // Clear the running flag in a finally so an unexpected throw (e.g. a
@@ -491,6 +554,7 @@ async function runJob(jobId: string, input: CrawlRunInput): Promise<void> {
       respectRobotsTxt: input.respectRobotsTxt,
       productOnly: input.productOnly,
       useBrowser: input.useBrowser === true,
+      proxy: input.proxy,
       maxRetries: 1,
       // Per-product incremental saves + skip-unchanged on re-runs. The
       // engine writes each product to SQLite as it is fetched, so a crash
@@ -533,12 +597,17 @@ async function runJob(jobId: string, input: CrawlRunInput): Promise<void> {
         // need all of it, not a sample. Failures stay capped (they're retried
         // on the next run anyway).
         failures: result.stats.failures.slice(0, 100),
+        // Identity fields (SKU/GTIN) are persisted too — the matching layer
+        // matches GTIN > SKU > slug > fuzzy, so exact identity needs to
+        // survive the crawl → Mongo boundary.
         products: result.products.map((p) => ({
           name: p.name,
           brand: p.brand,
           price: p.price,
           available: p.available,
           url: p.url,
+          sku: p.variants?.[0]?.sku ?? "",
+          gtin: p.variants?.[0]?.barcode ?? "",
         })),
         discovery: result.discovery,
       };

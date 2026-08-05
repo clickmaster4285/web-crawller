@@ -65,7 +65,8 @@ function ProductsPage() {
       if (filter === "cheaper")
         return p.yourPrice !== null && p.competitorPrice < p.yourPrice;
       if (filter === "missing") return p.yourPrice === null;
-      if (filter === "low-confidence") return p.confidence < 90;
+      if (filter === "low-confidence")
+        return p.confidence < 90 && p.matchMethod !== "Unmatched";
       return true;
     });
   }, [query, filter, matchedProducts]);
@@ -78,7 +79,7 @@ function ProductsPage() {
     return (
       <NoRealDataState
         title="No matched products yet"
-        description="Matched products need the matching layer (GTIN > SKU > slug > fuzzy) plus your own catalogue. Crawled competitor products already exist on the Sources page and will flow here once matching is connected."
+        description="Matches resolve against your own catalogue, so set your store on the Competitors page and crawl it — then crawl competitors. Their products are matched to yours by GTIN, SKU, URL slug, then fuzzy name similarity."
       />
     );
   }
@@ -88,7 +89,7 @@ function ProductsPage() {
       <PageHeader
         eyebrow="Matching engine"
         title="Matched products"
-        description="Matches are resolved in priority order — GTIN, UPC, EAN, MPN, manufacturer SKU, brand plus model, then AI similarity. Anything below 80% confidence is queued for manual review."
+        description="Matches resolve in priority order — GTIN, SKU, URL slug, then fuzzy name similarity. Competitor products you don't carry show as unmatched; anything below 80% confidence is queued for manual review."
         actions={
           <Button variant="outline">
             <Download className="size-4" /> Export CSV

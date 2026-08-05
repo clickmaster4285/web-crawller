@@ -13,10 +13,32 @@
  * TanStack Start server functions later.
  */
 
+import { ProxyAgent } from "undici";
 import type { CrawlConfig } from "./types.ts";
 
 const DEFAULT_USER_AGENT =
   "ParityBot/1.0 (+https://parity.app; competitive-intelligence demo crawler)";
+
+/**
+ * Tier 2 — shared `ProxyAgent`s, one per proxy URL. Agents are cheap to
+ * create but pooling them avoids re-establishing connections on every
+ * request. Bounded: a crawl uses one proxy at a time, and a long-lived SSR
+ * server can't accumulate more than a handful of gateway URLs — past that
+ * the map is reset (re-creating an agent is cheap).
+ */
+const proxyAgents = new Map<string, ProxyAgent>();
+const MAX_CACHED_PROXY_AGENTS = 16;
+
+function proxyAgentFor(url: string): ProxyAgent | undefined {
+  if (!url) return undefined;
+  let agent = proxyAgents.get(url);
+  if (!agent) {
+    if (proxyAgents.size >= MAX_CACHED_PROXY_AGENTS) proxyAgents.clear();
+    agent = new ProxyAgent(url);
+    proxyAgents.set(url, agent);
+  }
+  return agent;
+}
 
 /** Adaptive request throttle — see `core/politeness.ts` for the implementation. */
 export interface RequestThrottle {
@@ -49,6 +71,12 @@ export interface HttpOptions {
    * XML and JSON responses are never re-rendered.
    */
   renderWithBrowser?: (url: string) => Promise<string>;
+  /**
+   * Tier 2 — rotating residential proxy gateway URL (opt-in per crawl). When
+   * set, every request goes through undici's `ProxyAgent` (provider-side IP
+   * rotation). Same retries / backoff / throttle as direct fetches.
+   */
+  proxy?: string;
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -84,9 +112,12 @@ export async function fetchWithRetry(
 
     let response: Response;
     try {
+      const proxy = options.proxy ? proxyAgentFor(options.proxy) : undefined;
       response = await fetch(url, {
         headers,
         signal: AbortSignal.timeout(timeoutMs),
+        // Tier 2: route through the residential proxy when configured.
+        ...(proxy ? { dispatcher: proxy } : {}),
       });
     } catch (error) {
       if (attempt >= maxRetries) {
@@ -218,6 +249,7 @@ export function httpOptions(
     delayMs: config.delayMs ?? 1000,
     maxRetries: config.maxRetries ?? 3,
     userAgent: config.userAgent,
+    proxy: config.proxy,
     ...extra,
   };
 }

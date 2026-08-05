@@ -11,10 +11,13 @@
  *     empty arrays / zeroed stats so pages render a "No real data yet" state
  *     instead of fake numbers.
  *
+ * Connected:
+ *   - matched products → real matching layer (GTIN > SKU > URL slug > fuzzy
+ *     name, `utils/matcher.js`) against your own catalogue, once your store
+ *     is set and crawled
+ *
  * Still to connect (empty today):
  *   - workspace        → no "your store" input exists yet
- *   - matched products → needs the product-matching layer (GTIN > SKU > slug
- *                        > fuzzy) against your own catalogue
  *   - category/brand gaps → needs your catalogue + matching
  *   - insights/alerts/reports → need analysis/alert/report engines
  */
@@ -22,6 +25,7 @@
 const CrawlResult = require('../models/CrawlResult');
 const Competitor = require('../models/Competitor');
 const MyStore = require('../models/MyStore');
+const { matchCatalogues } = require('../utils/matcher');
 
 /** "8 min ago"-style relative time from a timestamp. */
 function relativeTime(ts) {
@@ -233,42 +237,152 @@ function computeCompetitors(latest, manual, myStore) {
   return competitors.sort((a, b) => b.products - a.products);
 }
 
-/** Flattens every crawled product (across origins) into the product shape. */
-function computeMatchedProducts(latest) {
-  const matched = [];
+/**
+ * The real product-matching layer (GTIN > SKU > URL slug > fuzzy name).
+ *
+ * Compares the user's own catalogue (their store's latest crawl) against
+ * every competitor's catalogue via `utils/matcher.js`, and returns the flat
+ * MatchedProduct row list plus aggregate counts. Honestly empty (rows: [])
+ * when no my-store is set or their store hasn't been crawled yet — the page
+ * renders its "no real data" state instead of fabricated matches.
+ */
+function computeMatching(latest, manual, myStore) {
+  const result = {
+    rows: [],
+    yourProducts: 0,
+    matchedCount: 0,
+    onlyYouSell: 0,
+    onlyTheySell: 0,
+    matchRate: 0,
+    avgPriceGap: null,
+  };
+  const myStoreHost =
+    myStore && myStore.origin ? originHost(myStore.origin) : null;
+  const mineDoc = myStoreHost
+    ? [...latest.values()].find(
+        (doc) => originHost(doc.origin) === myStoreHost
+      )
+    : null;
+  if (!mineDoc) return result;
+
+  const mine = mineDoc.products || [];
+  result.yourProducts = mine.length;
+  const matchedMine = new Set();
+  const gaps = [];
+  const manualByHost = new Map(
+    manual.map((m) => [originHost(m.origin), m])
+  );
+  const rowBase = (t) => ({
+    brand: t.brand || 'Unknown',
+    category: 'Uncategorised',
+    sku: t.sku || '',
+    gtin: t.gtin || '',
+    competitorPrice: t.price || 0,
+    stock: t.available === false ? 'Out of stock' : 'In stock',
+    delivery: '—',
+    priceChange24h: 0,
+    rating: 0,
+    reviews: 0,
+  });
+
   for (const [origin, doc] of latest) {
-    for (const [i, p] of (doc.products || []).entries()) {
-      matched.push({
-        id: `crawl-${originHost(origin)}-${i}`,
-        name: p.name,
-        brand: p.brand || 'Unknown',
-        category: 'Uncategorised',
-        sku: '',
-        gtin: '',
+    const host = originHost(origin);
+    if (host === myStoreHost) continue;
+    const theirs = doc.products || [];
+    if (theirs.length === 0) continue;
+    const competitorName = manualByHost.has(host)
+      ? manualByHost.get(host).name
+      : originName(origin);
+
+    const { matched, onlyTheirs } = matchCatalogues(mine, theirs);
+    for (const pair of matched) {
+      matchedMine.add(pair.mine);
+      const yourPrice = pair.mine.price > 0 ? pair.mine.price : null;
+      result.rows.push({
+        id: `match-${host}-${result.rows.length}`,
+        name: pair.theirs.name,
+        yourPrice,
+        competitor: competitorName,
+        matchMethod: pair.method,
+        confidence: pair.confidence,
+        ...rowBase(pair.theirs),
+      });
+      if (yourPrice != null && (pair.theirs.price || 0) > 0) {
+        gaps.push((pair.theirs.price || 0) - yourPrice);
+      }
+    }
+    // Competitor products you don't carry — shown as "you don't sell".
+    for (const t of onlyTheirs) {
+      result.rows.push({
+        id: `unmatched-${host}-${result.rows.length}`,
+        name: t.name,
         yourPrice: null,
-        competitor: originName(origin),
-        competitorPrice: p.price || 0,
-        matchMethod: 'AI similarity',
-        confidence: 76,
-        stock: p.available === false ? 'Out of stock' : 'In stock',
-        delivery: '—',
-        priceChange24h: 0,
-        rating: 0,
-        reviews: 0,
+        competitor: competitorName,
+        matchMethod: 'Unmatched',
+        confidence: 0,
+        ...rowBase(t),
       });
     }
+    result.onlyTheySell += onlyTheirs.length;
   }
-  return matched;
+
+  result.matchedCount = matchedMine.size;
+  result.onlyYouSell = mine.length - matchedMine.size;
+  result.matchRate =
+    result.yourProducts > 0
+      ? Math.round((matchedMine.size / result.yourProducts) * 100)
+      : 0;
+  result.avgPriceGap = gaps.length
+    ? Math.round((gaps.reduce((a, b) => a + b, 0) / gaps.length) * 100) / 100
+    : null;
+  return result;
 }
 
-/** Aggregate stats derived purely from saved crawls. */
-function computeDashboardStats(competitors, matchedProducts) {
+/** Zeroed matching aggregate for pages without your-catalogue data. */
+function emptyMatching() {
+  return {
+    rows: [],
+    yourProducts: 0,
+    matchedCount: 0,
+    onlyYouSell: 0,
+    onlyTheySell: 0,
+    matchRate: 0,
+    avgPriceGap: null,
+  };
+}
+
+/**
+ * Flattens every competitor's (non-my-store) products for market stats —
+ * market averages are independent of whether the user's store is set yet.
+ */
+function computeMarketProducts(latest, manual, myStoreHost) {
+  const manualByHost = new Map(
+    manual.map((m) => [originHost(m.origin), m])
+  );
+  const out = [];
+  for (const [origin, doc] of latest) {
+    const host = originHost(origin);
+    if (myStoreHost && host === myStoreHost) continue;
+    const name = manualByHost.has(host)
+      ? manualByHost.get(host).name
+      : originName(origin);
+    for (const p of doc.products || []) {
+      out.push({ name: p.name, competitor: name, competitorPrice: p.price || 0 });
+    }
+  }
+  return out;
+}
+
+/** Aggregate stats derived purely from saved crawls + the matching layer. */
+function computeDashboardStats(competitors, matching, marketProducts) {
   const avg = (prices) =>
     prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
+  // Market figures (cheapest/most-expensive/avg) come from every crawled
+  // competitor product — they don't depend on your own catalogue existing.
   const perCompetitorAvg = competitors.map((c) => ({
     name: c.name,
     avg: avg(
-      [...matchedProducts]
+      (marketProducts || [])
         .filter((p) => p.competitor === c.name)
         .map((p) => p.competitorPrice),
     ),
@@ -280,23 +394,23 @@ function computeDashboardStats(competitors, matchedProducts) {
   const mostExpensive = withAvg.length
     ? withAvg.reduce((a, b) => (a.avg > b.avg ? a : b)).name
     : '—';
-  const prices = matchedProducts.map((p) => p.competitorPrice);
+  const prices = (marketProducts || []).map((p) => p.competitorPrice);
 
   return {
-    productsMonitored: matchedProducts.length,
+    productsMonitored: matching.rows.length,
     competitorsTracked: competitors.length,
-    productsMatched: 0,
-    matchRate: 0,
+    productsMatched: matching.matchedCount,
+    matchRate: matching.matchRate,
     priceChangesToday: 0,
     newProductsToday: 0,
     outOfStock: competitors.reduce((sum, c) => sum + c.outOfStock, 0),
-    avgPriceGap: 0,
+    avgPriceGap: matching.avgPriceGap ?? 0,
     yourAvgPrice: 0,
     marketAvgPrice: Math.round(avg(prices) * 100) / 100,
     cheapestCompetitor: cheapest,
     mostExpensiveCompetitor: mostExpensive,
-    onlyYouSell: 0,
-    onlyTheySell: matchedProducts.length,
+    onlyYouSell: matching.onlyYouSell,
+    onlyTheySell: matching.onlyTheySell,
     missingCategories: 0,
     missingBrands: 0,
   };
@@ -336,15 +450,13 @@ const dataController = {
   async analytics(req, res) {
     const { latest, rows } = await loadLatestPerOrigin();
     const myStore = await loadMyStore();
-    const competitors = computeCompetitors(
-      latest,
-      await loadManualCompetitors(),
-      myStore
-    );
-    const matchedProducts = computeMatchedProducts(latest);
-    const stats = computeDashboardStats(competitors, matchedProducts);
+    const manual = await loadManualCompetitors();
     const myStoreHost =
       myStore && myStore.origin ? originHost(myStore.origin) : null;
+    const matching = computeMatching(latest, manual, myStore);
+    const competitors = computeCompetitors(latest, manual, myStore);
+    const marketProducts = computeMarketProducts(latest, manual, myStoreHost);
+    const stats = computeDashboardStats(competitors, matching, marketProducts);
     // Real "your price" — the user's own store's average product price.
     if (myStoreHost) {
       const mine = [...latest.values()].find(
@@ -358,7 +470,7 @@ const dataController = {
       stats: {
         competitors: stats.competitorsTracked,
         productsTracked: stats.productsMonitored,
-        yourProducts: 0,
+        yourProducts: matching.yourProducts,
         matchedProducts: stats.productsMatched,
         missingProducts: stats.onlyTheySell,
         outOfStock: stats.outOfStock,
@@ -375,7 +487,7 @@ const dataController = {
         products: c.products,
         avgPriceIndex: c.avgPriceIndex,
       })),
-      matchedProducts: matchedProducts.map((p) => ({
+      matchedProducts: matching.rows.map((p) => ({
         id: p.id,
         name: p.name,
         competitor: p.competitor,
@@ -402,21 +514,25 @@ const dataController = {
 
   async matchedProducts(req, res) {
     const { latest } = await loadLatestPerOrigin();
-    res.json(computeMatchedProducts(latest));
+    res.json(
+      computeMatching(
+        latest,
+        await loadManualCompetitors(),
+        await loadMyStore()
+      ).rows
+    );
   },
 
   async pricing(req, res) {
     const { latest, rows } = await loadLatestPerOrigin();
     const myStore = await loadMyStore();
-    const competitors = computeCompetitors(
-      latest,
-      await loadManualCompetitors(),
-      myStore
-    );
-    const matchedProducts = computeMatchedProducts(latest);
-    const stats = computeDashboardStats(competitors, matchedProducts);
+    const manual = await loadManualCompetitors();
     const myStoreHost =
       myStore && myStore.origin ? originHost(myStore.origin) : null;
+    const matching = computeMatching(latest, manual, myStore);
+    const competitors = computeCompetitors(latest, manual, myStore);
+    const marketProducts = computeMarketProducts(latest, manual, myStoreHost);
+    const stats = computeDashboardStats(competitors, matching, marketProducts);
     // Real "your price" — the user's own store's average product price.
     if (myStoreHost) {
       const mine = [...latest.values()].find(
@@ -427,7 +543,7 @@ const dataController = {
     }
     res.json({
       competitors,
-      matchedProducts,
+      matchedProducts: matching.rows,
       priceHistory: computePriceHistory(rows, myStoreHost),
       stats,
     });
@@ -435,15 +551,16 @@ const dataController = {
 
   async catalogue(req, res) {
     const { latest } = await loadLatestPerOrigin();
-    const competitors = computeCompetitors(
-      latest,
-      await loadManualCompetitors(),
-      await loadMyStore()
-    );
+    const myStore = await loadMyStore();
+    const manual = await loadManualCompetitors();
+    const myStoreHost =
+      myStore && myStore.origin ? originHost(myStore.origin) : null;
+    const competitors = computeCompetitors(latest, manual, myStore);
+    const marketProducts = computeMarketProducts(latest, manual, myStoreHost);
     res.json({
       categoryGaps: [], // needs your catalogue + matching
       brandGaps: [], // needs your catalogue + matching
-      stats: computeDashboardStats(competitors, []),
+      stats: computeDashboardStats(competitors, emptyMatching(), marketProducts),
     });
   },
 

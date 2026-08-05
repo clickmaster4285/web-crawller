@@ -203,9 +203,9 @@ no page imports local mock data. There are no placeholder shells left:
 | Competitors      | `/competitors` | **Empty-by-default slot flow**: a "Your website" picker (persisted via `GET/PUT /api/data/my-store`, used as store A everywhere) + **4 competitor slot cards** (selections persisted under `parity.competitors.slots`), each opening a searchable `StorePickerDialog` of crawled stores that excludes already-used ones. Every filled slot renders its own **ComparePanel** (your website vs that competitor): in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with a **Cheapest** column, all **paginated** (25/page). One **Fuzzy matching** toggle + **Similarity threshold** slider applies to every comparison (both persisted under `parity.competitors.*`); fuzzy matching is **on by default**. A manual **Add competitor** dialog still exists |
 | Saved crawls     | `/crawls`      | Snapshot history per store via`useSavedCrawls()`: history **hidden by default** with a per-store **Show history / Hide history** toggle, "+N new / removed · price changed / no change / first snapshot" badges, expandable rows (stats, changes vs previous, discovery, first-8 products, failures), a **View all N products** link to the full **Store catalogue** page, **Re-crawl** (prefills the crawler via `prefillCrawlerOrigin`), **Delete snapshot** / **Clear history** (`DELETE /api/data/crawl-results/:id` / `/crawl-results?origin=`) |
 | Store catalogue  | `/stores/$origin` | Full-page product list for one store via`useSavedCrawls()` (dynamic route keyed by **normalized origin**): newest-snapshot default with a **snapshot picker** (a stale id falls back to the newest), a crawl **stats row** + **Store profile** card + **Discovery log** (the specific per-candidate reasons behind a crawl result), and **searchable + sortable + paginated** Products tables (50 rows/page, 25/50/100 selector) in two views: a single snapshot, or **All snapshots** — the union of every product with a per-product **price sparkline** + price range + "seen in N snapshots". Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler), **Delete store** (clears all snapshots) and a **Saved crawls** back link; dynamic `document.title` |
-| Matched products | `/products`    | Searchable/filterable table via`useMatchedProducts()` — real crawled products; your-price/gap matching placeholder until the matching layer lands |
+| Matched products | `/products`    | **Real matching engine**: `useMatchedProducts()` pulls rows from the backend matcher (`backend/utils/matcher.js` — GTIN > SKU > URL slug > fuzzy name). Your crawled catalogue is matched against each competitor with method + confidence, a your-price / price-gap column, and competitor products you don't carry listed as **Unmatched**; searchable / filterable / paginated. Honestly empty until you set your store on `/competitors` and crawl it + competitors |
 | Pricing          | `/pricing`     | **Real price history**: market/cheapest/your-store trend chart + market-relative price index + "biggest price movements" list, all derived from saved snapshots via `computePriceHistory` (same data feeds the dashboard trend). Honest "crawl again" hint when <2 snapshot events |
-| Catalogue gaps   | `/catalogue`   | Charts/gaps empty until your catalogue + matching exist; honest`NoRealDataState`               |
+| Catalogue gaps   | `/catalogue`   | Charts/gaps empty until the category/brand gap analysis is built (the matching layer is live); honest`NoRealDataState`               |
 | AI insights      | `/insights`    | `NoRealDataState` (needs the insight engine)                                                     |
 | Alerts           | `/alerts`      | `NoRealDataState` (needs the alert engine)                                                       |
 | Reports          | `/reports`     | `NoRealDataState` (needs the report generator)                                                   |
@@ -240,9 +240,10 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 
 - Add page-level interactions: filtering, sorting, pagination, drill-downs
   (e.g. product → price history, competitor → profile).
-  *(Partly done — the Store catalogue page (`/stores/$origin`) has search +
-  column sorting and is the product-list drill-down; price history and
-  pagination remain.)*
+  *(Done — the Store catalogue page (`/stores/$origin`) has search + column
+  sorting + pagination, per-product price sparklines on the All-snapshots
+  view, and the Pricing page shows the market-relative time-series; a global
+  command palette remains.)*
 - Add global search + command palette over competitors/products/insights.
 - Add create/edit flows (e.g. add a competitor, subscribe to a data source,
   configure an alert) using `react-hook-form` + `zod` (already installed).
@@ -347,13 +348,15 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   row for your own store. **Dashboard wiring is done**: the demo dataset is
   deleted and `backend/controllers/dataController.js` derives
   competitors/products/stats from the real `CrawlResult` collection,
-  returning honest empty states for features with no source yet. Still TODO:
-  the full your-store workspace/catalogue import (the MyStore row stores
-  only the origin), the product-matching layer (GTIN > SKU > slug > fuzzy),
-  price-history time-series, category/brand gaps, the insights/alerts/
-  reports engines, auth for `/api/data` routes, and production
-  `vite preview` needs a reverse proxy in front of the backend (the `/api`
-  proxy is dev-only).
+  returning honest empty states for features with no source yet. The
+  **product-matching layer is live** (`backend/utils/matcher.js`: GTIN > SKU >
+  URL slug > fuzzy, wired into `/api/data/analytics`, `matched-products` and
+  `pricing`) and the **price-history time-series** drives the Pricing page +
+  catalogue sparklines. Still TODO: the full your-store workspace/catalogue
+  import (the MyStore row stores only the origin), category/brand gaps, the
+  insights/alerts/reports engines, auth for `/api/data` routes, and
+  production `vite preview` needs a reverse proxy in front of the backend
+  (the `/api` proxy is dev-only).
 
 ### Layer 4 — Data ingestion & alerts
 
@@ -400,8 +403,10 @@ native adapter, JSON-LD/microdata/OG/HTML extraction, sitemap + HTML-crawl
 discovery, SQLite checkpointing, and robots.txt + adaptive-throttle
 politeness. Parity's stated goal (Layer 4 of the product plan) is "real
 data-source connectors (web crawlers/APIs) feeding competitors, products, and
-prices" — remaining work (Playwright fallback, Woo/BigCommerce adapters,
-identity dedupe) is tracked in "Current state" below.
+prices" — the Playwright fallback, the WooCommerce + BigCommerce adapters,
+cross-store identity matching (build step 8) and residential proxy routing
+(Tier 2) are **done**; remaining work (enterprise adapters for Nike/Zara) is
+tracked in "Current state" below.
 
 This section is the working plan for evolving the crawler into a generic
 e-com crawler. It records the design analysis, the build order, and the
@@ -707,9 +712,87 @@ step, pause and confirm before moving on.
   unparseable offers instead of saving fake `0`s (real zero prices are kept).
   Verified live: `atonline.com.pk` 0 → 120 products; fitnessdepot.pk prices
   extract (1400/300/4900 PKR vs all-0 before). `tsc`/`lint`/`build` clean.
-- Step 6 (Playwright browser fallback) — **next**. After that, the tiered
-  unlocks run in the order **Tier 3 (per-site adapters) → Tier 2 (residential
-  proxies) → Tier 4 (commercial platform, e.g. Apify)** — see `plan.md` §6.
+- Step 5.7 (flat `<category>/<slug>` sitemap taxonomies) — **done**.
+  `discover/index.ts` `filterProductSitemapEntries` (exported for tests) now
+  treats a sitemap URL as a product when it is a **leaf** of the sitemap
+  tree (no URL nests under it), sits at depth ≥ 2 under a standalone
+  section page, and that section isn't a known non-product/archive base
+  (`blog`, `news`, `shop`, `product-category`, `tag`, legal/account…).
+  Unlocks tree-taxonomy stores: verified live `techmen.com.pk` went
+  **0 → ~1,900 product URLs** (~96% precision on spread-sampled
+  extraction; JSON-LD gives PKR price + SKU; the residual tail is
+  subcategory landing pages that happen to be sitemap leaves). `tsc`/`lint`/
+  `build` clean.
+- Step 6 (Playwright browser fallback) — **done**. `core/browser.ts`
+  (lazy Playwright renderer preferring system Chrome → Edge → bundled
+  Chromium, hard timeout-guarded) wired through `core/http.ts`
+  (`renderWithBrowser` re-renders pages whose server HTML looks like a
+  JS shell — `#__nuxt`/`#__next`/`#root` + JS bundle, or a nearly-empty
+  page), the engine (`index.ts` closes the shared browser on finish), and
+  the Sources page toggle (`useBrowser` param flows through
+  `CrawlRunInput` → job → schedule). Verified with a local Nuxt-style
+  fixture: shell → rendered DOM → `discoverByHtmlCrawl` found the injected
+  product links → `extractFromHtml` parsed a JSON-LD product (name, price,
+  stock).
+- Step 7 (WooCommerce native REST adapter) — **done**.
+  `adapters/woocommerce.ts`: a one-request probe of `/wp-json/wc/v3/products`
+  (`public | auth-required | unavailable`), a paginated catalogue walk
+  (`per_page=100`, `X-WP-Total`/`X-WP-TotalPages`) feeding discovery URLs,
+  a per-slug JSON fetch used by the fetch loop when the API is public, and
+  `parseWooCommerceProduct` (SKU, `global_unique_id`/GTIN/barcode meta,
+  regular-vs-sale price → compare-at, stock status). Discovery probes for
+  WooCommerce/WordPress stores and records `discovery.wooCommerce`
+  diagnostics + findings; an auth-required API (the common case — consumer
+  keys) is reported honestly and the crawl continues via sitemap/HTML.
+  Backend `CrawlResult.discovery.wooCommerce` added. Verified with `tsc` +
+  lint + build.
+- Step 7.5 (BigCommerce Storefront API adapter) — **done**.
+  `adapters/bigcommerce.ts`: a one-request probe of
+  `/api/storefront/catalog/products` (`public | auth-required | unavailable`),
+  a paginated catalogue walk (`limit=250`, `pagination.total` /
+  `pagination.total_pages`) feeding discovery URLs plus a URL → id map, a
+  per-product JSON fetch **by id** used by the fetch loop when the API is
+  public, and `parseBigCommerceProduct` (SKU, `calculated_price` vs `price`
+  → compare-at, `availability`, `custom_url`, `brand`). Discovery probes
+  BigCommerce-detected stores (generator meta / `cdn\d+.bigcommerce.com`)
+  and records `discovery.bigCommerce` diagnostics + findings; an
+  unavailable/auth-gated API is reported honestly and the crawl continues
+  via sitemap/HTML. Backend `CrawlResult.discovery.bigCommerce` added.
+  Verified with `tsc` + lint + build.
+- Step 8 (identity dedupe / product matching) — **done**.
+  `backend/utils/matcher.js` (`matchCatalogues(mine, theirs)`) matches your
+  catalogue against one competitor's in priority order: **GTIN** (digits-only,
+  ≥ 8 chars) > **SKU** (alphanumeric lowercase) > **URL slug** (last path
+  segment) > **fuzzy name** (token Jaccard + containment + edit distance, 0.8
+  threshold, length-bucketed scan). Every product matches at most once;
+  matches carry `method` + `confidence` (100 for exact tiers, similarity % for
+  fuzzy). The crawler persists `sku`/`gtin` on every product (`CrawlResult`
+  schema + `crawl.ts` save path) so identity survives the crawl → Mongo
+  boundary, and `dataController` wires the matcher into `/api/data/analytics`,
+  `matched-products` and `pricing`: matched rows with price gap, unmatched
+  competitor rows, `matchRate` / `onlyYouSell` / `onlyTheySell` /
+  `avgPriceGap`, and market stats decoupled from your catalogue. Honest empty
+  results until a my-store is set and crawled. Fixture test
+  `backend/utils/matcher.test.js` (11 checks green) + endpoints
+  curl-verified end-to-end (GTIN/SKU/slug/fuzzy/unmatched rows).
+- Tier 2 (residential/rotating proxies) — **done** (`core/http.ts` +
+  Sources **Residential proxy** field). An opt-in proxy gateway URL flows
+  `CrawlRunInput.proxy` → `CrawlConfig.proxy` → `httpOptions.proxy`, and
+  `fetchWithRetry` routes every HTTP request (robots.txt fetch included)
+  through a cached undici `ProxyAgent` (`dispatcher`) — provider-side IP
+  rotation fixes the reputation 403s on dawlance/techmen/teslalaptops.
+  Politeness, retries/backoff and the robots gate are unchanged (the proxy
+  just changes the egress IP per request); Playwright-rendered pages use
+  Chromium's own network stack and are not proxied.
+  The URL is server-memory / browser-localStorage only: it is never written
+  to crawl results or logs, job params carry a boolean for the "Running
+  with" badge, and scheduled crawls keep the URL on the server (`CrawlSchedule
+  .proxyUrl`, stripped from every response). Browser fingerprinting/stealth
+  is a separate concern (zara's Akamai still needs real-browser +
+  residential combined).
+
+  After that, only **Tier 4 (commercial platform, e.g. Apify)** remains —
+  see `plan.md` §6.
 
 ---
 

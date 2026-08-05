@@ -54,6 +54,23 @@ export interface CrawlConfig {
    * requires playwright + Chrome (see `core/browser.ts`).
    */
   useBrowser?: boolean;
+  /**
+   * Tier 2 — rotating residential proxy (opt-in per crawl). A single HTTP(S)
+   * proxy gateway URL (e.g. Oxylabs
+   * `http://user-USER:pass@pr.oxylabs.io:7777`, Bright Data
+   * `http://brd-customer-…:pass@brd.superproxy.io:33335`, or Smartproxy
+   * `http://user-…:pass@gate.smartproxy.com:7000`). Rotation is
+   * provider-side — every request exits through a different residential IP,
+   * fixing the IP-reputation 403 blocks on dawlance/techmen/teslalaptops.
+   * When set, every HTTP request in the crawl (robots.txt, discovery,
+   * product fetches) flows through the proxy via undici's `ProxyAgent`;
+   * retries, politeness and the robots gate are unchanged. (Pages rendered
+   * by the Playwright browser fallback use Chromium's own network stack and
+   * are not proxied.) The URL lives only in server memory / the user's own
+   * browser storage — never persisted to crawl results or logs, and never
+   * echoed in Parity's own error text.
+   */
+  proxy?: string;
   /** Called after each product is fetched. */
   onProgress?: (fetched: number, discovered: number) => void;
   /**
@@ -163,6 +180,50 @@ export interface HomepageDiagnostics {
   note: string;
 }
 
+/**
+ * WooCommerce native REST API outcome (Tier 3 adapter).
+ *
+ * WooCommerce exposes `/wp-json/wc/v3/products` but most stores protect it
+ * behind consumer-key credentials, so a crawl must report which case it hit
+ * rather than silently falling back.
+ */
+export interface WooCommerceDiagnostics {
+  /**
+   * "public" — the API served products (walked for URLs + parsed per
+   * product); "auth-required" — 401/403 (needs consumer credentials);
+   * "unavailable" — no usable API (404 / non-JSON / robots-disallowed).
+   */
+  status: "public" | "auth-required" | "unavailable";
+  /** Total products the API reported (`X-WP-Total`), when known. */
+  total: number | null;
+  /** Product URLs this API walk contributed to discovery (deduped). */
+  urls: number;
+  /** Human-readable detail (auth hint or probe failure). */
+  message?: string;
+}
+
+/**
+ * BigCommerce Storefront API outcome (Tier 3 adapter).
+ *
+ * BigCommerce exposes `/api/storefront/catalog/products` (public, no
+ * credentials in most themes), but stores can disable it or gate it, so a
+ * crawl must report which case it hit rather than silently falling back.
+ */
+export interface BigCommerceDiagnostics {
+  /**
+   * "public" — the API served products (walked for URLs + parsed per
+   * product); "auth-required" — 401/403 (needs credentials);
+   * "unavailable" — no usable API (404 / non-JSON / robots-disallowed).
+   */
+  status: "public" | "auth-required" | "unavailable";
+  /** Total products the API reported (`pagination.total`), when known. */
+  total: number | null;
+  /** Product URLs this API walk contributed to discovery (deduped). */
+  urls: number;
+  /** Human-readable detail (auth hint or probe failure). */
+  message?: string;
+}
+
 /** A human-readable finding/suggestion surfaced to the user after a crawl. */
 export interface CrawlFinding {
   level: "info" | "warning" | "success";
@@ -219,6 +280,10 @@ export interface DiscoveryDiagnostics {
   robots: RobotsInfo;
   /** Homepage analysis (product links, corporate-vs-store, external stores). */
   homepage?: HomepageDiagnostics;
+  /** WooCommerce native REST API outcome (Tier 3 adapter), when probed. */
+  wooCommerce?: WooCommerceDiagnostics;
+  /** BigCommerce Storefront API outcome (Tier 3 adapter), when probed. */
+  bigCommerce?: BigCommerceDiagnostics;
   /** Human-readable findings/suggestions surfaced to the user. */
   findings: CrawlFinding[];
   /** Verbose discovery log (what the crawler did, in order). */

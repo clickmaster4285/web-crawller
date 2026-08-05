@@ -34,7 +34,9 @@
 import { discoverProducts } from "./discover/index.ts";
 import { fetchWithRetry, httpOptions } from "./core/http.ts";
 import { closeBrowser, renderWithBrowser } from "./core/browser.ts";
+import { fetchBigCommerceProductById } from "./adapters/bigcommerce.ts";
 import { parseShopifyProduct, type RawProduct } from "./adapters/shopify.ts";
+import { fetchWooCommerceProductBySlug } from "./adapters/woocommerce.ts";
 import { extractFromHtml } from "./extract/mapper.ts";
 import { openCheckpointStore } from "./core/checkpoint.ts";
 import { Politeness } from "./core/politeness.ts";
@@ -88,6 +90,9 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     userAgent: config.userAgent,
     delayMs: config.delayMs,
     respectRobots,
+    // Tier 2: robots.txt is fetched from the same (possibly IP-blocked)
+    // origin, so it goes through the proxy too.
+    proxy: config.proxy,
   });
   const opts = httpOptions(config, {
     throttle: politeness,
@@ -147,6 +152,17 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       ? discovered.urls.slice(0, config.maxPages)
       : discovered.urls;
 
+  // Tier 3 (WooCommerce native): when discovery found a public /wp-json/wc/v3
+  // API, the fetch loop prefers structured per-product JSON (SKU/GTIN/price/
+  // stock) over the Shopify probe + HTML extractor chain.
+  const wooApiAvailable =
+    discovered.diagnostics.wooCommerce?.status === "public";
+  // Tier 3 (BigCommerce Storefront): same idea — when discovery walked the
+  // public /api/storefront/catalog/products, the fetch loop pulls each
+  // product by id (URL → id map from the walk) instead of scraping HTML.
+  const bcApiAvailable =
+    discovered.diagnostics.bigCommerce?.status === "public";
+
   // `onProgress` first arg = products in hand (freshly fetched + cache-reused),
   // i.e. progress through the run; `stats.fetched` is the fresh-only count.
   // try/finally guarantees the checkpoint store is closed even if a worker
@@ -176,10 +192,15 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       await limiter.acquire(host);
       try {
         try {
+          const bcId = bcApiAvailable
+            ? (discovered.productIds.get(url) ?? null)
+            : null;
           const { product, etag, statusCode } = await fetchOneProduct(
             url,
             config.origin,
             opts,
+            wooApiAvailable,
+            bcId,
           );
           if (product) {
             // Persist before mutating run state so a storage failure can't
@@ -251,12 +272,43 @@ export async function runSitemapCrawl(
   return runCrawl({ ...config, collections: config.collections ?? [] });
 }
 
-/** Fetches a single product URL — Shopify JSON first, HTML extractor fallback. */
+/**
+ * Fetches a single product URL — BigCommerce Storefront (when public) →
+ * WooCommerce REST (when public) → Shopify JSON → HTML extractor chain,
+ * whichever returns first.
+ */
 async function fetchOneProduct(
   url: string,
   origin: string,
   opts: ReturnType<typeof httpOptions>,
+  useWooApi = false,
+  bcId: number | null = null,
 ): Promise<FetchedProduct> {
+  // Tier 3 (BigCommerce Storefront): structured JSON by id beats HTML
+  // scraping. The id comes from the discovery walk's URL → id map. Never
+  // throws (null on any failure), so a null result falls through below.
+  if (bcId != null) {
+    const product = await fetchBigCommerceProductById(origin, bcId, opts);
+    if (product) {
+      return { product, etag: null, statusCode: 200 };
+    }
+  }
+
+  // Tier 3 (WooCommerce native): structured JSON beats HTML scraping. Tried
+  // before the Shopify probe — on a WooCommerce store the Shopify JSON probe
+  // would be a wasted 404. `fetchWooCommerceProductBySlug` never throws
+  // (null on any failure), so no try/catch is needed here — a null result
+  // simply falls through to the Shopify probe + HTML chain.
+  if (useWooApi) {
+    const slug = slugFromUrl(url);
+    if (slug) {
+      const product = await fetchWooCommerceProductBySlug(origin, slug, opts);
+      if (product) {
+        return { product, etag: null, statusCode: 200 };
+      }
+    }
+  }
+
   // Tier 1: Shopify JSON endpoint.
   const handle = shopifyHandleFromUrl(url);
   if (handle) {

@@ -138,6 +138,8 @@ export class Politeness implements RequestThrottle {
       maxDelayMs?: number;
       /** When false, skip robots.txt entirely (no disallow gate, no crawl-delay). */
       respectRobots?: boolean;
+      /** Tier 2 — residential proxy gateway URL (routes the robots.txt fetch too). */
+      proxy?: string;
     } = {},
   ): Promise<Politeness> {
     const baseDelay = options.delayMs ?? 1000;
@@ -153,6 +155,7 @@ export class Politeness implements RequestThrottle {
           maxRetries: 1,
           timeoutMs: ROBOTS_TIMEOUT_MS,
           userAgent: options.userAgent,
+          proxy: options.proxy,
         });
         if (response.status >= 200 && response.status < 300) {
           robotsBody = await response.text();

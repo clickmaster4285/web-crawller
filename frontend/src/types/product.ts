@@ -10,7 +10,13 @@ export interface MatchedProduct {
   yourPrice: Money | null;
   competitor: string;
   competitorPrice: Money;
-  matchMethod: "GTIN" | "MPN" | "Brand + Model" | "AI similarity";
+  matchMethod:
+    | "GTIN"
+    | "SKU"
+    | "URL slug"
+    | "Brand + Model"
+    | "AI similarity"
+    | "Unmatched";
   confidence: number;
   stock: StockStatus;
   delivery: string;

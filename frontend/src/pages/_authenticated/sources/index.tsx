@@ -175,6 +175,16 @@ function SourcesPage() {
     "parity.sources.snapshots",
     true,
   );
+  // Tier 1 — Playwright browser rendering (opt-in): JS-shell pages are
+  // rendered in a headless browser so JS-rendered stores crawl properly.
+  const [useBrowser, setUseBrowser] = useLocalStorageState(
+    "parity.sources.useBrowser",
+    false,
+  );
+  // Tier 2 — rotating residential proxy gateway URL (opt-in). Credentials
+  // stay in the user's own localStorage; only the boolean is ever sent to
+  // the server's job params.
+  const [proxy, setProxy] = useLocalStorageState("parity.sources.proxy", "");
   const [frequency, setFrequency] = useLocalStorageState<CrawlFrequency>(
     "parity.sources.frequency",
     "6h",
@@ -314,7 +324,9 @@ function SourcesPage() {
       job.params.maxPages === maxPages &&
       job.params.respectRobotsTxt === respectRobots &&
       job.params.productOnly === productOnly &&
-      job.params.storeSnapshots === storeSnapshots);
+      job.params.storeSnapshots === storeSnapshots &&
+      job.params.useBrowser === useBrowser &&
+      job.params.proxy === proxy.trim().length > 0);
 
   // The previous saved snapshot for the origin being crawled — everything
   // saved *after* this run started (including this run's own persistence)
@@ -386,6 +398,8 @@ function SourcesPage() {
       respectRobotsTxt: respectRobots,
       productOnly,
       storeSnapshots,
+      useBrowser,
+      proxy: proxy.trim() || undefined,
     });
 
   const scheduleIt = () =>
@@ -399,6 +413,8 @@ function SourcesPage() {
       respectRobotsTxt: respectRobots,
       productOnly,
       storeSnapshots,
+      useBrowser,
+      proxy: proxy.trim() || undefined,
     });
 
   return (
@@ -698,6 +714,12 @@ function SourcesPage() {
               </Badge>
               <Badge variant="secondary" className="font-normal">
                 {job.params.storeSnapshots ? "snapshots on" : "no snapshots"}
+              </Badge>
+              <Badge variant="secondary" className="font-normal">
+                {job.params.useBrowser ? "browser rendering" : "http only"}
+              </Badge>
+              <Badge variant="secondary" className="font-normal">
+                {job.params.proxy ? "residential proxy" : "direct"}
               </Badge>
             </div>
 
@@ -1106,6 +1128,53 @@ function SourcesPage() {
                 checked={storeSnapshots}
                 onCheckedChange={setStoreSnapshots}
               />
+            </div>
+
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <Label htmlFor="browser">Browser rendering</Label>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Playwright fallback for JS-rendered stores (Nuxt/SPA) —
+                  slower, needs Chrome installed
+                </p>
+              </div>
+              <Switch
+                id="browser"
+                checked={useBrowser}
+                onCheckedChange={setUseBrowser}
+              />
+            </div>
+            {useBrowser ? (
+              <Alert className="border-accent/50 [&>svg]:text-accent lg:col-span-2">
+                <Globe className="size-4" />
+                <AlertTitle>Tier 1 — browser rendering on</AlertTitle>
+                <AlertDescription>
+                  Pages that look like a JS shell are rendered in headless
+                  Chrome before discovery and extraction see them. This is for
+                  stores whose products load client-side; leave it off for
+                  regular stores to keep crawls fast.
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            <div className="lg:col-span-2">
+              <Label htmlFor="proxy">Residential proxy (optional)</Label>
+              <Input
+                id="proxy"
+                type="password"
+                value={proxy}
+                onChange={(e) => setProxy(e.target.value)}
+                placeholder="http://user:pass@gate.provider.com:8000"
+                autoComplete="off"
+                spellCheck={false}
+                className="mt-1.5 font-mono text-xs"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                Tier 2 — routes every request through a rotating residential
+                gateway (Oxylabs / Bright Data / Smartproxy) to fix IP blocks on
+                stores that 403 this machine. Credentials stay in your browser;
+                the server never stores or logs them.
+              </p>
             </div>
           </div>
         </section>

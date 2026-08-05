@@ -40,6 +40,15 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
       `/` origins; HTML crawl follows `/product-category/` + `?product_cat=` categories
       and multi-segment `/shop/…` product links. Verified live: `atonline.com.pk` went
       from 0 → **120 products** via `wp-sitemap.xml`.
+- [x] **Flat `<category>/<slug>` sitemap taxonomies** — stores whose catalogue is a
+      category tree (techmen.com.pk: `/computing/<slug>`, products nested 3–4 levels
+      deep) are now recognized: a sitemap URL is treated as a product when it is a
+      **leaf** of the sitemap tree (no URL nests under it), sits at depth ≥ 2 under a
+      standalone section page, and that section isn't a known non-product/archive base
+      (`blog`, `news`, `shop`, `product-category`, `tag`, legal/account pages…).
+      Verified live: `techmen.com.pk` went **0 → ~1,900 product URLs** with ~96%
+      precision on spread-sampled extraction (JSON-LD yields PKR price + SKU;
+      the residual tail is subcategory landing pages that are sitemap leaves).
 - [x] **Price extraction hardening** — WooCommerce/Yoast nest the offer price under
       `priceSpecification` → `UnitPriceSpecification`; the JSON-LD extractor now resolves
       it (plus currency and thousands separators like `"1,400"`), skips unparseable
@@ -62,9 +71,9 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 | Saved crawls | `/crawls` | ✅ history hidden by default + Show/Hide, "+N new" badges, expandable rows, Re-crawl, delete/clear |
 | Store catalogue | `/stores/$origin` | ✅ full searchable + sortable product table, snapshot picker, **All-snapshots union view with per-product price sparklines**, per-snapshot price trails, Delete store, discovery log, paginated rows |
 | Competitors | `/competitors` | ✅ empty-by-default slot flow (your-website picker + 4 competitor slots), per-slot comparison panels, fuzzy matching **on by default**, paginated tables |
-| Matched products | `/products` | ⚠️ basic table — needs the matching layer |
+| Matched products | `/products` | ✅ **real matching layer** — your crawled catalogue vs each competitor via `backend/utils/matcher.js` (GTIN > SKU > URL slug > fuzzy name): match method + confidence, your-price / price gap, competitor products you don't carry shown as **Unmatched**; paginated. Honestly empty until your store is set (`/competitors`) and crawled |
 | Pricing | `/pricing` | ✅ real market trend + price index + biggest movers from snapshot time-series |
-| Catalogue gaps | `/catalogue` | ⬜ empty state — needs your catalogue + matching |
+| Catalogue gaps | `/catalogue` | ⬜ empty state — matching layer is live; needs category/brand gap analysis on top of your catalogue |
 | AI insights | `/insights` | ⬜ empty state — needs the insight engine |
 | Alerts | `/alerts` | ⬜ empty state — needs the alert engine |
 | Reports | `/reports` | ⬜ empty state — needs the report generator |
@@ -74,6 +83,17 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 - [x] `dataController` derives competitors/products/stats from real `CrawlResult` data
       (demo dataset deleted — no fabricated numbers anywhere).
 - [x] `Competitor` model (add/delete) + `MyStore` singleton (set your store URL).
+- [x] **Product matching layer** — `backend/utils/matcher.js` (`matchCatalogues`):
+      identity tiers in priority order **GTIN (digits-only) > SKU (alphanumeric) >
+      URL slug > fuzzy name similarity**; every product matches at most once with
+      `method` + `confidence` (100 for exact, similarity % for fuzzy). The crawler
+      persists `sku`/`gtin` on every product (`CrawlResult` schema) so identity
+      survives the crawl → Mongo boundary. `dataController` wires it into
+      `/api/data/analytics`, `matched-products` and `pricing`: matched rows with
+      price gap, unmatched competitor rows, `matchRate` / `onlyYouSell` /
+      `onlyTheySell` / `avgPriceGap`, and market stats decoupled from your
+      catalogue. Honest empty until a my-store is set and crawled. Fixture test
+      `backend/utils/matcher.test.js` (11 checks green, endpoints curl-verified).
 
 ### Engineering quality
 - [x] DRY refactor: shared `StockBadge`, `ProductCell`, `CrawlStatsGrid`,
@@ -86,21 +106,25 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 
 ## 🔜 What's next (priority order)
 
-### 1. Price history & Pricing page (recommended next)
-- [ ] Backend endpoint: flatten products across an origin's snapshots into a
-      per-product price time-series.
-- [ ] Store catalogue page: per-product price sparkline / "cheapest ever" /
-      "current vs first seen" (small inline chart, recharts already installed).
-- [ ] Pricing page: real positioning — market average/median per product,
-      your-price vs competitor distribution, biggest movers.
-- [ ] Backfill note: series only spans existing snapshots; future crawls extend it.
+### 1. Price history & Pricing page — done
+- [x] Backend time-series — `computePriceHistory` flattens an origin's
+      snapshots into per-product price series (drives Pricing + dashboard).
+- [x] Store catalogue page — All-snapshots view has per-product price
+      sparklines + price range + "seen in N snapshots".
+- [x] Pricing page — market/cheapest/your-store trend, market-relative price
+      index, biggest movers, all derived from saved snapshots.
+- [x] Backfill note — series only spans existing snapshots; future crawls
+      extend it.
 
-### 2. Product matching layer
-- [ ] Server-side matcher, priority GTIN > SKU > URL slug > fuzzy name+brand
-      (reuse the client-side `compareStores` fuzzy logic as the fallback).
-- [ ] Matched products page (`/products`): your catalogue vs each competitor —
-      match status, price gap, availability.
-- [ ] Prerequisite for Catalogue gaps and "your price" columns everywhere.
+### 2. Product matching layer — done
+- [x] Server-side matcher (`backend/utils/matcher.js`), priority GTIN > SKU >
+      URL slug > fuzzy name (token overlap + containment + edit distance,
+      same machinery as the client-side `compareStores`).
+- [x] Matched products page (`/products`): your catalogue vs each competitor —
+      match method + confidence, price gap, availability; unmatched competitor
+      rows listed as **Unmatched**.
+- [x] Prerequisite for Catalogue gaps and "your price" columns everywhere —
+      live now; the `/catalogue` gaps analysis still needs building on top.
 
 ### 3. My-store catalogue import
 - [ ] "My store" currently stores only the origin — add a real catalogue source:
@@ -128,25 +152,47 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 
 The generic engine already covers stores with readable sitemaps/HTML
 (Shopify, WooCommerce, Magento, WordPress). These tiers are the ladder into
-the rest. **Execution order (decided): Tier 1 → Tier 3 → Tier 2 → Tier 4.**
+the rest. **Execution order: Tier 1 → Tier 3 → Tier 2 → Tier 4 — Tiers 1–3
+are done, so only Tier 4 (commercial platform) remains.**
 
-- [ ] **Tier 1 — Playwright browser fallback** *(next)*: lazy-loaded headless
-      Chromium for JS-rendered stores (Nuxt/SPA like `techmen.com.pk`). Render
-      the DOM, then run the existing extractors on the rendered HTML. Opt-in
-      per crawl; `PLAYWRIGHT_BROWSERS_PATH` env. **Unlocks: techmen, JS stores.**
-- [ ] **Tier 3 — Per-site adapters**: WooCommerce native (`/wp-json/wc/v3`),
-      BigCommerce, then enterprise adapters for the stores that matter (Nike's
-      `/t/<slug>-<id>` pattern + product API, Zara's internal product API).
-      Far more reliable than HTML scraping on custom platforms. **Unlocks: nike (partial).**
-- [ ] **Tier 2 — Residential/rotating proxies + browser fingerprinting**: the
-      actual blocker on dawlance/techmen/teslalaptops (403 IP blocks) and zara
-      (Akamai challenges even real browsers). Route crawler traffic via a
-      residential proxy provider to fix IP reputation. **Unlocks: dawlance,
-      techmen, teslalaptops.**
+- [x] **Tier 1 — Playwright browser fallback — done** (`core/browser.ts`):
+      lazy headless renderer preferring system Chrome → Edge → bundled
+      Chromium, wired through `core/http.ts` (`renderWithBrowser` re-renders
+      JS-shell pages — `#__nuxt`/`#__next`/`#root` + JS bundle, or a
+      nearly-empty page), engine closes the shared browser on finish, opt-in
+      per crawl via the Sources **Browser rendering** toggle
+      (`useBrowser` → `CrawlRunInput` → job → schedule);
+      `PLAYWRIGHT_BROWSERS_PATH` env supported. **Unlocks: techmen, JS stores.**
+- [x] **Tier 3 — Per-site adapters**: **WooCommerce native (`/wp-json/wc/v3`)
+      — done** (`adapters/woocommerce.ts`: one-request probe → a public API
+      is auto-picked for discovery (paginated walk, `X-WP-Total`) + structured
+      per-product parse (SKU/GTIN/price/stock) in the fetch loop; an
+      auth-required/unavailable API is recorded honestly in
+      `discovery.wooCommerce` + findings and the crawl falls back to
+      sitemap/HTML). **BigCommerce Storefront API (`/api/storefront/catalog/products`)
+      — done** (`adapters/bigcommerce.ts`: probe → paginated walk (`limit=250`,
+      `pagination.total_pages`) collecting URLs + a URL→id map, per-product JSON
+      fetch by id in the fetch loop (SKU/price/stock), honest
+      `discovery.bigCommerce` outcome + findings). Enterprise adapters
+      (Nike `/t/…`, Zara product API) remain. **Unlocks: nike (partial).**
+- [x] **Tier 2 — Residential/rotating proxies — done** (`core/http.ts` +
+      Sources **Residential proxy** field): an opt-in proxy gateway URL flows
+      `CrawlRunInput.proxy` → `CrawlConfig.proxy` → every HTTP request via
+      undici's `ProxyAgent` (`dispatcher`), including the robots.txt fetch
+      (same origin), so provider-side IP rotation fixes reputation 403s.
+      Same politeness / retries / robots logic as direct fetches; the URL is
+      server-memory / browser-localStorage only — never persisted to crawl
+      results or logs (job params carry a boolean for the UI badge). Oxylabs /
+      Bright Data / Smartproxy gateway URLs all work. Browser
+      fingerprinting/stealth is a separate concern — zara's Akamai challenges
+      still need real-browser + residential combined.
+      **Unlocks: dawlance, techmen, teslalaptops (IP blocks).**
 - [ ] **Tier 4 — Commercial scraping platform**: Apify (pre-built Nike/Zara/
       retail actors + proxy infrastructure) or retailer affiliate feeds for the
       hardest targets (zara, nike) where in-house effort isn't worth it.
-- [ ] Identity dedupe across stores (GTIN > SKU > slug > fuzzy).
+- [x] Identity dedupe across stores (GTIN > SKU > slug > fuzzy) — done via the
+      server-side matching layer (`backend/utils/matcher.js`, §2), which matches
+      your saved catalogue against each competitor's.
 
 ### 7. Insights & Reports
 - [ ] Insight engine: top movers, biggest gaps, price-drop summaries → `/insights`.

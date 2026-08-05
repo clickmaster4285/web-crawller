@@ -18,7 +18,15 @@
  * `diagnostics` for the UI and persistence.
  */
 
+import {
+  discoverBigCommerceProducts,
+  probeBigCommerceApi,
+} from "../adapters/bigcommerce.ts";
 import { discoverCollectionHandles } from "../adapters/shopify-discover.ts";
+import {
+  discoverWooCommerceProducts,
+  probeWooCommerceApi,
+} from "../adapters/woocommerce.ts";
 import { discoverByHtmlCrawl } from "./html-crawl.ts";
 import { analyzeHomepage } from "./homepage.ts";
 import { detectPlatform } from "./platform.ts";
@@ -42,11 +50,39 @@ import { httpOptions } from "../core/http.ts";
 const DISCOVERY_MAX_PAGES = 60;
 const DISCOVERY_MAX_DEPTH = 3;
 
+/**
+ * Top-level path segments that are never product pages — blog/legal/account
+ * sections and archive bases (`shop`, `product-category`, `tag`…) whose
+ * children are lists, not products. Used by the flat `<category>/<slug>`
+ * rule so it doesn't classify `/blog/<post>` or `/shop/<category>` as
+ * products.
+ */
+const NON_PRODUCT_SECTION_RE =
+  /^(blog|news|about|about-us|contact|help|faq|faqs|help-center|support|policy|privacy|terms|terms-and-conditions|shipping|shipping-details|returns|return-policy|payment|payment-options|warranty|warranty-returns|careers|account|cart|wishlist|login|register|search|page|pages|tag|tags|category|categories|author|authors|archives|shop|product-category|collections|catalog|catalogue|brand|brands|manufacturer|vendor|articles|posts|guides|tutorials|reviews|resources|events|team|services|solutions|downloads|docs|documentation|knowledge-base)$/i;
+
+/** Lowercased path segments of a URL (`/computing/dell-x` → ["computing", "dell-x"]). */
+function pathSegments(url: string): string[] {
+  try {
+    return new URL(url).pathname
+      .split("/")
+      .filter(Boolean)
+      .map((s) => s.toLowerCase());
+  } catch {
+    return [];
+  }
+}
+
 export interface ProductDiscovery {
   /** Absolute product page URLs, deduped. */
   urls: string[];
   /** URLs that the sitemap paired with a lastmod value. */
   lastmod: Map<string, string>;
+  /**
+   * URL → product id from the BigCommerce Storefront API walk (when the API
+   * was public), so the fetch loop can pull structured JSON by id for exactly
+   * the URLs discovery found. Empty for every other platform.
+   */
+  productIds: Map<string, number>;
   /** Diagnostics from each strategy + the verbose log + findings. */
   diagnostics: DiscoveryDiagnostics;
 }
@@ -66,6 +102,7 @@ export async function discoverProducts(
 ): Promise<ProductDiscovery> {
   const urlSet = new Set<string>();
   const lastmod = new Map<string, string>();
+  const productIds = new Map<string, number>();
   const log: string[] = [];
   const findings: CrawlFinding[] = [];
   const robotsInfo: RobotsInfo = robots
@@ -299,6 +336,127 @@ export async function discoverProducts(
   }
   tick("sitemap", "Sitemap discovery done.");
 
+  // ── 2.5 WooCommerce native REST API (Tier 3). ────────────────────────
+  // For stores that are (or could be) WooCommerce, probe /wp-json/wc/v3.
+  // A public API is the highest-fidelity product source — walk it for URLs
+  // and let the fetch loop parse structured JSON (SKU/GTIN/stock) instead
+  // of HTML. Auth-required APIs are the common case (consumer-key only);
+  // that's recorded honestly and the crawl continues via sitemap/HTML.
+  if (
+    diagnostics.platform.platform === "WooCommerce" ||
+    diagnostics.platform.platform === "WordPress"
+  ) {
+    log.push("WooCommerce API: probing /wp-json/wc/v3/products…");
+    const probe = await probeWooCommerceApi(config.origin, opts);
+    if (probe.status === "public") {
+      const woo = await discoverWooCommerceProducts(config.origin, opts);
+      let wooAdded = 0;
+      for (const u of woo.urls) {
+        if (!urlSet.has(u)) wooAdded++;
+        urlSet.add(u);
+      }
+      diagnostics.wooCommerce = {
+        status: "public",
+        total: woo.total ?? probe.total,
+        urls: wooAdded,
+      };
+      log.push(
+        `WooCommerce API: ${woo.urls.length} products ` +
+          `(${woo.truncated ? "capped" : `${woo.total ?? "?"} total`}) — ` +
+          `${wooAdded} new URLs`,
+      );
+      findings.push({
+        level: "success",
+        message: `WooCommerce REST API is public — ${woo.urls.length} products found via /wp-json/wc/v3.`,
+      });
+    } else if (probe.status === "auth-required") {
+      diagnostics.wooCommerce = {
+        status: "auth-required",
+        total: null,
+        urls: 0,
+        message: probe.message,
+      };
+      log.push(
+        `WooCommerce API requires credentials (${probe.message}) — continuing with sitemap/HTML.`,
+      );
+      findings.push({
+        level: "info",
+        message:
+          "WooCommerce REST API needs consumer credentials — products come from sitemap/HTML instead.",
+      });
+    } else {
+      diagnostics.wooCommerce = {
+        status: "unavailable",
+        total: null,
+        urls: 0,
+        message: probe.message,
+      };
+      log.push(
+        `WooCommerce API unavailable (${probe.message}) — continuing with sitemap/HTML.`,
+      );
+    }
+    tick("sitemap", "WooCommerce API probe done.");
+  }
+
+  // ── 2.6 BigCommerce Storefront API (Tier 3). ────────────────────────
+  // For stores detected as BigCommerce, probe /api/storefront/catalog/products.
+  // A public API is the highest-fidelity product source — walk it for URLs
+  // (remembering URL → id so the fetch loop pulls structured JSON) and record
+  // the outcome honestly when the API is unavailable or credential-gated.
+  if (diagnostics.platform.platform === "BigCommerce") {
+    log.push("BigCommerce API: probing /api/storefront/catalog/products…");
+    const probe = await probeBigCommerceApi(config.origin, opts);
+    if (probe.status === "public") {
+      const bc = await discoverBigCommerceProducts(config.origin, opts);
+      let bcAdded = 0;
+      for (const u of bc.urls) {
+        if (!urlSet.has(u)) bcAdded++;
+        urlSet.add(u);
+      }
+      for (const [u, id] of bc.byUrl) productIds.set(u, id);
+      diagnostics.bigCommerce = {
+        status: "public",
+        total: bc.total ?? probe.total,
+        urls: bcAdded,
+      };
+      log.push(
+        `BigCommerce API: ${bc.urls.length} products ` +
+          `(${bc.truncated ? "capped" : `${bc.total ?? "?"} total`}) — ` +
+          `${bcAdded} new URLs`,
+      );
+      findings.push({
+        level: "success",
+        message: `BigCommerce Storefront API is public — ${bc.urls.length} products found via /api/storefront/catalog/products.`,
+      });
+    } else if (probe.status === "auth-required") {
+      diagnostics.bigCommerce = {
+        status: "auth-required",
+        total: null,
+        urls: 0,
+        message: probe.message,
+      };
+      log.push(
+        `BigCommerce API requires credentials (${probe.message}) — continuing with sitemap/HTML.`,
+      );
+      findings.push({
+        level: "info",
+        message:
+          "BigCommerce Storefront API needs credentials — products come from sitemap/HTML instead.",
+      });
+    } else {
+      diagnostics.bigCommerce = {
+        status: "unavailable",
+        total: null,
+        urls: 0,
+        message: probe.message,
+      };
+      log.push(
+        `BigCommerce API unavailable (${probe.message}) — continuing with sitemap/HTML.`,
+      );
+    }
+    tick("sitemap", "BigCommerce API probe done.");
+  }
+
   // ── 3. HTML link-graph BFS from the site root. ───────────────────────
   try {
     log.push("HTML crawl: following category and product links from the root…");
@@ -366,6 +524,7 @@ export async function discoverProducts(
   return {
     urls: [...urlSet].filter((u) => !opts.isAllowed || opts.isAllowed(u)),
     lastmod,
+    productIds,
     diagnostics,
   };
 }
@@ -374,17 +533,68 @@ export async function discoverProducts(
  * Filters a sitemap's URL set down to product-page entries. Used only for
  * generic sitemaps whose post type is unknown — known product sitemaps skip
  * this and are trusted wholesale.
+ *
+ * Recognized product patterns:
+ *   - `/products/<slug>` (Shopify, BigCommerce, most stores)
+ *   - `/dp/<id>`, `/item/<slug>` (Amazon-style)
+ *   - WooCommerce `/shop/<cat>/<product>/` (category-prefixed permalinks)
+ *   - **Flat `<category>/<slug>` / nested tree taxonomies** (e.g.
+ *     techmen.com.pk's `/computing/dell-latitude-7300-…` or
+ *     `/apple-products/accessories/macbook/<slug>`): a URL whose first
+ *     segment is a standalone section page in this sitemap, is not a known
+ *     non-product section (blog/legal/account/archive bases), and is a
+ *     **leaf** of the sitemap tree — nothing nests under it. The sitemap
+ *     cross-reference plus blocklist keeps `/blog/<post>`, static pages and
+ *     `/shop/<cat>` archives out while trusting real category→product
+ *     trees wholesale.
+ *
+ * Known tradeoffs (deliberate): products are only trusted when their
+ * section page is itself listed in the sitemap (coverage gap when category
+ * pages aren't); and on non-store sites with unblocklisted top-level
+ * sections (e.g. a blog's `/deals/…`), content leaves are accepted and fail
+ * extraction cleanly — recorded as failures, never corrupting the catalogue.
  */
-function filterProductSitemapEntries(urls: DiscoveredUrl[]): DiscoveredUrl[] {
-  return urls.filter(
-    (u) =>
+export function filterProductSitemapEntries(
+  urls: DiscoveredUrl[],
+): DiscoveredUrl[] {
+  // Path segments per URL, computed once (the filter reads each twice).
+  const segments = new Map<string, string[]>();
+  // First segments that appear as standalone URLs — real section/category
+  // pages, so deeper children can be trusted as products.
+  const sections = new Set<string>();
+  // Every URL that is a strict prefix of another URL — a section page, not
+  // a product (techmen.com.pk nests products several levels deep:
+  // `/apple-products/accessories/macbook/<slug>`, so `…/macbook` with
+  // children must not be treated as a product itself).
+  const prefixes = new Set<string>();
+  for (const u of urls) {
+    const seg = pathSegments(u.loc);
+    segments.set(u.loc, seg);
+    if (seg.length === 1) sections.add(seg[0]);
+    for (let i = 1; i < seg.length; i++) {
+      prefixes.add(`/${seg.slice(0, i).join("/")}`);
+    }
+  }
+  return urls.filter((u) => {
+    if (
       /\/products?\/[a-z0-9_-]+/i.test(u.loc) ||
       /\/dp\/[a-z0-9_-]+/i.test(u.loc) ||
       /\/item\/[a-z0-9_-]+/i.test(u.loc) ||
       // WooCommerce product base `/shop/` with a category-prefixed permalink
       // (`/shop/<cat>/<product>/`) — two or more segments after /shop/.
-      /\/shop\/[a-z0-9_-]+\/[a-z0-9_-]+/i.test(u.loc),
-  );
+      /\/shop\/[a-z0-9_-]+\/[a-z0-9_-]+/i.test(u.loc)
+    ) {
+      return true;
+    }
+    const seg = segments.get(u.loc) ?? [];
+    return (
+      seg.length >= 2 &&
+      !NON_PRODUCT_SECTION_RE.test(seg[0]) &&
+      sections.has(seg[0]) &&
+      // Leaf: nothing nests under this URL in the sitemap.
+      !prefixes.has(`/${seg.join("/")}`)
+    );
+  });
 }
 
 export { httpOptions };
