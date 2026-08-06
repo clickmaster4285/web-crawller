@@ -67,7 +67,8 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 | Page | Route | Status |
 |---|---|---|
 | Overview | `/` | ✅ live stats from saved crawls |
-| Sources (Crawler) | `/sources` | ✅ domain-first crawl UI, config, live progress, store profile, scheduler |
+| Sources (Crawler) | `/sources` | ✅ domain-first crawl UI, config, live progress, store profile, scheduler, **pause/resume/cancel on the live panel (cancel confirmed via the shared `CancelCrawlDialog`, every action confirmed with a sonner toast)** |
+| Active crawls | `/crawler` | ✅ **background-crawler hub** — every in-flight job (queued/claimed/retrying, paused included) + last 15 min finished, polled 2.5s, with per-card Pause / Resume / Cancel (cancel confirmed via dialog; pause/resume/cancel all fire sonner toasts), progress bar, shallow/deep badges, Track links, and a **debug strip with worker id + live HTTP-request count** |
 | Saved crawls | `/crawls` | ✅ history hidden by default + Show/Hide, "+N new" badges, expandable rows, Re-crawl, delete/clear |
 | Store catalogue | `/stores/$origin` | ✅ full searchable + sortable product table, snapshot picker, **All-snapshots union view with per-product price sparklines**, per-snapshot price trails, Delete store, discovery log, paginated rows |
 | Competitors | `/competitors` | ✅ empty-by-default slot flow (your-website picker + 4 competitor slots), per-slot comparison panels, fuzzy matching **on by default**, paginated tables |
@@ -333,6 +334,26 @@ live-Mongo verified). **Phase 3 — DONE ✅** (indexed matching + persisted
 - [x] **Dual-read:** `saveCrawlResult` dual-writes legacy `CrawlResult` +
       the normalized model (`backend/services/crawlSync.js`) — reads still
       come from `CrawlResult` until the new read endpoints flip the UI (D1).
+- [x] **Cooperative control + discovery speed:** `core/control.ts`
+      (`CrawlControl` + `CrawlCancelledError`) checked between units of work
+      (per product URL, per sitemap index child, per HTML-BFS page wave, per
+      Woo/BC API walk page); worker polls `CrawlJob.control` (1.5s) and
+      mirrors it into the engine handle. **Pause** holds the crawl (heartbeats
+      keep running), **resume** clears it, **cancel** → `CrawlCancelledError`
+      → job marked `cancelled`, nothing persisted (queued jobs cancel via the
+      claim sweep; paused queued jobs are skipped by the claim filter). New
+      `/crawler` page (list + pause/resume/cancel) + Sources panel controls +
+      `GET /api/crawl-jobs/active` + `POST /api/crawl-jobs/:id/{pause,resume,
+      cancel}`. Sitemap index children fetch in parallel (6 in flight) and the
+      HTML BFS crawls in waves of 6 — discovery no longer serializes a
+      23-child sitemap index for minutes. Verified: 11 live-Mongo E2E checks
+      (claimed pause/resume/cancel + queued pause/cancel/resume).
+      **Debug:** the engine counts every HTTP request (`HttpOptions.onRequest`,
+      robots.txt + discovery + product fetches, retried attempts included) and
+      reports it live (`CrawlConfig.onRequestCount` → `CrawlJob.progress.requests`);
+      `publicJob` also exposes `workerId`. The Active crawls page shows worker
+      id + request count per job. Verified: engine E2E (exactly 4 requests for
+      a shallow 2-product run) + queue E2E (7 checks).
 - [x] **Worker pool:** `CrawlJob` queue (claim/heartbeat/retry/timeout in
       `services/jobQueue.js`), standalone `backend/workers/worker.mjs`
       (runs the existing crawler engine via Node 24 type-stripping),
@@ -381,16 +402,21 @@ live-Mongo verified). **Phase 3 — DONE ✅** (indexed matching + persisted
       projection — never full docs), `GET /api/stores/:key/snapshots`
       (metadata, `full: false` = shallow check), `GET /api/stores/:key/events`
       (`since=`/`type=` filters, keyset on `at`). Frontend: `api/stores.ts`
-      clients + `stores` query keys (invalidated with crawl data). Verified:
-      8 unit tests + live-Mongo E2E (28 checks). Remaining per D1: flip the
-      pages to these endpoints, then drop `CrawlResult`.
+      clients + `stores` query keys (invalidated with crawl data), plus
+      `DELETE /api/stores/:key` (cascade across the normalized collections +
+      legacy `CrawlResult`). Verified: 8 unit tests + live-Mongo E2E (28
+      checks). **`/stores/$origin` is flipped onto this read path** —
+      server-paginated catalogue (debounced `q=` + keyset-cursor "Load more"
+      accumulation with a search-generation token), snapshot-picker-driven
+      stats/profile/discovery log, current-state price sparklines. Remaining
+      per D1: flip `/crawls`, `/sources`, `/pricing`, then drop `CrawlResult`.
 
 Order of work (each step keeps the app green: `tsc` → `lint` → `build`):
 storage refactor → incremental crawl state → indexed matching →
-events/alerts → store read path. *(Phases 1–4 shipped; the `CrawlResult`
-dual-write still feeds reads until the pages are flipped to the new
-`/api/stores*` read path, per D1 — the endpoints are built and live-Mongo
-verified.)*
+events/alerts → store read path. *(Phases 1–4 shipped and the store read path
+is live — `/stores/$origin` already reads it (D1 flip started); `/crawls`,
+`/sources` and `/pricing` still read the legacy `CrawlResult` via dual-write
+until they're flipped too, then `CrawlResult` is dropped.)*
 
 **Resolved decisions (architecture.md §11 — Phase 1 can start):**
 `CrawlResult` is dual-written through the migration, frozen when the new read

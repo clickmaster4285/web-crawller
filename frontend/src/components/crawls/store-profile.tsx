@@ -77,6 +77,8 @@ export function StoreProfile({
   headerAction,
   onSuggestionClick,
   lastShallow,
+  productCount,
+  urlPattern,
 }: {
   /** Newest saved snapshot for the domain being crawled (or undefined). */
   crawl: SavedCrawl | undefined;
@@ -88,11 +90,23 @@ export function StoreProfile({
   onSuggestionClick?: (url: string) => void;
   /** Newest shallow (sitemap-only) snapshot — rendered as a "last quick check" strip. */
   lastShallow?: SavedCrawl;
+  /**
+   * Product count override — the read path (D1) has no product arrays, so
+   * callers pass the snapshot's `productCount` instead of `crawl.products`.
+   */
+  productCount?: number;
+  /**
+   * URL-pattern override — the read path has no product URLs in snapshots;
+   * callers pass the pattern derived from the first catalogue row (null =
+   * unknown).
+   */
+  urlPattern?: string | null;
 }) {
   const d = crawl?.discovery;
+  const count = productCount ?? crawl?.products.length ?? 0;
   const parseRate =
     crawl && crawl.stats.fetched > 0
-      ? Math.round((crawl.products.length / crawl.stats.fetched) * 100)
+      ? Math.round((count / crawl.stats.fetched) * 100)
       : null;
 
   if (!crawl || !d) {
@@ -171,7 +185,8 @@ export function StoreProfile({
         <ProfileCell
           label="URL pattern"
           value={
-            crawl.products[0] ? productUrlPattern(crawl.products[0].url) : "—"
+            urlPattern ??
+            (crawl.products[0] ? productUrlPattern(crawl.products[0].url) : "—")
           }
           mono
         />
@@ -179,10 +194,7 @@ export function StoreProfile({
           label="Parse rate"
           value={parseRate != null ? `${parseRate}%` : "—"}
         />
-        <ProfileCell
-          label="Products"
-          value={crawl.products.length.toLocaleString()}
-        />
+        <ProfileCell label="Products" value={count.toLocaleString()} />
       </div>
 
       {/* Platform kind + homepage analysis row. */}

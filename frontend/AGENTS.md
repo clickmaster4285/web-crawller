@@ -42,7 +42,7 @@ seeded into MongoDB on backend boot.
 | `npm run build`     | Production build: client + Nitro SSR server →`dist/client`, `dist/server`                                                                    |
 | `npm run build:dev` | Build with development mode                                                                                                                       |
 | `npm run preview`   | Preview the production build                                                                                                                      |
-| `npm run lint`      | ESLint (run this after every change; currently 0 errors, 3 pre-existing`react-refresh/only-export-components` warnings in shadcn UI components) |
+| `npm run lint`      | ESLint (run this after every change; currently 0 errors, 3 pre-existing`react-refresh/only-export-components` warnings in shadcn UI components; `@typescript-eslint/no-unused-vars` is **on as an error** with `^_` arg allowance so dead imports fail lint) |
 | `npm run format`    | Prettier write                                                                                                                                    |
 | `npx tsc --noEmit`  | Typecheck (strict mode)                                                                                                                           |
 | `npm run crawl`    | CLI crawl against obdesignsusa.com, checkpointing to `.crawler/` (gitignored)                                                                  |
@@ -76,14 +76,16 @@ src/
 │       ├── alerts/           # /alerts
 │       ├── reports/          # /reports
 │       ├── crawls/           # /crawls   (Saved crawls history)
+│       ├── crawler/          # /crawler  (Active crawls — pause/resume/cancel)
 │       ├── stores/           # /stores/$origin (full store catalogue page)
 │       └── sources/          # /sources  (Crawler)
 ├── components/
 │   ├── ui/                   # shadcn primitives (Radix + CVA + tailwind-merge)
 │   ├── common/               # shared atoms + state cards (states/StateCard, stock-badge, product-cell, price-delta)
 │   ├── cards/                # StatCard/SectionTitle, CrawlStat, CrawlStatsGrid, CrawlDiffTile, CrawlDiffSummary
-│   ├── crawls/               # saved-crawl UI (store-profile)
+│   ├── crawls/               # saved-crawl UI (store-profile, crawl-row, store-group, crawl-type-toggle, delete-crawl-dialog)
 │   ├── competitors/          # add-competitor-dialog, compare-stores
+│   ├── sources/              # /sources panels (crawl-setup, crawl-progress, crawl-results, crawl-config, active-schedules)
 │   └── layout/               # layout components
 ├── constants/
 │   ├── index.ts              # barrel: ROUTES + sidebar nav groups (INTELLIGENCE_NAV, OPERATIONS_NAV)
@@ -203,14 +205,15 @@ no page imports local mock data. There are no placeholder shells left:
 | Overview         | `/`            | Stat cards + competitor snapshot via`useAnalytics()`; `NoRealDataState` when no crawls exist yet  |
 | Competitors      | `/competitors` | **Empty-by-default slot flow**: a "Your website" picker (persisted via `GET/PUT /api/data/my-store`, used as store A everywhere) + **4 competitor slot cards** (selections persisted under `parity.competitors.slots`), each opening a searchable `StorePickerDialog` of crawled stores that excludes already-used ones. Every filled slot renders its own **ComparePanel** (your website vs that competitor): in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with a **Cheapest** column, all **paginated** (25/page). One **Fuzzy matching** toggle + **Similarity threshold** slider applies to every comparison (both persisted under `parity.competitors.*`); fuzzy matching is **on by default**. A manual **Add competitor** dialog still exists |
 | Saved crawls     | `/crawls`      | Snapshot history per store via`useSavedCrawls()`: history **hidden by default** with a per-store **Show history / Hide history** toggle, a **type filter toggle** (All / Shallow checks / Deep crawls — persisted under `parity.crawls.typeFilter`, filters snapshots *before* grouping so stat cards + stores reflect the subset, per-type counts shown even while filtered, missing `type` reads as deep), "+N new / removed · price changed / no change / first snapshot" badges, **shallow check / deep crawl** badges per snapshot (`CrawlResult.type`, persisted from the job; old snapshots read as deep), expandable rows (stats, changes vs previous, discovery, first-8 products, failures), a **View all N products** link to the full **Store catalogue** page, **Re-crawl** (prefills the crawler via `prefillCrawlerOrigin`), **Delete snapshot** / **Clear history** (`DELETE /api/data/crawl-results/:id` / `/crawl-results?origin=`) |
-| Store catalogue  | `/stores/$origin` | Full-page product list for one store via`useSavedCrawls()` (dynamic route keyed by **normalized origin**): newest-snapshot default with a **snapshot picker** (a stale id falls back to the newest), a crawl **stats row** + **Store profile** card + **Discovery log** (the specific per-candidate reasons behind a crawl result), and **searchable + sortable + paginated** Products tables (50 rows/page, 25/50/100 selector) in two views: a single snapshot, or **All snapshots** — the union of every product with a per-product **price sparkline** + price range + "seen in N snapshots". Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler), **Delete store** (clears all snapshots) and a **Saved crawls** back link; dynamic `document.title` |
+| Store catalogue  | `/stores/$origin` | Full-page product list for one store via the **D1 read path** (`getStore`/`getStoreSnapshots`/`useStoreCatalogue` → `GET /api/stores/:key{,/snapshots,/products}`, dynamic route keyed by **normalized origin**): a **snapshot picker** drives the crawl **stats row** + **Store profile** card + **Discovery log** (the specific per-candidate reasons behind a crawl result); the catalogue table always shows the **current state** — server-paginated (debounced `q=` search applied on the backend, keyset-cursor **Load more** accumulation guarded by a search-generation token so a stale page can't append onto a newer search), per-product **price sparkline** (from the `$slice` priceHistory projection) + point count + range. Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler), **Delete store** (cascade `DELETE /api/stores/:key` — normalized collections + legacy CrawlResult) and a **Saved crawls** back link; dynamic `document.title` |
 | Matched products | `/products`    | **Real matching engine**: `useMatchedProducts()` pulls rows from the backend matcher (`backend/utils/matcher.js` — GTIN > SKU > URL slug > fuzzy name). Your crawled catalogue is matched against each competitor with method + confidence, a your-price / price-gap column, and competitor products you don't carry listed as **Unmatched**; searchable / filterable / paginated. Honestly empty until you set your store on `/competitors` and crawl it + competitors |
 | Pricing          | `/pricing`     | **Real price history**: market/cheapest/your-store trend chart + market-relative price index + "biggest price movements" list, all derived from saved snapshots via `computePriceHistory` (same data feeds the dashboard trend). Honest "crawl again" hint when <2 snapshot events |
 | Catalogue gaps   | `/catalogue`   | Charts/gaps empty until the category/brand gap analysis is built (the matching layer is live); honest`NoRealDataState`               |
 | AI insights      | `/insights`    | `NoRealDataState` (needs the insight engine)                                                     |
 | Alerts           | `/alerts`      | **Real alert feed** from `ProductEvent` (Phase 4): price drops/rises with **% + amount** and severity tiers, new/removed products, stock changes; type filter, server pagination, **unread badge + Mark all read**, per-alert **click-to-read + dismiss**, honest empty states (`hasAnyEvents` distinguishes "no crawls yet" from "filtered/dismissed"). Read/dismiss state is per-user on the backend (`AlertState`, auth-protected routes) |
 | Reports          | `/reports`     | `NoRealDataState` (needs the report generator)                                                   |
-| Data sources     | `/sources`     | Domain-first **Start a crawl** card (domain + collections + **Run crawl** / **Quick check** shallow sitemap-only + schedule + "Recently crawled" chips) + a **Store profile** card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %, product count) — plus a **"Last quick check"** strip when the domain has a shallow snapshot (when it ran + how many new products `stats.discovered` found, or "No new products since the last crawl"; the count is `discovered` because shallow discovery filters the sitemap to new URLs and it's uncapped, unlike `products.length`) + **Live crawl** panel (live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning) + **"What's new since the last crawl"** diff vs the previous snapshot + **Frequency scheduler**. Full snapshot history now lives on the separate **`/crawls`** page. Panel state is **refresh-proof**: config, running `jobId`, expanded saved-crawl row and schedules cache persist via `useLocalStorageState`, and the job id is mirrored to `?job=` so  a reload (even in another tab) reconnects to the running crawl ("Reconnected
+| Active crawls    | `/crawler`     | **Background-crawler hub**: every in-flight job (queued/claimed/retrying, paused ones included) plus the last 15 minutes of finished ones, polled every 2.5s. Each running card shows origin, shallow/deep badge, state badge (Queued / Running (pulse) / Retrying / Paused), live progress bar + processed/total + %, a live-clock "Started Xm Ys ago" line, and **Pause / Resume / Cancel** buttons (pending spinners; **Cancel opens a confirmation dialog** — `CancelCrawlDialog` — warning that no partial result is saved; confirming stops the job cleanly at the next checkpoint and nothing is persisted; every pause/resume/cancel fires a **sonner confirmation toast** — `utils/crawl-controls.ts` — keyed per job so the outcome is visible no matter which page the action came from). A **Debug strip** on each running card shows the claiming **worker id** (matches worker logs; "not claimed yet" while queued) and the **live HTTP-request count** — every attempt counts (robots.txt, discovery, product fetches, retries), driven by `HttpOptions.onRequest` in the engine, surfaced via `onRequestCount` → `CrawlJob.progress.requests`. Finished rows show Done / Cancelled / Failed with product count + requests + time-ago; a **Track** link jumps to the running crawl on `/sources?job=<id>` |
+| Data sources     | `/sources`     | Domain-first **Start a crawl** card (domain + collections + **Run crawl** / **Quick check** shallow sitemap-only + schedule + "Recently crawled" chips) + a **Store profile** card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %, product count) — plus a **"Last quick check"** strip when the domain has a shallow snapshot (when it ran + how many new products `stats.discovered` found, or "No new products since the last crawl"; the count is `discovered` because shallow discovery filters the sitemap to new URLs and it's uncapped, unlike `products.length`) + **Live crawl** panel (live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning, **Pause / Resume / Cancel** — **Cancel opens the same `CancelCrawlDialog` confirmation** as `/crawler`, warning that no partial result is saved; the dialog auto-dismisses if the crawl finishes while open; every pause/resume/cancel fires a **sonner confirmation toast** (`utils/crawl-controls.ts`)) + **"What's new since the last crawl"** diff vs the previous snapshot + **Frequency scheduler**. Full snapshot history now lives on the separate **`/crawls`** page. Panel state is **refresh-proof**: config, running `jobId`, expanded saved-crawl row and schedules cache persist via `useLocalStorageState`, and the job id is mirrored to `?job=` so  a reload (even in another tab) reconnects to the running crawl ("Reconnected
   to running crawl" badge). Running and finished jobs badge **shallow check
   vs deep crawl** (Zap/Radar), zero-fetch shallow runs render a positive
   **"No new products since the last crawl"** panel, and shallow results
@@ -429,7 +432,32 @@ green. Target architecture, with status:
   shallow checks + 6-hourly deep crawls; a store is only auto-scheduled
   when the user registers a schedule (`cadence.enabled` defaults false).
   Worker writes per-type anchors `lastShallowAt`/`lastDeepAt` on Store so
-  the two cadences never blur. **Shallow mode is now REAL (not a full crawl):
+  the two cadences never blur. **Cooperative control (pause/resume/cancel)
+  — shipped.** The engine gained `core/control.ts` (`CrawlControl` handle +
+  `CrawlCancelledError`): the worker polls each job's `control` field
+  (`PARITY_CONTROL_POLL_MS`, default 1.5s) and mirrors it into the handle the
+  engine checks between units of work — before every product URL, per sitemap
+  index child, per HTML-BFS page wave, per Woo/BC API walk page. Pause holds
+  the crawl (heartbeats keep running, so it can't trip the stale-claim
+  release); resume clears it; cancel throws `CrawlCancelledError`, which the
+  worker catches (via the re-exported `isCrawlCancelled`) and marks the job
+  `cancelled` — **no partial result is ever persisted** (the ingest pipeline
+  is skipped entirely). Queued jobs: pause keeps them unclaimed (claim filter
+  skips `control: 'pause'`), cancel sweeps them straight to `cancelled`.
+  `CrawlJob` gained the `control` field + `cancelled` status; `publicJob`
+  now also emits `id`/`origin`/`state`/`control`/`workerId`/`requests`.
+  **Debug data:** the engine counts every HTTP request (`HttpOptions.onRequest`
+  — robots.txt via `Politeness.load`, discovery + product fetches through
+  `fetchWithRetry`; retried attempts each count) and reports it live via
+  `CrawlConfig.onRequestCount`; the worker writes `progress.requests`
+  (throttled beat), `sanitizeResult` carries `stats.requests`, and the
+  Active crawls page shows worker id + request count per job. Queue API additions:
+  `GET /api/crawl-jobs/active` (in-flight + last 15 min finished, results
+  stripped), `POST /api/crawl-jobs/:id/{pause,resume,cancel}`. **Speed —
+  shipped.** Sitemap index children now fetch in parallel (6 in flight) and
+  the HTML BFS crawls in parallel waves of 6 (politeness still throttles
+  every request) — discovery of a 23-child sitemap index / big storefront no
+  longer serializes for minutes. **Shallow mode is now REAL (not a full crawl):
   the engine has a `mode: 'shallow'` sitemap-only path** — `runCrawl` skips
   platform detection, homepage analysis, collection walks, API probes and the
   HTML BFS, filters the sitemap's product URLs against the Product
@@ -503,9 +531,12 @@ green. Target architecture, with status:
   (`since=`/`type=` filters). Backed by `routes/stores.js` +
   `controllers/storeController.js` + `utils/readPath.js` (unit-tested
   cursor/key helpers) and frontend clients in `src/api/stores.ts` (query
-  keys under the `stores` prefix, invalidated with crawl data). Remaining
-  per D1: flip the pages (`/stores/$origin`, `/crawls`, `/sources`,
-  `/pricing`) onto these endpoints, then drop `CrawlResult`. `GET
+  keys under the `stores` prefix, invalidated with crawl data). **`/stores/$origin`
+  is flipped onto this read path ✅** (this session — server-paginated
+  catalogue with debounced `q=` + keyset "Load more", snapshot-picker-driven
+  stats/profile/log, cascade `DELETE /api/stores/:key`). Remaining per D1:
+  flip `/crawls`, `/sources`, `/pricing` onto these endpoints, then drop
+  `CrawlResult`. `GET
   /api/market/products` stays unexposed until `MarketProduct` is written at
   ingest.
 

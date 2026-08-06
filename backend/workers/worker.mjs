@@ -25,8 +25,10 @@ const {
   heartbeat,
   completeJob,
   failJob,
+  cancelJob,
   sleep
 } = require('../services/jobQueue.js');
+const CrawlJob = require('../models/CrawlJob.js');
 const { saveFinishedCrawl } = require('../services/saveCrawl.js');
 const Product = require('../models/Product.js');
 
@@ -95,13 +97,17 @@ async function loadResumeState(origin) {
 const crawlerModule =
   process.env.PARITY_CRAWLER_MODULE ?? '../../frontend/src/lib/crawler/index.ts';
 const crawlerUrl = new URL(crawlerModule, import.meta.url);
-const { runCrawl } = await import(crawlerUrl.href);
+const { runCrawl, isCrawlCancelled } = await import(crawlerUrl.href);
 
 const workerId =
   process.env.PARITY_WORKER_ID ??
   `worker-${process.pid}-${Date.now().toString(36)}`;
 const HEARTBEAT_MS = Number(process.env.PARITY_HEARTBEAT_MS ?? 2000);
 const IDLE_WAIT_MS = Number(process.env.PARITY_WORKER_IDLE_MS ?? 2000);
+// How often the worker re-reads the job's `control` field so a pause/cancel
+// from the API lands within ~1.5s of being requested (the engine itself
+// checks between URLs — this poll bridges the API → engine gap).
+const CONTROL_POLL_MS = Number(process.env.PARITY_CONTROL_POLL_MS ?? 1500);
 
 let shuttingDown = false;
 
@@ -121,7 +127,8 @@ function sanitizeResult(result) {
       fetched: result.stats.fetched,
       skippedUnchanged: result.stats.skippedUnchanged,
       failed: result.stats.failed,
-      durationMs: result.stats.durationMs
+      durationMs: result.stats.durationMs,
+      requests: result.stats.requests ?? 0
     },
     failures: result.stats.failures.slice(0, 100),
     products: result.products.map((p) => ({
@@ -155,11 +162,27 @@ async function processJob(job) {
     lastBeat = now;
     heartbeat(jobId, workerId, patch).catch(() => {});
   };
-  // Liveness beat even when there's nothing to report (discovery in progress).
+  // Liveness beat even when there's nothing to report (discovery in progress
+  // or the engine is paused and waiting).
   const beatTimer = setInterval(
     () => heartbeat(jobId, workerId).catch(() => {}),
     HEARTBEAT_MS
   );
+
+  // Cooperative control bridge: poll the job's `control` field and mirror it
+  // into the object the engine checks between URLs. The heartbeat timer keeps
+  // the job alive while paused; a cancel here throws CrawlCancelledError from
+  // the engine, and the catch below marks the job cancelled without persisting
+  // a partial result.
+  const controlRef = { action: null };
+  const controlTimer = setInterval(async () => {
+    try {
+      const doc = await CrawlJob.findById(jobId).select('control').lean();
+      controlRef.action = doc?.control ?? null;
+    } catch {
+      // Transient DB error — keep the last known control state.
+    }
+  }, CONTROL_POLL_MS);
 
   try {
     const isShallow = type === 'shallow';
@@ -183,6 +206,7 @@ async function processJob(job) {
       mode: isShallow ? 'shallow' : 'deep',
       knownUrls,
       resumeState,
+      control: controlRef,
       delayMs: p.delayMs,
       maxConcurrencyPerHost: p.maxConcurrencyPerHost,
       maxPages: p.maxPages ?? undefined,
@@ -201,7 +225,10 @@ async function processJob(job) {
         }
         beat(patch);
       },
-      onDiscoveryProgress: (discovery) => beat({ discovery })
+      onDiscoveryProgress: (discovery) => beat({ discovery }),
+      // Debug: surface the live HTTP-request count on the job (throttled by
+      // beat, so a 10k-page crawl doesn't write Mongo per request).
+      onRequestCount: (count) => beat({ requests: count })
     });
 
     const sanitized = sanitizeResult(result);
@@ -228,6 +255,7 @@ async function processJob(job) {
       progress: {
         processed: result.products.length,
         total: result.stats.discovered,
+        requests: result.stats.requests ?? 0,
         fetchStartedAt
       }
     });
@@ -237,10 +265,19 @@ async function processJob(job) {
         `${result.stats.failed} failed) in ${result.stats.durationMs}ms`
     );
   } catch (error) {
+    // A user-requested cancel is not a failure: nothing is persisted and the
+    // job goes `cancelled` (the API's control request, mirrored into
+    // controlRef, made the engine throw CrawlCancelledError).
+    if (isCrawlCancelled(error)) {
+      await cancelJob(jobId, workerId);
+      console.log(`🗑️  ${workerId} cancelled crawl for ${origin}`);
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error);
     await failJob(jobId, workerId, message);
   } finally {
     clearInterval(beatTimer);
+    clearInterval(controlTimer);
   }
 }
 

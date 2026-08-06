@@ -10,5 +10,7 @@ router.get('/:key/products', storeController.listProducts);
 router.get('/:key/snapshots', storeController.listSnapshots);
 router.get('/:key/events', storeController.listEvents);
 router.get('/:key', storeController.getStore);
+// Cascade delete — normalized collections + legacy CrawlResult (D1).
+router.delete('/:key', storeController.deleteStore);
 
 module.exports = router;

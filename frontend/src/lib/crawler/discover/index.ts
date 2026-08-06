@@ -28,6 +28,7 @@ import {
   probeWooCommerceApi,
 } from "../adapters/woocommerce.ts";
 import { discoverByHtmlCrawl } from "./html-crawl.ts";
+import { checkCancelled, waitForControl } from "../core/control.ts";
 import { analyzeHomepage } from "./homepage.ts";
 import { detectPlatform } from "./platform.ts";
 import {
@@ -142,6 +143,10 @@ export async function discoverProducts(
     });
   };
 
+  // Cooperative control: a cancel lands even during the platform-detection
+  // / homepage step (single requests, checked before and after the block).
+  checkCancelled(config.control);
+
   // ── 0. Platform detection + homepage analysis ────────────────────────
   // Skipped entirely in shallow mode: a sitemap-only check must cost ~1
   // request, and detection/homepage analysis would add 2+ more. The
@@ -239,6 +244,7 @@ export async function discoverProducts(
   // Shallow checks are sitemap-only — collection walks add requests per page.
   if (!shallow && config.collections?.length) {
     for (const collection of config.collections) {
+      await waitForControl(config.control);
       try {
         log.push(`Walking collection "${collection}"…`);
         const handles = await discoverCollectionHandles(
@@ -271,7 +277,8 @@ export async function discoverProducts(
   let sitemapError: string | undefined;
 
   for (const candidate of candidates) {
-    const result = await fetchSitemapCandidate(candidate, opts);
+    await waitForControl(config.control);
+    const result = await fetchSitemapCandidate(candidate, opts, config.control);
     candidateResults.push(result);
     if (result.status === "html") {
       log.push(
@@ -363,7 +370,12 @@ export async function discoverProducts(
     log.push("WooCommerce API: probing /wp-json/wc/v3/products…");
     const probe = await probeWooCommerceApi(config.origin, opts);
     if (probe.status === "public") {
-      const woo = await discoverWooCommerceProducts(config.origin, opts);
+      const woo = await discoverWooCommerceProducts(
+        config.origin,
+        opts,
+        undefined,
+        config.control,
+      );
       let wooAdded = 0;
       for (const u of woo.urls) {
         if (!urlSet.has(u)) wooAdded++;
@@ -422,7 +434,12 @@ export async function discoverProducts(
     log.push("BigCommerce API: probing /api/storefront/catalog/products…");
     const probe = await probeBigCommerceApi(config.origin, opts);
     if (probe.status === "public") {
-      const bc = await discoverBigCommerceProducts(config.origin, opts);
+      const bc = await discoverBigCommerceProducts(
+        config.origin,
+        opts,
+        undefined,
+        config.control,
+      );
       let bcAdded = 0;
       for (const u of bc.urls) {
         if (!urlSet.has(u)) bcAdded++;
@@ -486,6 +503,7 @@ export async function discoverProducts(
       const html = await discoverByHtmlCrawl(config.origin, opts, {
         maxPages: DISCOVERY_MAX_PAGES,
         maxDepth: DISCOVERY_MAX_DEPTH,
+        control: config.control,
         onPageVisited: (pagesVisited, productsFound) => {
           config.onDiscoveryProgress?.({
             phase: "htmlCrawl",

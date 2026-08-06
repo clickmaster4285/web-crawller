@@ -558,8 +558,11 @@ layer, but never as a permanent store:
   snapshots, events) goes live and the UI flips to it, stop writing
   `CrawlResult`. No new docs; the collection is frozen. ✅ **The read path
   endpoints are built and live-Mongo verified (Phase 5, `routes/stores.js` +
-  `storeController.js`)** — the remaining freeze step is flipping the pages
-  (`/stores/$origin`, `/crawls`, `/sources`, `/pricing`) onto them.
+  `storeController.js`)** and **`/stores/$origin` is flipped onto them**
+  (D1 read path: server-paginated catalogue with debounced `q=` + keyset
+  cursors, snapshot-picker-driven stats/profile/log, cascade `DELETE
+  /api/stores/:key`) — the remaining freeze step is flipping `/crawls`,
+  `/sources`, `/pricing` onto the same endpoints.
 - **Phase 5 — drop.** After one full release on the new read path, `drop()`
   the collection in a migration script. The backfill already reproduced
   everything in `Product` / `Snapshot` / `ProductEvent`, so nothing is lost —

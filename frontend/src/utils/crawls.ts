@@ -79,6 +79,24 @@ export function computeCrawlDiff<T extends DiffableProduct>(
   };
 }
 
+/**
+ * Crawl kind of a saved crawl: "shallow" = sitemap-only check, "deep" = full
+ * catalogue crawl. Snapshots saved before the `type` field existed were all
+ * full crawls, so a missing type reads as deep.
+ */
+export function crawlType(crawl: { type?: string }): "shallow" | "deep" {
+  return (crawl.type ?? "deep") === "shallow" ? "shallow" : "deep";
+}
+
+/** Max-pages select modes: presets, a free "Custom…" input, or unlimited. */
+export type MaxPagesMode = "500" | "1000" | "5000" | "custom" | "unlimited";
+
+/** Parses the Custom… input into a positive page cap (`null` when empty/invalid). */
+export function parseCustomMaxPages(value: string): number | null {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 /** Human-readable date for a crawl timestamp (e.g. "Aug 3, 2026, 2:05 PM"). */
 export function formatCrawlDate(iso: string): string {
   const date = new Date(iso);

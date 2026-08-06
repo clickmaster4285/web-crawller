@@ -55,6 +55,32 @@ and events → alerts is shipped and live-Mongo verified**. **Next: Phase 5
 
 Also shipped along the way:
 
+- **Background-crawler controls — pause / resume / cancel.** A new
+  **Active crawls** page (`/crawler`, sidebar) lists every in-flight job
+  (queued/claimed/retrying, paused ones included) + the last 15 min finished,
+  polling every 2.5s, with per-card Pause / Resume / Cancel, live progress,
+  shallow/deep badges and Track links. The Sources live panel got the same
+  controls — with cancel behind the same confirmation dialog, and every
+  pause/resume/cancel confirmed with a sonner toast. The engine checks a cooperative `CrawlControl` handle between
+  units of work (per URL, per sitemap child, per HTML-BFS wave, per API-walk
+  page); a cancelled crawl throws `CrawlCancelledError` and the job lands
+  `cancelled` with **nothing persisted** (queued jobs cancel via a claim
+  sweep). New queue API: `GET /api/crawl-jobs/active` +
+  `POST /api/crawl-jobs/:id/{pause,resume,cancel}`. Verified: 11 live-Mongo
+  E2E checks.
+- **Discovery speed** — sitemap index children now fetch in parallel (6 in
+  flight) and the HTML BFS crawls in waves of 6 (politeness still throttles
+  every request); a 23-child sitemap index that used to serialize discovery
+  for minutes is now near-parallel. The Sources ETA warm-up floor dropped
+  5s → 2s so an estimate appears almost as soon as fetching starts.
+- **Debug data on Active crawls** — each running card shows the claiming
+  **worker id** (matches worker logs) and a **live HTTP-request count**: the
+  engine counts every request through `HttpOptions.onRequest` (robots.txt,
+  discovery, product fetches; retried attempts each count), reports it via
+  `CrawlConfig.onRequestCount`, and the worker writes it to
+  `CrawlJob.progress.requests` (throttled). `publicJob` exposes `workerId` +
+  `requests`; finished rows show request totals too. Verified: engine E2E
+  (exactly 4 requests for a shallow 2-product run) + queue E2E (7 checks).
 - **Quick check** — manual shallow sitemap-only crawl (~1 request when nothing
   changed), not just scheduler-driven.
 - **Shallow/deep awareness across the UI** — badges on the Sources live panel
@@ -94,20 +120,22 @@ code") — the granular version of the phase table above.
      `worker.mjs` pool + single `scheduler.mjs`).
    - **CI pipeline.**
 2. **D1 endgame — "freeze, then drop" `CrawlResult`**
-   - *Freeze (Phase 3 step, not yet done):* the new read path
-     (`/api/stores/:origin/products`, snapshots, events) isn't built, so the
-     UI (`/stores/$origin`, `/crawls`, `/sources`, `/pricing`) still reads the
-     legacy `CrawlResult` via dual-write.
+   - *Freeze (in progress):* the new read path is built and
+     **`/stores/$origin` is flipped onto it** (server-paginated catalogue,
+     debounced `q=`, keyset "Load more", cascade delete); `/crawls`,
+     `/sources`, `/pricing` still read the legacy `CrawlResult` via
+     dual-write until they're flipped too.
    - *Drop (Phase 5):* after one release on the new read path, `drop()` the
      collection in a migration script (the backfill already reproduced it).
 3. **§6 read-path endpoints — ✅ built (Phase 5)** — `GET /api/stores`,
    `/api/stores/:key` (profile + latest snapshot), `/api/stores/:key/products`
    (keyset-cursor pagination + `q=` search + `$slice` sparklines),
-   `/api/stores/:key/snapshots`, `/api/stores/:key/events?since=&type=` —
-   backed by the normalized collections (`utils/readPath.js` unit-tested, 28
-   E2E checks), plus frontend `api/stores.ts` clients + query keys. **Still
-   open:** flip the pages (`/stores/$origin`, `/crawls`, `/sources`,
-   `/pricing`) onto them (the D1 "freeze" step), then drop `CrawlResult`.
+   `/api/stores/:key/snapshots`, `/api/stores/:key/events?since=&type=`, and
+   `DELETE /api/stores/:key` (cascade) — backed by the normalized collections
+   (`utils/readPath.js` unit-tested, 28 E2E checks), plus frontend
+   `api/stores.ts` clients + query keys. **Flipped:** `/stores/$origin` ✅
+   (this session). **Still open:** flip `/crawls`, `/sources`, `/pricing`
+   (the D1 "freeze" step), then drop `CrawlResult`.
    `GET /api/market/products` stays unexposed until `MarketProduct` is
    written at ingest.
 4. **Accepted trade-offs / future work (monitor, don't block)**

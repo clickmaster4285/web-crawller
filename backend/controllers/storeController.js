@@ -25,6 +25,8 @@ const Store = require('../models/Store');
 const Product = require('../models/Product');
 const Snapshot = require('../models/Snapshot');
 const ProductEvent = require('../models/ProductEvent');
+const CrawlResult = require('../models/CrawlResult');
+const { normalizeHost } = require('../utils/identity');
 const {
   encodeCursor,
   cursorFilter,
@@ -189,6 +191,58 @@ const listSnapshots = async (req, res) => {
   }
 };
 
+/**
+ * DELETE /api/stores/:key — removes a store everywhere: the normalized
+ * collections (Store / Product / Snapshot / ProductEvent) plus the legacy
+ * `CrawlResult` docs whose origin normalizes to the key, so the store
+ * disappears from BOTH read paths (D1 freeze keeps the legacy UI working
+ * until every page flips).
+ */
+const deleteStore = async (req, res) => {
+  try {
+    const key = parseStoreKey(req.params.key);
+    if (!key) {
+      return res.status(400).json({ success: false, message: 'Invalid store key' });
+    }
+
+    const store = await Store.findOne({ key }).lean();
+    // Legacy CrawlResult docs store full origins (which may vary http/https
+    // across runs) — collect the ones that normalize to this key. `distinct`
+    // is fine here: origins are bounded and CrawlResult is frozen (D1).
+    const origins = new Set(store?.origin ? [store.origin] : []);
+    const distinct = await CrawlResult.distinct('origin');
+    for (const origin of distinct) {
+      if (normalizeHost(origin) === key) origins.add(origin);
+    }
+
+    const [products, snapshots, events, legacy] = await Promise.all([
+      Product.deleteMany({ key }),
+      Snapshot.deleteMany({ key }),
+      ProductEvent.deleteMany({ key }),
+      origins.size > 0
+        ? CrawlResult.deleteMany({ origin: { $in: [...origins] } })
+        : Promise.resolve({ deletedCount: 0 })
+    ]);
+    if (store) await Store.deleteOne({ key });
+
+    res.json({
+      success: true,
+      data: {
+        key,
+        deleted: {
+          products: products.deletedCount,
+          snapshots: snapshots.deletedCount,
+          events: events.deletedCount,
+          legacy: legacy.deletedCount
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Delete store error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 /** GET /api/stores/:key/events?since=&type=&limit= — the "what's new" change log. */
 const listEvents = async (req, res) => {
   try {
@@ -223,4 +277,4 @@ const listEvents = async (req, res) => {
   }
 };
 
-module.exports = { listStores, getStore, listProducts, listSnapshots, listEvents };
+module.exports = { listStores, getStore, listProducts, listSnapshots, listEvents, deleteStore };

@@ -1,63 +1,34 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Archive,
-  ArrowUpRight,
-  CalendarClock,
-  CircleCheck,
-  Eye,
-  Globe,
-  Link2,
-  Loader2,
-  Play,
-  Radar,
-  RefreshCw,
-  TriangleAlert,
-  Zap,
-} from "lucide-react";
-
-import { cn } from "@/lib/utils";
+import { Archive, Eye, PlayCircle, TriangleAlert } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { StoreProfile } from "@/components/crawls/store-profile";
-import { DiscoveryLog } from "@/components/crawls/discovery-log";
-import { SectionTitle } from "@/components/cards/stat-card";
-import {
-  CrawlDiffSummary,
-  NewProductsList,
-} from "@/components/cards/crawl-diff-summary";
-import { CrawlStatsGrid } from "@/components/cards/crawl-stats-grid";
-import { ProductCell } from "@/components/common/product-cell";
-import { StockBadge } from "@/components/common/stock-badge";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
+import { CancelCrawlDialog } from "@/components/crawls/cancel-crawl-dialog";
+import { CrawlSetupPanel } from "@/components/sources/crawl-setup-panel";
+import { CrawlProgressPanel } from "@/components/sources/crawl-progress-panel";
+import { CrawlResultsPanel } from "@/components/sources/crawl-results-panel";
+import { CrawlConfigPanel } from "@/components/sources/crawl-config-panel";
+import { ActiveSchedulesPanel } from "@/components/sources/active-schedules-panel";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
-import { Switch } from "@/components/ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { useSavedCrawls } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import { useWorkspace } from "@/hooks/useWorkspace";
 import { invalidateCrawlData, type SavedCrawl } from "@/api";
 import {
+  cancelCrawlJob,
   cancelCrawlSchedule,
   getCrawlProgress,
   getCrawlSchedules,
+  pauseCrawlJob,
+  resumeCrawlJob,
   scheduleCrawl,
   startCrawl,
   type CrawlFrequency,
   type CrawlJob,
-  type CrawlJobDiscovery,
   type CrawlRunInput,
   type CrawlRunResult,
   type CrawlSchedule,
@@ -65,10 +36,16 @@ import {
 } from "@/lib/crawl";
 import {
   computeCrawlDiff,
-  formatCrawlDate,
+  crawlType,
   normalizeOrigin,
+  parseCustomMaxPages,
+  type MaxPagesMode,
 } from "@/utils/crawls";
-import { formatDuration, formatPrice } from "@/utils/format";
+import {
+  notifyCrawlControl,
+  notifyCrawlControlError,
+  type CrawlControlVariables,
+} from "@/utils/crawl-controls";
 
 /** Route search params — `?job=` reconnects to a specific crawl job. */
 type SourcesSearch = {
@@ -152,8 +129,8 @@ function SourcesPage() {
     "parity.sources.concurrency",
     2,
   );
-  // Max pages: preset modes plus a free "Custom…" input (e.g. 5 or 10 for
-  // quick test crawls). The effective cap is derived below.
+  // Max pages: preset modes plus a free "Custom…" free number input (e.g. 5
+  // or 10 for quick test crawls). The effective cap is derived below.
   const [maxPagesMode, setMaxPagesMode] = useLocalStorageState<MaxPagesMode>(
     "parity.sources.maxPagesMode",
     "5000",
@@ -207,6 +184,42 @@ function SourcesPage() {
       setJobId(id);
     },
   });
+
+  // The running crawl being considered for cancellation (the confirmation
+  // dialog target) — null while no dialog is open.
+  const [cancelTarget, setCancelTarget] = useState<CrawlJob | null>(null);
+
+  // Cooperative control — pause/resume/cancel the running job from the
+  // progress panel (the same endpoints the Active crawls page uses).
+  const control = useMutation({
+    mutationFn: ({ id, action }: CrawlControlVariables) =>
+      action === "pause"
+        ? pauseCrawlJob({ data: id })
+        : action === "resume"
+          ? resumeCrawlJob({ data: id })
+          : cancelCrawlJob({ data: id }),
+    onSuccess: (_data, variables) => {
+      // Invalidate the specific job's progress so the next poll reflects the
+      // new control state (pause/resume/cancel) without waiting 800ms.
+      void queryClient.invalidateQueries({
+        queryKey: ["crawl-progress", variables.id],
+      });
+      // Close the cancel confirmation once the cancel itself lands — a
+      // pause/resume settling must not dismiss an open cancel dialog.
+      if (variables.action === "cancel") setCancelTarget(null);
+      // Confirmation toast — visible no matter which page started the action.
+      notifyCrawlControl(variables.action, variables.label, variables.id);
+    },
+    onError: (error, variables) =>
+      notifyCrawlControlError(variables.action, error),
+  });
+
+  // True only while the confirmed cancel for the dialog's job is in flight
+  // (a pending pause/resume must not disable the dialog's buttons).
+  const cancelling =
+    control.isPending &&
+    control.variables?.action === "cancel" &&
+    control.variables?.id === cancelTarget?.id;
 
   // Recurring crawls — registered on the server, ticked by its 30s interval.
   const schedulesQuery = useQuery({
@@ -273,6 +286,17 @@ function SourcesPage() {
   // results layout).
   const shallowRun = job?.type === "shallow";
 
+  // Dismiss the cancel confirmation if the crawl stops while it's open (it
+  // finished, was cancelled elsewhere, or the poll lost it) — cancelling a
+  // dead job would 404. Keyed on the *status* only: the 800ms poll hands back
+  // a fresh job object every tick, and depending on the whole object would
+  // re-run this effect on every poll for no reason.
+  useEffect(() => {
+    if (cancelTarget != null && job?.status !== "running") {
+      setCancelTarget(null);
+    }
+  }, [cancelTarget, job?.status]);
+
   // When a crawl finishes and persists, every crawl-derived query is stale —
   // refresh the saved-crawls list (and mark the rest stale) so results show
   // up without a manual reload.
@@ -317,11 +341,13 @@ function SourcesPage() {
     fetchStartedAt != null ? Math.max(0, now - fetchStartedAt) : 0;
   // Adaptive ETA from the observed fetch rate (products per ms), so it
   // responds to crawl parameters as they change: rate limits slow it down,
-  // warmup speeds it up, and a growing discovery count extends it. A 5s
-  // warm-up floor on fetch time avoids a briefly absurd optimistic estimate
-  // from the very first tick's tiny denominator.
+  // warmup speeds it up, and a growing discovery count extends it. A short
+  // 2s warm-up floor on fetch time avoids a briefly absurd optimistic
+  // estimate from the very first tick's tiny denominator — but the ETA now
+  // appears almost immediately once fetching starts, instead of hiding for
+  // 5+ seconds.
   const ratePerMs =
-    job && job.total > 0 && fetchElapsedMs >= 5000
+    job && job.total > 0 && fetchElapsedMs >= 2000
       ? job.processed / fetchElapsedMs
       : 0;
   const remainingMs =
@@ -383,6 +409,13 @@ function SourcesPage() {
     setJobId(null);
   };
 
+  /** Fills the crawler from a discovery suggestion/finding action link. */
+  const actionUrl = (url: string) => {
+    setCrawlOrigin(url);
+    setCollections("");
+    setJobId(null);
+  };
+
   // Newest saved snapshot for the domain currently entered — feeds the
   // compact Store profile card (platform / sitemap / robots.txt detection).
   const profileKey = normalizeOrigin(crawlOrigin.trim());
@@ -400,7 +433,9 @@ function SourcesPage() {
   const lastShallowCrawl = useMemo(
     () =>
       (saved.data?.data ?? []).find(
-        (c) => c.type === "shallow" && normalizeOrigin(c.origin) === profileKey,
+        (c) =>
+          crawlType(c) === "shallow" &&
+          normalizeOrigin(c.origin) === profileKey,
       ),
     [saved.data, profileKey],
   );
@@ -458,159 +493,56 @@ function SourcesPage() {
   return (
     <div>
       <PageHeader
-        // eyebrow="Crawl"
         title="Crawler"
-        // description="Enter a store domain and the engine discovers its catalogue — sitemap + HTML crawl, then per-product extraction with robots.txt and rate-limit respect. Every result is saved, so re-crawling only picks up what's new."
         actions={
-          <Button asChild variant="outline">
-            <Link to="/crawls">
-              <Archive className="size-4" /> Saved crawls
-            </Link>
-          </Button>
+          <>
+            <Button asChild variant="outline">
+              <Link to="/crawler">
+                <PlayCircle className="size-4" /> Active crawls
+              </Link>
+            </Button>
+            <Button asChild variant="outline">
+              <Link to="/crawls">
+                <Archive className="size-4" /> Saved crawls
+              </Link>
+            </Button>
+          </>
         }
       />
 
       <div className="space-y-8 px-6 py-8">
         {/* ── 1. The domain — primary action, top of the page ─────────── */}
-        <section className="border border-border bg-card">
-          <div className="flex items-center gap-2 border-b border-border px-6 py-4">
-            <Globe className="size-4 text-muted-foreground" />
-            <h2 className="font-display text-xl">Start a crawl</h2>
-          </div>
-          <div className="space-y-4 p-6">
-            <div className="grid gap-2">
-              <Label htmlFor="crawl-origin">Store domain</Label>
-              <Input
-                id="crawl-origin"
-                value={crawlOrigin}
-                onChange={(e) => {
-                  setCrawlOrigin(e.target.value);
-                  setJobId(null);
-                }}
-                placeholder="https://store.example.com"
-                className="font-mono"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="crawl-collections">
-                Collections{" "}
-                <span className="font-normal text-muted-foreground">
-                  (optional)
-                </span>
-              </Label>
-              <Input
-                id="crawl-collections"
-                value={collections}
-                onChange={(e) => {
-                  setCollections(e.target.value);
-                  setJobId(null);
-                }}
-                placeholder="silicone-toys, bundles — leave empty for the full catalogue"
-              />
-            </div>
-
-            {recentDomains.length > 0 ? (
-              <div className="border-t border-border pt-4">
-                <p className="label-caps mb-2">Recently crawled</p>
-                <div className="flex flex-wrap gap-2">
-                  {recentDomains.map((c) => (
-                    <button
-                      key={c._id}
-                      type="button"
-                      onClick={() => pickRecent(c)}
-                      className="group flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs transition-colors hover:border-primary/40 hover:bg-muted"
-                    >
-                      <Globe className="size-3 text-muted-foreground group-hover:text-primary" />
-                      <span className="font-mono">
-                        {normalizeOrigin(c.origin)}
-                      </span>
-                      <span className="text-muted-foreground">
-                        · {c.products.length} products
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
-              <Button
-                size="lg"
-                onClick={runCrawl}
-                disabled={start.isPending || isRunning || !crawlOrigin.trim()}
-              >
-                {pendingDeep || isRunning ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Play className="size-4" />
-                )}
-                {pendingDeep
-                  ? "Starting…"
-                  : isRunning
-                    ? "Crawling…"
-                    : "Run crawl"}
-              </Button>
-              <Button
-                variant="outline"
-                size="lg"
-                onClick={runQuickCheck}
-                disabled={start.isPending || isRunning || !crawlOrigin.trim()}
-                title="Sitemap-only check — fetches only new product pages (~1 request when nothing changed). The stored catalogue is never touched."
-              >
-                {pendingShallow ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Zap className="size-4" />
-                )}
-                {pendingShallow ? "Checking…" : "Quick check"}
-              </Button>
-              <div className="flex flex-wrap items-center gap-2">
-                <Select
-                  value={frequency}
-                  onValueChange={(v) => setFrequency(v as CrawlFrequency)}
-                >
-                  <SelectTrigger className="w-[150px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1h">Every hour</SelectItem>
-                    <SelectItem value="6h">Every 6 hours</SelectItem>
-                    <SelectItem value="daily">Daily</SelectItem>
-                    <SelectItem value="weekly">Weekly</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button
-                  variant="outline"
-                  onClick={scheduleIt}
-                  disabled={schedule.isPending || !crawlOrigin.trim()}
-                >
-                  <CalendarClock className="size-4" />
-                  Schedule recurring
-                </Button>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Quick check runs a sitemap-only crawl — it fetches just the new
-              product pages (≈1 request when nothing changed). Recurring crawls
-              run automatically via the scheduler (schedules persist on the
-              server, so they survive restarts). Re-scheduling an origin
-              replaces its existing schedule.
-            </p>
-          </div>
-        </section>
+        <CrawlSetupPanel
+          crawlOrigin={crawlOrigin}
+          onOriginChange={(value) => {
+            setCrawlOrigin(value);
+            setJobId(null);
+          }}
+          collections={collections}
+          onCollectionsChange={(value) => {
+            setCollections(value);
+            setJobId(null);
+          }}
+          recentDomains={recentDomains}
+          onPickRecent={pickRecent}
+          frequency={frequency}
+          onFrequencyChange={(value) => setFrequency(value)}
+          onRunCrawl={runCrawl}
+          onRunQuickCheck={runQuickCheck}
+          onSchedule={scheduleIt}
+          running={isRunning}
+          pendingDeep={pendingDeep}
+          pendingShallow={pendingShallow}
+          startPending={start.isPending}
+          schedulePending={schedule.isPending}
+        />
 
         {/* ── 1.5 Store profile — detection from the latest crawl ─────── */}
         <StoreProfile
           crawl={profileCrawl}
           domain={profileKey}
           lastShallow={lastShallowCrawl}
-          onSuggestionClick={(url) => {
-            // "Crawl {linked store}" — prefill the crawler with the store
-            // this site links out to (e.g. a corporate site → its shop).
-            setCrawlOrigin(url);
-            setCollections("");
-            setJobId(null);
-          }}
+          onSuggestionClick={actionUrl}
           headerAction={
             profileCrawl && profileCrawl.products.length > 0 ? (
               <Button asChild variant="outline" size="sm" className="h-7">
@@ -624,189 +556,36 @@ function SourcesPage() {
 
         {/* ── 2. Live progress while a crawl runs ─────────────────────── */}
         {isRunning && job ? (
-          <section className="space-y-3 border border-border bg-card p-6">
-            {reconnected ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge
-                  variant="secondary"
-                  className="gap-1.5 border-primary/30 font-normal"
-                >
-                  <RefreshCw className="size-3 text-primary" />
-                  Reconnected to running crawl
-                </Badge>
-                <span className="text-xs text-muted-foreground">
-                  Progress resumed from the server — this crawl was started
-                  before this page loaded.
-                </span>
-              </div>
-            ) : null}
-            <div className="flex items-baseline justify-between gap-4 text-sm">
-              <span className="flex flex-wrap items-center gap-2 text-muted-foreground">
-                {job.total === 0
-                  ? "Discovering product URLs…"
-                  : "Crawling product URLs…"}
-                <Badge
-                  variant={shallowRun ? "secondary" : "outline"}
-                  className="gap-1 font-normal"
-                >
-                  {shallowRun ? (
-                    <Zap className="size-3" />
-                  ) : (
-                    <Radar className="size-3" />
-                  )}
-                  {shallowRun ? "shallow check" : "deep crawl"}
-                </Badge>
-              </span>
-              <span className="numeric">
-                {job.total > 0
-                  ? `${job.processed.toLocaleString()} / ${job.total.toLocaleString()}`
-                  : "—"}
-              </span>
-            </div>
-            <Progress
-              value={
-                job.total > 0
-                  ? Math.round((job.processed / job.total) * 100)
-                  : 0
-              }
-              aria-label="Crawl progress"
-            />
-            <div className="flex items-center justify-between gap-4 text-xs text-muted-foreground">
-              <span>
-                {fetchStartedAt != null
-                  ? `Discovery ${formatDuration(discoveryMs)} · Fetch ${formatDuration(fetchElapsedMs)}`
-                  : `Discovering ${formatDuration(discoveryMs)}`}
-              </span>
-              <span>
-                {remainingMs != null
-                  ? `~${formatDuration(remainingMs)} remaining`
-                  : "Estimating time…"}
-              </span>
-            </div>
-
-            {/* Live discovery diagnostics — real sitemap/page counts while
-                discovery runs (job.total stays 0 until the fetch phase), plus
-                a verbose step-by-step log of what the engine is doing. */}
-            {liveDiscovery ? (
-              <div className="rounded-md border border-border bg-muted/40 p-3 text-xs">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-muted-foreground">
-                    {discoveryPhaseLabel(liveDiscovery.phase)}
-                  </span>
-                  <span className="numeric">
-                    {liveDiscovery.urlsFound.toLocaleString()} product URLs
-                  </span>
-                </div>
-                <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
-                  {liveDiscovery.sitemapUrls > 0 ? (
-                    <span>
-                      Sitemap: {liveDiscovery.sitemapUrls.toLocaleString()}
-                    </span>
-                  ) : null}
-                  {liveDiscovery.htmlPagesVisited > 0 ? (
-                    <span>
-                      Pages visited:{" "}
-                      {liveDiscovery.htmlPagesVisited.toLocaleString()}
-                    </span>
-                  ) : null}
-                  {liveDiscovery.htmlUrls > 0 ? (
-                    <span>
-                      HTML URLs: {liveDiscovery.htmlUrls.toLocaleString()}
-                    </span>
-                  ) : null}
-                  {liveDiscovery.collectionHandles > 0 ? (
-                    <span>
-                      Collections:{" "}
-                      {liveDiscovery.collectionHandles.toLocaleString()}
-                    </span>
-                  ) : null}
-                </div>
-
-                {/* Verbose live log — the current step bolded, then the trail. */}
-                {liveDiscovery.log.length > 0 ? (
-                  <div className="mt-2.5 max-h-36 space-y-1 overflow-auto border-t border-border pt-2.5">
-                    {liveDiscovery.log.slice(-8).map((line, i) => {
-                      const isLast =
-                        i === Math.min(liveDiscovery.log.length, 8) - 1;
-                      return (
-                        <p
-                          key={`${line}-${i}`}
-                          className={cn(
-                            "flex gap-2",
-                            isLast
-                              ? "font-medium text-foreground"
-                              : "text-muted-foreground",
-                          )}
-                        >
-                          <span
-                            className={cn(
-                              "mt-1.5 size-1 shrink-0 rounded-full",
-                              isLast ? "animate-pulse bg-accent" : "bg-border",
-                            )}
-                          />
-                          <span className="leading-snug">{line}</span>
-                        </p>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {/* The parameters this job actually runs with (captured at
-                start) — so it's clear when the panel config changed. */}
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="label-caps text-muted-foreground">
-                Running with
-              </span>
-              <Badge variant="secondary" className="font-normal">
-                {(job.params.delayMs / 1000).toLocaleString()}s delay
-              </Badge>
-              <Badge variant="secondary" className="font-normal">
-                {job.params.maxConcurrencyPerHost} concurrent
-              </Badge>
-              {job.params.maxPages != null ? (
-                <Badge variant="secondary" className="font-normal">
-                  max {job.params.maxPages.toLocaleString()} pages
-                </Badge>
-              ) : null}
-              <Badge variant="secondary" className="font-normal">
-                {job.params.respectRobotsTxt
-                  ? "robots respected"
-                  : "robots ignored"}
-              </Badge>
-              <Badge variant="secondary" className="font-normal">
-                {job.params.productOnly ? "product-only" : "all pages"}
-              </Badge>
-              <Badge variant="secondary" className="font-normal">
-                {job.params.storeSnapshots ? "snapshots on" : "no snapshots"}
-              </Badge>
-              <Badge variant="secondary" className="font-normal">
-                {job.params.useBrowser ? "browser rendering" : "http only"}
-              </Badge>
-              <Badge variant="secondary" className="font-normal">
-                {job.params.proxy ? "residential proxy" : "direct"}
-              </Badge>
-            </div>
-
-            {!paramsMatch ? (
-              <Alert className="border-warning/50 [&>svg]:text-warning">
-                <TriangleAlert className="size-4" />
-                <AlertTitle>Config changed mid-run</AlertTitle>
-                <AlertDescription>
-                  This crawl is using the parameters it started with. Your panel
-                  settings changed after it began — they apply to the next
-                  crawl.
-                </AlertDescription>
-              </Alert>
-            ) : null}
-
-            <p className="text-xs text-muted-foreground">
-              {job.total === 0
-                ? `Reading sitemaps and following internal links — ${job.params.respectRobotsTxt === false ? "robots.txt ignored" : "robots.txt respected"}.`
-                : `Polite crawl (max ${job.params.maxConcurrencyPerHost} concurrent requests, ${(job.params.delayMs / 1000).toLocaleString()}s base delay, ${job.params.respectRobotsTxt === false ? "robots.txt ignored" : "robots.txt respected"}) — the estimate adjusts to the observed speed and any rate limits.${job.params.maxPages != null ? ` Crawl capped at ${job.params.maxPages.toLocaleString()} pages.` : ""}`}
-            </p>
-          </section>
+          <CrawlProgressPanel
+            job={job}
+            shallowRun={shallowRun}
+            reconnected={reconnected}
+            liveDiscovery={liveDiscovery}
+            discoveryMs={discoveryMs}
+            fetchElapsedMs={fetchElapsedMs}
+            fetchStarted={fetchStartedAt != null}
+            remainingMs={remainingMs}
+            paramsMatch={paramsMatch}
+            paused={job.control === "pause"}
+            controlPending={control.isPending}
+            onPause={() =>
+              jobId &&
+              control.mutate({
+                id: jobId,
+                action: "pause",
+                label: job?.origin,
+              })
+            }
+            onResume={() =>
+              jobId &&
+              control.mutate({
+                id: jobId,
+                action: "resume",
+                label: job?.origin,
+              })
+            }
+            onCancel={() => setCancelTarget(job)}
+          />
         ) : null}
 
         {/* ── Errors ──────────────────────────────────────────────────── */}
@@ -818,6 +597,16 @@ function SourcesPage() {
               {start.error instanceof Error
                 ? start.error.message
                 : String(start.error)}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {job?.status === "cancelled" ? (
+          <Alert>
+            <TriangleAlert className="size-4" />
+            <AlertTitle>Crawl cancelled</AlertTitle>
+            <AlertDescription className="text-xs">
+              This crawl was stopped before it finished — no partial result was
+              saved. Start a new crawl when you're ready.
             </AlertDescription>
           </Alert>
         ) : null}
@@ -848,526 +637,66 @@ function SourcesPage() {
 
         {/* ── 3. Results once a crawl finishes ────────────────────────── */}
         {result ? (
-          <section className="space-y-5 border border-border bg-card p-6">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="font-display text-xl">Crawl complete</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {normalizeOrigin(crawlOrigin)} · finished{" "}
-                  {job?.finishedAt
-                    ? formatCrawlDate(new Date(job.finishedAt).toISOString())
-                    : "just now"}
-                </p>
-              </div>
-              {job?.persisted ? (
-                <Badge variant="secondary" className="gap-1 font-normal">
-                  <CircleCheck className="size-3 text-success" /> Saved to
-                  database
-                </Badge>
-              ) : null}
-              <Badge
-                variant={shallowRun ? "secondary" : "outline"}
-                className="gap-1 font-normal"
-              >
-                {shallowRun ? (
-                  <Zap className="size-3" />
-                ) : (
-                  <Radar className="size-3" />
-                )}
-                {shallowRun ? "Shallow check" : "Deep crawl"}
-              </Badge>
-            </div>{" "}
-            {/* Shallow runs return a PARTIAL catalogue (only new products), so
-                the deep-crawl diff tiles would report every not-re-fetched
-                product as "no longer listed" — bogus. Instead: zero new → a
-                positive "nothing changed" panel; some new → just the new
-                products list. Removals/price changes are deep-crawl news. */}
-            {shallowRun ? (
-              result.products.length === 0 ? (
-                <div className="rounded-md border border-success/30 bg-success/5 p-4">
-                  <p className="flex items-center gap-2 text-sm font-medium text-success">
-                    <CircleCheck className="size-4" />
-                    No new products since the last crawl
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    The shallow check fetches only new product pages (≈1
-                    request) — none were found, so the catalogue is unchanged
-                    since the last deep crawl.
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  <p className="label-caps mb-2">
-                    New products found —{" "}
-                    {result.products.length.toLocaleString()}
-                  </p>
-                  <NewProductsList
-                    products={result.products}
-                    footer="Shallow checks only detect new products — removals and price changes are caught by deep crawls."
-                  />
-                </div>
-              )
-            ) : diff ? (
-              <div>
-                <p className="label-caps mb-2">
-                  What's new since the last crawl
-                </p>
-                <CrawlDiffSummary
-                  newCount={diff.newProducts.length}
-                  removedCount={diff.removedProducts.length}
-                  priceChangedCount={diff.priceChangedCount}
-                  products={diff.newProducts}
-                  productsFooter={`…and ${diff.newProducts.length - 6} more — see the full list under Saved crawls.`}
-                />
-              </div>
-            ) : null}
-            <CrawlStatsGrid stats={result.stats} />
-            {/* Detection summary captured from this run. */}
-            {result.discovery ? (
-              <div className="flex flex-wrap gap-2">
-                <Badge variant="secondary" className="font-normal">
-                  {result.discovery.platform?.platform ?? "Unknown platform"}
-                  {result.discovery.platform?.kind === "store"
-                    ? " · store"
-                    : result.discovery.platform?.kind === "corporate"
-                      ? " · corporate site"
-                      : ""}
-                </Badge>
-                {result.discovery.sitemap?.error ? (
-                  <Badge variant="secondary" className="font-normal">
-                    No sitemap
-                  </Badge>
-                ) : (
-                  <Badge variant="secondary" className="font-normal">
-                    {(result.discovery.sitemap?.urls ?? 0).toLocaleString()}{" "}
-                    sitemap URLs
-                  </Badge>
-                )}
-                {result.discovery.robots?.status === "found" ? (
-                  <Badge variant="secondary" className="font-normal">
-                    robots.txt respected
-                  </Badge>
-                ) : (
-                  <Badge variant="secondary" className="font-normal">
-                    robots: {result.discovery.robots?.status ?? "skipped"}
-                  </Badge>
-                )}
-                {result.stats.fetched > 0 ? (
-                  <Badge variant="secondary" className="font-normal">
-                    {Math.round(
-                      (result.products.length / result.stats.fetched) * 100,
-                    )}
-                    % parsed
-                  </Badge>
-                ) : null}
-              </div>
-            ) : null}
-            {/* Verbose findings + full discovery log from this run. */}
-            {result.discovery?.findings?.length ? (
-              <div>
-                <p className="label-caps mb-2">What the crawler found</p>
-                <ul className="space-y-1.5">
-                  {result.discovery.findings.map((f, i) => (
-                    <li
-                      key={`${f.message}-${i}`}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs"
-                    >
-                      <span
-                        className={cn(
-                          "shrink-0 rounded-full px-2 py-0.5 font-medium",
-                          f.level === "success" && "bg-success/10 text-success",
-                          f.level === "warning" && "bg-warning/10 text-warning",
-                          f.level === "info" && "bg-accent/10 text-accent",
-                        )}
-                      >
-                        {f.level === "success"
-                          ? "Found"
-                          : f.level === "warning"
-                            ? "Heads up"
-                            : "Suggestion"}
-                      </span>
-                      <span className="min-w-0 flex-1 text-muted-foreground">
-                        {f.message}
-                      </span>
-                      {f.action ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-6 gap-1 text-xs"
-                          onClick={() => {
-                            setCrawlOrigin(f.action!.url);
-                            setCollections("");
-                            setJobId(null);
-                          }}
-                        >
-                          <Link2 className="size-3" />
-                          {f.action.label}
-                          <ArrowUpRight className="size-3" />
-                        </Button>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            <DiscoveryLog lines={result.discovery?.log ?? []} />
-            {result.failures.length > 0 ? (
-              <div>
-                <p className="label-caps mb-2">Failures</p>
-                <ul className="max-h-40 space-y-1 overflow-auto text-xs">
-                  {result.failures.slice(0, 12).map((f) => (
-                    <li key={f.url} className="flex justify-between gap-3">
-                      <span className="truncate font-mono text-muted-foreground">
-                        {f.url}
-                      </span>
-                      <span className="shrink-0 text-destructive">
-                        {f.error}
-                      </span>
-                    </li>
-                  ))}
-                  {result.failures.length > 12 ? (
-                    <li className="text-muted-foreground">
-                      …and {result.failures.length - 12} more
-                    </li>
-                  ) : null}
-                </ul>
-              </div>
-            ) : null}
-            {result.products.length > 0 ? (
-              <div>
-                <p className="label-caps mb-2">
-                  Products ({result.products.length}) — first{" "}
-                  {Math.min(result.products.length, 8)}
-                </p>
-                <ul className="divide-y divide-border border border-border">
-                  {result.products.slice(0, 8).map((p) => (
-                    <li
-                      key={p.url}
-                      className="flex items-center justify-between gap-3 p-3 text-sm"
-                    >
-                      <ProductCell name={p.name} brand={p.brand} url={p.url} />
-                      <span className="flex shrink-0 items-center gap-3">
-                        <StockBadge available={p.available} />
-                        <span className="text-right">
-                          <span className="numeric block">
-                            {formatPrice(p.price)}
-                          </span>
-                          <span className="block text-[11px] text-muted-foreground">
-                            store price
-                          </span>
-                        </span>
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : shallowRun ? null : (
-              <p className="text-sm text-muted-foreground">
-                No products were parsed — the store may have rate-limited this
-                machine (HTTP 429) or no structured data was found. Check the
-                failures above.
-              </p>
-            )}
-          </section>
+          <CrawlResultsPanel
+            result={result}
+            job={job}
+            shallowRun={shallowRun}
+            diff={diff}
+            crawlOrigin={crawlOrigin}
+            onActionUrl={actionUrl}
+          />
         ) : null}
 
         {/* ── 4. Configuration — bottom of the page ───────────────────── */}
-        <section>
-          <SectionTitle
-            aside={
-              <Badge variant="secondary" className="font-normal">
-                Applies to the next crawl
-              </Badge>
-            }
-          >
-            Configuration
-          </SectionTitle>
-          <div className="grid gap-6 border border-border bg-card p-6 lg:grid-cols-2">
-            <div className="grid gap-2">
-              <Label>Maximum pages per crawl</Label>
-              <Select
-                value={maxPagesMode}
-                onValueChange={(v) => setMaxPagesMode(v as MaxPagesMode)}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="500">500</SelectItem>
-                  <SelectItem value="1000">1,000</SelectItem>
-                  <SelectItem value="5000">5,000</SelectItem>
-                  <SelectItem value="custom">Custom…</SelectItem>
-                  <SelectItem value="unlimited">Unlimited</SelectItem>
-                </SelectContent>
-              </Select>
-              {maxPagesMode === "custom" ? (
-                <div className="grid gap-2">
-                  <Input
-                    type="number"
-                    min={1}
-                    value={customMaxPages}
-                    onChange={(e) => setCustomMaxPages(e.target.value)}
-                    placeholder="e.g. 5 or 10 for a quick test"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Small caps like 5 or 10 are great for testing — the crawl
-                    stops after this many product pages. Leave empty for
-                    unlimited.
-                  </p>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="grid gap-2">
-              <Label>
-                Concurrency{" "}
-                <span className="font-normal text-muted-foreground">
-                  (requests per host)
-                </span>
-              </Label>
-              <Select
-                value={String(maxConcurrency)}
-                onValueChange={(v) => setMaxConcurrency(Number(v))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1">1 request at a time</SelectItem>
-                  <SelectItem value="2">2 (polite default)</SelectItem>
-                  <SelectItem value="4">4</SelectItem>
-                  <SelectItem value="6">6</SelectItem>
-                  <SelectItem value="8">8 (aggressive)</SelectItem>
-                </SelectContent>
-              </Select>
-              {maxConcurrency > 2 ? (
-                <Alert className="border-warning/50 [&>svg]:text-warning">
-                  <TriangleAlert className="size-4" />
-                  <AlertTitle>Politeness warning</AlertTitle>{" "}
-                  <AlertDescription>
-                    Higher concurrency speeds up crawling but can trigger rate
-                    limits (HTTP 429) or IP blocks on some stores.{" "}
-                    {respectRobots
-                      ? "robots.txt is still respected and the crawler slows down adaptively."
-                      : "You've disabled robots.txt — be extra careful about rate limits."}
-                  </AlertDescription>
-                </Alert>
-              ) : null}
-            </div>
-
-            <div className="grid gap-2">
-              <Label>
-                Request delay{" "}
-                <span className="font-normal text-muted-foreground">
-                  (per request)
-                </span>
-              </Label>
-              <Select
-                value={String(crawlDelay)}
-                onValueChange={(v) => setCrawlDelay(Number(v))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="250">0.25s</SelectItem>
-                  <SelectItem value="500">0.5s</SelectItem>
-                  <SelectItem value="1000">1s</SelectItem>
-                  <SelectItem value="2000">2s</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="product-only">Product-only mode</Label>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  Skip blog, help and policy pages
-                </p>
-              </div>
-              <Switch
-                id="product-only"
-                checked={productOnly}
-                onCheckedChange={setProductOnly}
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="robots">Respect robots.txt</Label>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  Recommended for all sources
-                </p>
-              </div>
-              <Switch
-                id="robots"
-                checked={respectRobots}
-                onCheckedChange={setRespectRobots}
-              />
-            </div>
-            {!respectRobots ? (
-              <Alert className="border-warning/50 [&>svg]:text-warning lg:col-span-2">
-                <TriangleAlert className="size-4" />
-                <AlertTitle>robots.txt disabled</AlertTitle>
-                <AlertDescription>
-                  The crawler will ignore robots.txt disallow rules and
-                  crawl-delay. This can violate site terms and get your IP
-                  blocked — use only on sites you own.
-                </AlertDescription>
-              </Alert>
-            ) : null}
-
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="snapshot">Store full snapshots</Label>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  Keeps history for trend analysis
-                </p>
-              </div>
-              <Switch
-                id="snapshot"
-                checked={storeSnapshots}
-                onCheckedChange={setStoreSnapshots}
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="browser">Browser rendering</Label>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  Playwright fallback for JS-rendered stores (Nuxt/SPA) —
-                  slower, needs Chrome installed
-                </p>
-              </div>
-              <Switch
-                id="browser"
-                checked={useBrowser}
-                onCheckedChange={setUseBrowser}
-              />
-            </div>
-            {useBrowser ? (
-              <Alert className="border-accent/50 [&>svg]:text-accent lg:col-span-2">
-                <Globe className="size-4" />
-                <AlertTitle>Tier 1 — browser rendering on</AlertTitle>
-                <AlertDescription>
-                  Pages that look like a JS shell are rendered in headless
-                  Chrome before discovery and extraction see them. This is for
-                  stores whose products load client-side; leave it off for
-                  regular stores to keep crawls fast.
-                </AlertDescription>
-              </Alert>
-            ) : null}
-
-            <div className="lg:col-span-2">
-              <Label htmlFor="proxy">Residential proxy (optional)</Label>
-              <Input
-                id="proxy"
-                type="password"
-                value={proxy}
-                onChange={(e) => setProxy(e.target.value)}
-                placeholder="http://user:pass@gate.provider.com:8000"
-                autoComplete="off"
-                spellCheck={false}
-                className="mt-1.5 font-mono text-xs"
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                Tier 2 — routes every request through a rotating residential
-                gateway (Oxylabs / Bright Data / Smartproxy) to fix IP blocks on
-                stores that 403 this machine. Credentials stay in your browser;
-                the server never stores or logs them.
-              </p>
-            </div>
-          </div>
-        </section>
+        <CrawlConfigPanel
+          maxPagesMode={maxPagesMode}
+          onMaxPagesModeChange={(mode) => setMaxPagesMode(mode)}
+          customMaxPages={customMaxPages}
+          onCustomMaxPagesChange={(value) => setCustomMaxPages(value)}
+          maxConcurrency={maxConcurrency}
+          onMaxConcurrencyChange={(value) => setMaxConcurrency(value)}
+          crawlDelay={crawlDelay}
+          onCrawlDelayChange={(value) => setCrawlDelay(value)}
+          productOnly={productOnly}
+          onProductOnlyChange={(value) => setProductOnly(value)}
+          respectRobots={respectRobots}
+          onRespectRobotsChange={(value) => setRespectRobots(value)}
+          storeSnapshots={storeSnapshots}
+          onStoreSnapshotsChange={(value) => setStoreSnapshots(value)}
+          useBrowser={useBrowser}
+          onUseBrowserChange={(value) => setUseBrowser(value)}
+          proxy={proxy}
+          onProxyChange={(value) => setProxy(value)}
+        />
 
         {/* ── 5. Active schedules ──────────────────────────────────────── */}
-        {schedulesQuery.isError &&
-        !schedulesQuery.data &&
-        cachedSchedules.length > 0 ? (
-          <p className="text-xs text-muted-foreground">
-            Server unreachable — showing the last known schedules from memory.
-            Recurring crawls persist server-side; they'll resync when the
-            connection returns.
-          </p>
-        ) : null}
-        {schedules.length > 0 ? (
-          <section>
-            <SectionTitle>Active schedules</SectionTitle>
-            <ul className="divide-y divide-border border border-border bg-card">
-              {schedules.map((s) => (
-                <li
-                  key={s.origin}
-                  className="flex items-center justify-between gap-3 p-3.5 text-sm"
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate font-mono">{s.origin}</span>
-                    <span className="mt-0.5 block text-xs text-muted-foreground">
-                      Every {frequencyLabel(s.frequency)} · next run{" "}
-                      {formatScheduleTime(s.nextRunAt)} ·{" "}
-                      {s.running
-                        ? "running"
-                        : s.lastRunAt
-                          ? `last ran ${formatScheduleTime(s.lastRunAt)}`
-                          : "never ran"}
-                    </span>
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => cancelSchedule.mutate(s.origin)}
-                    disabled={cancelSchedule.isPending}
-                  >
-                    Cancel
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
+        <ActiveSchedulesPanel
+          schedules={schedules}
+          offline={
+            schedulesQuery.isError &&
+            !schedulesQuery.data &&
+            cachedSchedules.length > 0
+          }
+          onCancel={(origin) => cancelSchedule.mutate(origin)}
+          cancelPending={cancelSchedule.isPending}
+        />
       </div>
+
+      {/* Cancel confirmation — a stop is irreversible (nothing persisted). */}
+      <CancelCrawlDialog
+        job={cancelTarget}
+        cancelling={cancelling}
+        onConfirm={() => {
+          if (cancelTarget) {
+            control.mutate({
+              id: cancelTarget.id,
+              action: "cancel",
+              label: cancelTarget.origin,
+            });
+          }
+        }}
+        onCancel={() => setCancelTarget(null)}
+      />
     </div>
   );
-}
-
-function frequencyLabel(frequency: CrawlFrequency): string {
-  switch (frequency) {
-    case "1h":
-      return "hour";
-    case "6h":
-      return "6 hours";
-    case "daily":
-      return "day";
-    case "weekly":
-      return "week";
-  }
-}
-
-function formatScheduleTime(ts: number): string {
-  return new Date(ts).toLocaleString(undefined, {
-    dateStyle: "short",
-    timeStyle: "short",
-  });
-}
-
-/** Human label for the live discovery phase shown in the progress panel. */
-function discoveryPhaseLabel(phase: CrawlJobDiscovery["phase"]): string {
-  switch (phase) {
-    case "collections":
-      return "Collections";
-    case "sitemap":
-      return "Sitemap";
-    case "htmlCrawl":
-      return "HTML crawl";
-    case "done":
-      return "Discovery complete";
-  }
-}
-
-/** Max-pages select modes: presets, a free "Custom…" input, or unlimited. */
-type MaxPagesMode = "500" | "1000" | "5000" | "custom" | "unlimited";
-
-/** Parses the Custom… input into a positive page cap (`null` when empty/invalid). */
-function parseCustomMaxPages(value: string): number | null {
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
 }

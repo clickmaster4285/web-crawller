@@ -141,8 +141,30 @@ async function releaseStaleClaims() {
  */
 async function claimNextJob({ workerId }) {
   await releaseStaleClaims();
+  // Sweep: jobs cancelled while they sat in the queue never get claimed —
+  // they're marked cancelled here so the caller's cancel takes effect even
+  // if no worker was around to see the request. (Claimed jobs handle cancel
+  // via the worker's control poll instead.)
+  const swept = await CrawlJob.updateMany(
+    { status: { $in: ['queued', 'retrying'] }, control: 'cancel' },
+    {
+      $set: { status: 'cancelled', finishedAt: new Date() },
+      $unset: { control: 1 }
+    }
+  );
+  if (swept.modifiedCount > 0) {
+    console.log(`🗑️  ${workerId} cancelled ${swept.modifiedCount} queued job(s)`);
+  }
   const job = await CrawlJob.findOneAndUpdate(
-    { status: { $in: ['queued', 'retrying'] }, scheduledAt: { $lte: new Date() } },
+    {
+      status: { $in: ['queued', 'retrying'] },
+      // Paused jobs stay queued until resumed (control cleared); a cancel
+      // request landing between the sweep above and this claim must also
+      // not be claimed (it self-heals via the worker's control poll, but
+      // skipping it here avoids wasting a claim + a crawl start).
+      control: { $nin: ['pause', 'cancel'] },
+      scheduledAt: { $lte: new Date() }
+    },
     {
       $set: {
         status: 'claimed',
@@ -171,6 +193,7 @@ async function heartbeat(jobId, workerId, patch = {}) {
     if (patch.fetchStartedAt != null) set['progress.fetchStartedAt'] = patch.fetchStartedAt;
   }
   if (patch.discovery != null) set['progress.discovery'] = patch.discovery;
+  if (patch.requests != null) set['progress.requests'] = patch.requests;
   await CrawlJob.updateOne({ _id: jobId, workerId }, { $set: set });
 }
 
@@ -185,6 +208,7 @@ async function completeJob(jobId, workerId, { result, persisted = false, progres
   };
   if (progress.processed != null) set['progress.processed'] = progress.processed;
   if (progress.total != null) set['progress.total'] = progress.total;
+  if (progress.requests != null) set['progress.requests'] = progress.requests;
   // Carried through completion so an ultra-fast crawl (whose throttled
   // heartbeat never wrote it) still reports the phase boundary.
   if (progress.fetchStartedAt != null) {
@@ -238,18 +262,35 @@ async function failJob(jobId, workerId, error) {
  * Maps a CrawlJob doc to the frontend's CrawlJob shape (ms timestamps,
  * running/done/error status, proxy boolean only). Returns null for unknown
  * ids (the UI treats it as a dead/pruned job).
+ *
+ * `options.includeResult` (default true) drops the (potentially huge) result
+ * payload — list endpoints never ship a finished crawl's full product array.
  */
-function publicJob(job) {
+function publicJob(job, options = {}) {
   if (!job) return null;
+  const { includeResult = true } = options;
   const status =
     job.status === 'done'
       ? 'done'
       : job.status === 'failed' || job.status === 'dead'
         ? 'error'
-        : 'running';
+        : job.status === 'cancelled'
+          ? 'cancelled'
+          : 'running';
   const p = job.params ?? {};
   const pr = job.progress ?? {};
   return {
+    // Raw backend state (queued/claimed/retrying/…) — the active-jobs UI
+    // badges queued vs running vs retrying from it.
+    state: job.status ?? 'queued',
+    id: String(job._id),
+    origin: job.origin,
+    /** Worker that claimed/owns the job (null while queued — debugging). */
+    workerId: job.workerId ?? null,
+    /** Live HTTP-request count (debug — Active crawls page). */
+    requests: pr.requests ?? 0,
+    /** Cooperative control request: 'pause' | 'cancel' | null (run freely). */
+    control: job.control ?? null,
     status,
     // shallow = sitemap-only check; deep = full crawl (the Sources progress
     // UI badges it, and zero-fetch shallow runs read as "no new products").
@@ -272,9 +313,80 @@ function publicJob(job) {
       pr.fetchStartedAt instanceof Date ? pr.fetchStartedAt.getTime() : pr.fetchStartedAt ?? null,
     discovery: pr.discovery ?? null,
     finishedAt: job.finishedAt ? job.finishedAt.getTime() : null,
-    result: job.result ?? undefined,
+    result: includeResult ? (job.result ?? undefined) : undefined,
     error: job.error ?? undefined,
     persisted: !!job.persisted
+  };
+}
+
+/**
+ * Cooperative control (background-crawler UI): pause / resume / cancel.
+ *
+ * - pause on an unclaimed job → it stays queued (claimNextJob skips
+ *   `control: 'pause'`); on a claimed job → the worker's engine waits.
+ * - resume clears the request.
+ * - cancel on an unclaimed job → cancelled immediately; on a claimed job →
+ *   the worker's control poll throws CrawlCancelledError and marks it
+ *   cancelled (no result persisted). Returns null when the job is unknown
+ *   or already terminal.
+ */
+async function setJobControl(jobId, action) {
+  const job = await CrawlJob.findOne({
+    _id: jobId,
+    status: { $in: ['queued', 'claimed', 'retrying'] }
+  });
+  if (!job) return null;
+  if (action === 'cancel' && job.status !== 'claimed') {
+    // No worker is involved — cancel right now.
+    await CrawlJob.updateOne(
+      { _id: jobId },
+      {
+        $set: { status: 'cancelled', control: null, finishedAt: new Date() }
+      }
+    );
+  } else if (action === 'cancel') {
+    // Claimed — hand the request to the worker's control poll.
+    await CrawlJob.updateOne({ _id: jobId }, { $set: { control: 'cancel' } });
+  } else {
+    // pause / resume: store the request; the worker (or claim filter) acts.
+    await CrawlJob.updateOne({ _id: jobId }, { $set: { control: action } });
+  }
+  return job;
+}
+
+/** Marks a claimed job cancelled (called by the worker after a user cancel). */
+async function cancelJob(jobId, workerId) {
+  await CrawlJob.updateOne(
+    { _id: jobId, workerId },
+    {
+      $set: { status: 'cancelled', finishedAt: new Date() },
+      $unset: { control: 1, heartbeatAt: 1 }
+    }
+  );
+}
+
+/**
+ * Background-crawler list: in-flight jobs (queued/claimed/retrying — paused
+ * ones included) plus the last 15 minutes of finished ones, so a cancel or
+ * completion is immediately visible. Results are never shipped here.
+ */
+async function listActiveJobs() {
+  const active = await CrawlJob.find({
+    status: { $in: ['queued', 'claimed', 'retrying'] }
+  })
+    .sort({ createdAt: -1 })
+    .limit(50)
+    .lean();
+  const recent = await CrawlJob.find({
+    status: { $in: ['done', 'failed', 'dead', 'cancelled'] },
+    finishedAt: { $gte: new Date(Date.now() - 15 * 60 * 1000) }
+  })
+    .sort({ finishedAt: -1 })
+    .limit(15)
+    .lean();
+  return {
+    active: active.map((j) => publicJob(j, { includeResult: false })),
+    recent: recent.map((j) => publicJob(j, { includeResult: false }))
   };
 }
 
@@ -286,6 +398,9 @@ module.exports = {
   heartbeat,
   completeJob,
   failJob,
+  cancelJob,
+  setJobControl,
+  listActiveJobs,
   publicJob,
   backoffFor,
   sleep,

@@ -51,7 +51,9 @@ const progressSchema = new mongoose.Schema(
     /** When the fetch phase began (first tick with a known URL count). */
     fetchStartedAt: Date,
     /** Live discovery diagnostics while the discovery phase runs. */
-    discovery: { type: mongoose.Schema.Types.Mixed, default: null }
+    discovery: { type: mongoose.Schema.Types.Mixed, default: null },
+    /** Live HTTP-request count (debug — Active crawls page). */
+    requests: { type: Number, default: 0 }
   },
   { _id: false }
 );
@@ -74,10 +76,18 @@ const crawlJobSchema = new mongoose.Schema(
     type: { type: String, enum: ['shallow', 'deep'], default: 'deep' },
     status: {
       type: String,
-      enum: ['queued', 'claimed', 'retrying', 'done', 'failed', 'dead'],
+      enum: ['queued', 'claimed', 'retrying', 'done', 'failed', 'dead', 'cancelled'],
       default: 'queued',
       index: true
     },
+    /**
+     * Cooperative control request (architecture §3.3 + background-crawler
+     * UI): 'pause' holds the job (a worker's engine waits until cleared),
+     * 'cancel' requests cancellation (a worker throws CrawlCancelledError
+     * and marks the job cancelled; queued jobs are cancelled by the claim
+     * sweep). null = run freely. Cleared once the worker acts on it.
+     */
+    control: { type: String, enum: ['pause', 'cancel'], default: null },
     attempts: { type: Number, default: 0 },
     maxAttempts: { type: Number, default: 3 },
     scheduledAt: { type: Date, default: Date.now },

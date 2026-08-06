@@ -1,3 +1,5 @@
+import type { CrawlControl } from "./control.ts";
+
 /**
  * Crawler domain types.
  *
@@ -11,6 +13,14 @@ export interface CrawlConfig {
   origin: string;
   /** Collection handles to crawl, e.g. ["silicone-toys"] */
   collections: string[];
+  /**
+   * Cooperative pause/resume/cancel handle (see `core/control.ts`). When set,
+   * the engine checks it between units of work: `pause` finishes the
+   * in-flight request then waits until cleared (resume); `cancel` throws
+   * `CrawlCancelledError`, which unwinds the crawl cleanly (the worker marks
+   * the job cancelled instead of persisting a result). Omit to run freely.
+   */
+  control?: CrawlControl;
   /**
    * Crawl mode (architecture §3.2):
    *   - "deep" (default) — full discovery (platform detection, homepage
@@ -125,6 +135,12 @@ export interface CrawlConfig {
    * show discovery progress instead of a bare spinner.
    */
   onDiscoveryProgress?: (progress: DiscoveryProgress) => void;
+  /**
+   * Debug — called with the running HTTP-request count after every request
+   * (robots.txt, discovery, product fetches; retried attempts each count).
+   * The worker surfaces it on the crawl job for the Active crawls page.
+   */
+  onRequestCount?: (count: number) => void;
 }
 
 /** Live snapshot of the discovery phase, emitted via `onDiscoveryProgress`. */
@@ -346,6 +362,8 @@ export interface CrawlStats {
   startedAt: string;
   finishedAt: string;
   durationMs: number;
+  /** Total HTTP requests made this run (every attempt counts). */
+  requests: number;
 }
 
 export interface CrawlResult {

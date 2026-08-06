@@ -73,6 +73,8 @@ export interface CrawlRunResult {
     skippedUnchanged: number;
     failed: number;
     durationMs: number;
+    /** Total HTTP requests made this run (debug; absent on old results). */
+    requests?: number;
   };
   failures: Array<{ url: string; error: string }>;
   products: Array<{
@@ -236,7 +238,35 @@ export interface ScheduleCrawlInput {
 
 /** Live snapshot of a crawl job, returned by `getCrawlProgress`. */
 export interface CrawlJob {
-  status: "running" | "done" | "error";
+  /**
+   * UI-facing status. `running` covers queued/claimed/retrying; `cancelled`
+   * is a user-requested stop (no result persisted). See `state` for the raw
+   * backend enum.
+   */
+  status: "running" | "done" | "error" | "cancelled";
+  /** Raw backend state: queued/claimed/retrying/done/failed/dead/cancelled. */
+  state: string;
+  /** Backend job id (the active-jobs list pages off it). */
+  id: string;
+  /** Store origin this job crawls. */
+  origin: string;
+  /**
+   * Worker that claimed/owns the job (debug — matches worker logs). Null
+   * while the job is still queued.
+   */
+  workerId: string | null;
+  /**
+   * Live HTTP-request count for this run (debug — every attempt counts,
+   * including robots.txt, discovery and retries).
+   */
+  requests: number;
+  /**
+   * Cooperative control request: "pause" holds the crawl (engine waits),
+   * "cancel" requests cancellation, null = running freely. `paused` is
+   * derived client-side as `control === "pause"` (the backend sends the raw
+   * request, not a computed flag).
+   */
+  control: "pause" | "cancel" | null;
   /** shallow = sitemap-only check (new products only); deep = full crawl. */
   type: "shallow" | "deep";
   /** Crawl parameters captured at start (used by the UI's progress text). */
@@ -392,4 +422,72 @@ export const cancelCrawlSchedule = createServerFn({ method: "POST" })
     );
     if (!res.ok) throw await backendError(res);
     return { cancelled: true };
+  });
+
+/**
+ * Lists the background crawlers: in-flight jobs (queued/claimed/retrying,
+ * paused ones included) plus the last 15 minutes of finished ones. Results
+ * are never shipped — the list stays light even for 10k-product stores.
+ */
+export const listActiveCrawlJobs = createServerFn({ method: "POST" }).handler(
+  async (): Promise<{ active: CrawlJob[]; recent: CrawlJob[] }> => {
+    const res = await fetch(`${backendUrl()}/api/crawl-jobs/active`);
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: { active: CrawlJob[]; recent: CrawlJob[] };
+    };
+    return body.data ?? { active: [], recent: [] };
+  },
+);
+
+/** Pauses a running (or queued) crawl — the engine holds until resumed. */
+export const pauseCrawlJob = createServerFn({ method: "POST" })
+  .validator((jobId: string) => jobId)
+  .handler(async ({ data: jobId }): Promise<{ id: string }> => {
+    const res = await fetch(
+      `${backendUrl()}/api/crawl-jobs/${encodeURIComponent(jobId)}/pause`,
+      { method: "POST" },
+    );
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: { id: string };
+    };
+    return body.data;
+  });
+
+/** Resumes a paused crawl. */
+export const resumeCrawlJob = createServerFn({ method: "POST" })
+  .validator((jobId: string) => jobId)
+  .handler(async ({ data: jobId }): Promise<{ id: string }> => {
+    const res = await fetch(
+      `${backendUrl()}/api/crawl-jobs/${encodeURIComponent(jobId)}/resume`,
+      { method: "POST" },
+    );
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: { id: string };
+    };
+    return body.data;
+  });
+
+/**
+ * Cancels a crawl: queued jobs cancel immediately; running jobs stop cleanly
+ * at the next checkpoint (no partial result is persisted).
+ */
+export const cancelCrawlJob = createServerFn({ method: "POST" })
+  .validator((jobId: string) => jobId)
+  .handler(async ({ data: jobId }): Promise<{ id: string }> => {
+    const res = await fetch(
+      `${backendUrl()}/api/crawl-jobs/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: { id: string };
+    };
+    return body.data;
   });

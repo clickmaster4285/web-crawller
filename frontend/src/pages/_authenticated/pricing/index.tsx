@@ -1,17 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo } from "react";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { SectionTitle, StatCard } from "@/components/cards/stat-card";
+import { MarketTrendChart } from "@/components/common/market-trend-chart";
 import { Badge } from "@/components/ui/badge";
 import {
   LoadingState,
@@ -163,78 +155,16 @@ function PricingPage() {
         >
           Market price trend
         </SectionTitle>
-        <div className="h-72 border border-border bg-card p-4">
-          {priceHistory.length >= 2 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart
-                data={priceHistory}
-                margin={{ left: -18, right: 8, top: 8 }}
-              >
-                <CartesianGrid stroke="var(--color-border)" vertical={false} />
-                <XAxis
-                  dataKey="date"
-                  stroke="var(--color-muted-foreground)"
-                  fontSize={11}
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <YAxis
-                  stroke="var(--color-muted-foreground)"
-                  fontSize={11}
-                  tickLine={false}
-                  axisLine={false}
-                  domain={["dataMin - 20", "dataMax + 20"]}
-                />
-                <Tooltip
-                  contentStyle={{
-                    background: "var(--color-popover)",
-                    border: "1px solid var(--color-border)",
-                    borderRadius: 4,
-                    fontSize: 12,
-                  }}
-                />
-                {s.yourAvgPrice > 0 ? (
-                  <Area
-                    isAnimationActive={false}
-                    type="monotone"
-                    dataKey="you"
-                    name="You"
-                    stroke="var(--color-chart-1)"
-                    fill="var(--color-chart-1)"
-                    fillOpacity={0.12}
-                    strokeWidth={2}
-                  />
-                ) : null}
-                <Area
-                  isAnimationActive={false}
-                  type="monotone"
-                  dataKey="market"
-                  name="Market average"
-                  stroke="var(--color-chart-3)"
-                  fill="var(--color-chart-3)"
-                  fillOpacity={0.08}
-                  strokeWidth={1.5}
-                />
-                <Area
-                  isAnimationActive={false}
-                  type="monotone"
-                  dataKey="cheapest"
-                  name="Cheapest store"
-                  stroke="var(--color-chart-2)"
-                  fill="transparent"
-                  strokeDasharray="4 3"
-                  strokeWidth={1.5}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          ) : (
-            <p className="flex h-full items-center justify-center px-8 text-center text-sm text-muted-foreground">
-              {priceHistory.length === 1
-                ? "One price snapshot so far — crawl this store again and its history appears here."
-                : "Crawl a store twice to build a price history. Every snapshot adds a point to the market trend."}
-            </p>
-          )}
-        </div>
+        <MarketTrendChart
+          data={priceHistory}
+          showCheapest
+          padY
+          emptyMessage={
+            priceHistory.length === 1
+              ? "One price snapshot so far — crawl this store again and its history appears here."
+              : "Crawl a store twice to build a price history. Every snapshot adds a point to the market trend."
+          }
+        />
       </div>
 
       <div className="grid gap-8 border-t border-border px-6 py-8 lg:grid-cols-2">

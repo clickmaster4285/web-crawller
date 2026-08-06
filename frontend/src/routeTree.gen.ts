@@ -16,6 +16,7 @@ import { Route as AuthLoginRouteImport } from './pages/auth/login'
 import { Route as AuthenticatedAlertsIndexRouteImport } from './pages/_authenticated/alerts/index'
 import { Route as AuthenticatedCatalogueIndexRouteImport } from './pages/_authenticated/catalogue/index'
 import { Route as AuthenticatedCompetitorsIndexRouteImport } from './pages/_authenticated/competitors/index'
+import { Route as AuthenticatedCrawlerIndexRouteImport } from './pages/_authenticated/crawler/index'
 import { Route as AuthenticatedCrawlsIndexRouteImport } from './pages/_authenticated/crawls/index'
 import { Route as AuthenticatedInsightsIndexRouteImport } from './pages/_authenticated/insights/index'
 import { Route as AuthenticatedPricingIndexRouteImport } from './pages/_authenticated/pricing/index'
@@ -59,6 +60,12 @@ const AuthenticatedCompetitorsIndexRoute =
   AuthenticatedCompetitorsIndexRouteImport.update({
     id: '/competitors/',
     path: '/competitors/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedCrawlerIndexRoute =
+  AuthenticatedCrawlerIndexRouteImport.update({
+    id: '/crawler/',
+    path: '/crawler/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedCrawlsIndexRoute =
@@ -112,6 +119,7 @@ export interface FileRoutesByFullPath {
   '/alerts/': typeof AuthenticatedAlertsIndexRoute
   '/catalogue/': typeof AuthenticatedCatalogueIndexRoute
   '/competitors/': typeof AuthenticatedCompetitorsIndexRoute
+  '/crawler/': typeof AuthenticatedCrawlerIndexRoute
   '/crawls/': typeof AuthenticatedCrawlsIndexRoute
   '/insights/': typeof AuthenticatedInsightsIndexRoute
   '/pricing/': typeof AuthenticatedPricingIndexRoute
@@ -127,6 +135,7 @@ export interface FileRoutesByTo {
   '/alerts': typeof AuthenticatedAlertsIndexRoute
   '/catalogue': typeof AuthenticatedCatalogueIndexRoute
   '/competitors': typeof AuthenticatedCompetitorsIndexRoute
+  '/crawler': typeof AuthenticatedCrawlerIndexRoute
   '/crawls': typeof AuthenticatedCrawlsIndexRoute
   '/insights': typeof AuthenticatedInsightsIndexRoute
   '/pricing': typeof AuthenticatedPricingIndexRoute
@@ -144,6 +153,7 @@ export interface FileRoutesById {
   '/_authenticated/alerts/': typeof AuthenticatedAlertsIndexRoute
   '/_authenticated/catalogue/': typeof AuthenticatedCatalogueIndexRoute
   '/_authenticated/competitors/': typeof AuthenticatedCompetitorsIndexRoute
+  '/_authenticated/crawler/': typeof AuthenticatedCrawlerIndexRoute
   '/_authenticated/crawls/': typeof AuthenticatedCrawlsIndexRoute
   '/_authenticated/insights/': typeof AuthenticatedInsightsIndexRoute
   '/_authenticated/pricing/': typeof AuthenticatedPricingIndexRoute
@@ -161,6 +171,7 @@ export interface FileRouteTypes {
     | '/alerts/'
     | '/catalogue/'
     | '/competitors/'
+    | '/crawler/'
     | '/crawls/'
     | '/insights/'
     | '/pricing/'
@@ -176,6 +187,7 @@ export interface FileRouteTypes {
     | '/alerts'
     | '/catalogue'
     | '/competitors'
+    | '/crawler'
     | '/crawls'
     | '/insights'
     | '/pricing'
@@ -192,6 +204,7 @@ export interface FileRouteTypes {
     | '/_authenticated/alerts/'
     | '/_authenticated/catalogue/'
     | '/_authenticated/competitors/'
+    | '/_authenticated/crawler/'
     | '/_authenticated/crawls/'
     | '/_authenticated/insights/'
     | '/_authenticated/pricing/'
@@ -257,6 +270,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedCompetitorsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/crawler/': {
+      id: '/_authenticated/crawler/'
+      path: '/crawler'
+      fullPath: '/crawler/'
+      preLoaderRoute: typeof AuthenticatedCrawlerIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/crawls/': {
       id: '/_authenticated/crawls/'
       path: '/crawls'
@@ -315,6 +335,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedAlertsIndexRoute: typeof AuthenticatedAlertsIndexRoute
   AuthenticatedCatalogueIndexRoute: typeof AuthenticatedCatalogueIndexRoute
   AuthenticatedCompetitorsIndexRoute: typeof AuthenticatedCompetitorsIndexRoute
+  AuthenticatedCrawlerIndexRoute: typeof AuthenticatedCrawlerIndexRoute
   AuthenticatedCrawlsIndexRoute: typeof AuthenticatedCrawlsIndexRoute
   AuthenticatedInsightsIndexRoute: typeof AuthenticatedInsightsIndexRoute
   AuthenticatedPricingIndexRoute: typeof AuthenticatedPricingIndexRoute
@@ -329,6 +350,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedAlertsIndexRoute: AuthenticatedAlertsIndexRoute,
   AuthenticatedCatalogueIndexRoute: AuthenticatedCatalogueIndexRoute,
   AuthenticatedCompetitorsIndexRoute: AuthenticatedCompetitorsIndexRoute,
+  AuthenticatedCrawlerIndexRoute: AuthenticatedCrawlerIndexRoute,
   AuthenticatedCrawlsIndexRoute: AuthenticatedCrawlsIndexRoute,
   AuthenticatedInsightsIndexRoute: AuthenticatedInsightsIndexRoute,
   AuthenticatedPricingIndexRoute: AuthenticatedPricingIndexRoute,

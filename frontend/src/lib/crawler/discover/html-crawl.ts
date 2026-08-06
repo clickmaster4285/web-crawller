@@ -21,6 +21,7 @@
 
 import { fetchText } from "../core/http.ts";
 import type { HttpOptions } from "../core/http.ts";
+import { waitForControl, type CrawlControl } from "../core/control.ts";
 
 // Category-ish paths: WooCommerce `/product-category/` (its category base),
 // `?product_cat=` filters, and the classic /category|collections|shop|catalog
@@ -43,6 +44,11 @@ export interface HtmlCrawlOptions {
   maxDepth?: number;
   /** Called after each page is visited (live progress during the BFS). */
   onPageVisited?: (pagesVisited: number, productsFound: number) => void;
+  /**
+   * Cooperative pause/cancel handle — checked between pages so a cancel
+   * lands during the BFS, not only after it finishes.
+   */
+  control?: CrawlControl;
 }
 
 export interface HtmlCrawlResult {
@@ -72,39 +78,59 @@ export async function discoverByHtmlCrawl(
   let pagesVisited = 0;
   let truncated = false;
 
+  // Pages fetched in parallel waves of 6 (politeness still throttles every
+  // request) — the old one-page-at-a-time BFS serialized a whole storefront.
+  // `pagesVisited` counts attempts (same semantics as the sequential loop:
+  // every page the BFS decided to fetch), so the maxPages cap still bounds
+  // total work. Set-membership checks run synchronously before any await, so
+  // a URL duplicated inside one wave can never be fetched twice.
+  const CONCURRENCY = 6;
   while (queue.length > 0 && pagesVisited < maxPages) {
-    const { url, depth } = queue.shift()!;
-    if (visited.has(url)) continue;
-    visited.add(url);
-    // Respect robots.txt: don't fetch pages robots disallows (marked visited
-    // above so a disallowed link isn't re-examined if re-enqueued).
-    if (options.isAllowed && !options.isAllowed(url)) continue;
-    pagesVisited++;
-
-    let html: string;
-    try {
-      html = await fetchText(url, options);
-    } catch {
-      continue;
+    await waitForControl(crawlOptions.control);
+    const batch: Array<{ url: string; depth: number }> = [];
+    while (
+      queue.length > 0 &&
+      batch.length < CONCURRENCY &&
+      pagesVisited + batch.length < maxPages
+    ) {
+      batch.push(queue.shift()!);
     }
+    await Promise.all(
+      batch.map(async ({ url, depth }) => {
+        if (visited.has(url)) return;
+        visited.add(url);
+        // Respect robots.txt: don't fetch pages robots disallows (marked
+        // visited above so a disallowed link isn't re-examined if
+        // re-enqueued).
+        if (options.isAllowed && !options.isAllowed(url)) return;
+        pagesVisited++;
 
-    for (const href of extractAnchors(html)) {
-      const abs = toAbsolute(href, url, origin);
-      if (!abs) continue;
-      // Respect robots.txt: don't collect disallowed product URLs either.
-      if (options.isAllowed && !options.isAllowed(abs)) continue;
+        let html: string;
+        try {
+          html = await fetchText(url, options);
+        } catch {
+          return;
+        }
 
-      if (isProductUrl(abs)) {
-        products.add(abs);
-        continue;
-      }
+        for (const href of extractAnchors(html)) {
+          const abs = toAbsolute(href, url, origin);
+          if (!abs) continue;
+          // Respect robots.txt: don't collect disallowed product URLs either.
+          if (options.isAllowed && !options.isAllowed(abs)) continue;
 
-      if (depth < maxDepth && !visited.has(abs) && isCategoryUrl(abs)) {
-        queue.push({ url: abs, depth: depth + 1 });
-      }
-    }
-    // Live progress tick after this page is fully parsed.
-    crawlOptions.onPageVisited?.(pagesVisited, products.size);
+          if (isProductUrl(abs)) {
+            products.add(abs);
+            continue;
+          }
+
+          if (depth < maxDepth && !visited.has(abs) && isCategoryUrl(abs)) {
+            queue.push({ url: abs, depth: depth + 1 });
+          }
+        }
+        // Live progress tick after this page is fully parsed.
+        crawlOptions.onPageVisited?.(pagesVisited, products.size);
+      }),
+    );
   }
 
   if (queue.length > 0) truncated = true;

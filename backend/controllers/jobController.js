@@ -16,6 +16,8 @@ const Store = require('../models/Store');
 const {
   enqueueJob,
   hasActiveJob,
+  setJobControl,
+  listActiveJobs,
   publicJob
 } = require('../services/jobQueue');
 
@@ -235,6 +237,74 @@ const listSchedules = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/crawl-jobs/active — background-crawler list: in-flight jobs
+ * (queued/claimed/retrying) plus the last 15 min of finished ones.
+ */
+const listActive = async (req, res) => {
+  try {
+    const data = await listActiveJobs();
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('List active jobs error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+/** Resolves a job id, throwing a 404 for malformed/unknown ids. */
+function requireJobId(id) {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw httpError(404, 'Job not found');
+  }
+  return id;
+}
+
+/** POST /api/crawl-jobs/:id/pause — cooperative pause (worker waits). */
+const pauseJob = async (req, res) => {
+  try {
+    const id = requireJobId(req.params.id);
+    const job = await setJobControl(id, 'pause');
+    if (!job) throw httpError(404, 'Job not found');
+    res.json({ success: true, data: { id, control: 'pause' } });
+  } catch (error) {
+    const status = error.status ?? 500;
+    console.error('Pause crawl job error:', error);
+    res.status(status).json({ success: false, message: error.message });
+  }
+};
+
+/** POST /api/crawl-jobs/:id/resume — clears a pause request. */
+const resumeJob = async (req, res) => {
+  try {
+    const id = requireJobId(req.params.id);
+    const job = await setJobControl(id, null);
+    if (!job) throw httpError(404, 'Job not found');
+    res.json({ success: true, data: { id, control: null } });
+  } catch (error) {
+    const status = error.status ?? 500;
+    console.error('Resume crawl job error:', error);
+    res.status(status).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * POST /api/crawl-jobs/:id/cancel — queued jobs cancel immediately; claimed
+ * jobs get a control request the worker turns into a clean cancellation
+ * (no partial result is persisted).
+ */
+const cancelJob = async (req, res) => {
+  try {
+    const id = requireJobId(req.params.id);
+    const job = await setJobControl(id, 'cancel');
+    if (!job) throw httpError(404, 'Job not found');
+    res.json({ success: true, data: { id, control: 'cancel' } });
+  } catch (error) {
+    const status = error.status ?? 500;
+    console.error('Cancel crawl job error:', error);
+    res.status(status).json({ success: false, message: error.message });
+  }
+};
+
 /** DELETE /api/crawl-jobs/schedules/:origin — cancel a recurring crawl. */
 const cancelSchedule = async (req, res) => {
   try {
@@ -254,6 +324,10 @@ const cancelSchedule = async (req, res) => {
 module.exports = {
   enqueueCrawlJob,
   getCrawlJob,
+  listActive,
+  pauseJob,
+  resumeJob,
+  cancelJob,
   upsertSchedule,
   listSchedules,
   cancelSchedule

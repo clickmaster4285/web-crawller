@@ -1,7 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
-  Area,
-  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
@@ -14,6 +12,8 @@ import { ArrowUpRight } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { SectionTitle, StatCard } from "@/components/cards/stat-card";
+import { MarketTrendChart } from "@/components/common/market-trend-chart";
+import { chartAxis, chartTooltipStyle } from "@/components/common/chart-styles";
 import {
   ErrorState,
   LoadingState,
@@ -45,20 +45,6 @@ export const Route = createFileRoute("/_authenticated/")({
   }),
   component: DashboardPage,
 });
-
-const axis = {
-  stroke: "var(--color-muted-foreground)",
-  fontSize: 11,
-  tickLine: false,
-  axisLine: false,
-};
-
-const tooltipStyle = {
-  background: "var(--color-popover)",
-  border: "1px solid var(--color-border)",
-  borderRadius: 4,
-  fontSize: 12,
-};
 
 function DashboardPage() {
   const { data, isLoading, isError } = useAnalytics();
@@ -172,46 +158,10 @@ function DashboardPage() {
           >
             Matched basket trend
           </SectionTitle>
-          <div className="h-72 border border-border bg-card p-4">
-            {data.priceHistory.length > 1 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart
-                  data={data.priceHistory}
-                  margin={{ left: -18, right: 8, top: 8 }}
-                >
-                  <CartesianGrid
-                    stroke="var(--color-border)"
-                    vertical={false}
-                  />
-                  <XAxis dataKey="date" {...axis} />
-                  <YAxis {...axis} />
-                  <Tooltip contentStyle={tooltipStyle} />
-                  <Area
-                    isAnimationActive={false}
-                    type="monotone"
-                    dataKey="you"
-                    stroke="var(--color-chart-1)"
-                    fill="var(--color-chart-1)"
-                    fillOpacity={0.12}
-                    strokeWidth={2}
-                  />
-                  <Area
-                    isAnimationActive={false}
-                    type="monotone"
-                    dataKey="market"
-                    stroke="var(--color-chart-3)"
-                    fill="var(--color-chart-3)"
-                    fillOpacity={0.08}
-                    strokeWidth={1.5}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : (
-              <p className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                Trend appears after two or more crawls.
-              </p>
-            )}
-          </div>
+          <MarketTrendChart
+            data={data.priceHistory}
+            emptyMessage="Trend appears after two or more crawls."
+          />
         </div>
 
         <div>
@@ -275,16 +225,16 @@ function DashboardPage() {
               <CartesianGrid stroke="var(--color-border)" vertical={false} />
               <XAxis
                 dataKey="category"
-                {...axis}
+                {...chartAxis}
                 interval={0}
                 angle={-18}
                 textAnchor="end"
                 height={60}
               />
-              <YAxis {...axis} />
+              <YAxis {...chartAxis} />
               <Tooltip
                 cursor={{ fill: "var(--color-muted)" }}
-                contentStyle={tooltipStyle}
+                contentStyle={chartTooltipStyle}
               />
               <Bar
                 isAnimationActive={false}

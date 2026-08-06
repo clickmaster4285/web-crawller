@@ -77,6 +77,12 @@ export interface HttpOptions {
    * rotation). Same retries / backoff / throttle as direct fetches.
    */
   proxy?: string;
+  /**
+   * Debug instrumentation — called once per actual HTTP request made through
+   * this options object (every attempt, success or retried failure). The
+   * worker uses it to surface a live request count on the crawl job.
+   */
+  onRequest?: () => void;
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -120,12 +126,15 @@ export async function fetchWithRetry(
         ...(proxy ? { dispatcher: proxy } : {}),
       });
     } catch (error) {
+      // Count the attempt even when it failed — it was a real request.
+      options.onRequest?.();
       if (attempt >= maxRetries) {
         throw new Error(`Network error for ${url}: ${String(error)}`);
       }
       await sleep(delayMs * (attempt + 1));
       continue;
     }
+    options.onRequest?.();
 
     if (
       response.status !== 429 &&

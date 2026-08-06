@@ -39,6 +39,10 @@ import { parseShopifyProduct, type RawProduct } from "./adapters/shopify.ts";
 import { fetchWooCommerceProductBySlug } from "./adapters/woocommerce.ts";
 import { extractFromHtml } from "./extract/mapper.ts";
 import { openCheckpointStore } from "./core/checkpoint.ts";
+import { isCrawlCancelled, waitForControl } from "./core/control.ts";
+// Re-exported for the worker process: it imports `{ runCrawl, isCrawlCancelled }`
+// from this module so a user-cancelled crawl is marked cancelled (not failed).
+export { isCrawlCancelled } from "./core/control.ts";
 import { Politeness } from "./core/politeness.ts";
 import {
   DEFAULT_MAX_PER_HOST,
@@ -92,6 +96,15 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   >();
   let fetchedCount = 0;
   let skippedUnchanged = 0;
+  // Debug — live HTTP-request counter. Every request (robots.txt, discovery,
+  // product fetches, retried attempts) flows through `HttpOptions.onRequest`
+  // and is reported via `config.onRequestCount`; the worker surfaces it on
+  // the job for the Active crawls page.
+  let requestCount = 0;
+  const countRequest = () => {
+    requestCount++;
+    config.onRequestCount?.(requestCount);
+  };
 
   // Shallow mode (architecture §3.2): a sitemap-only check that fetches just
   // the NEW products. Discovery is sitemap-only (no platform detection, no
@@ -112,6 +125,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     // Tier 2: robots.txt is fetched from the same (possibly IP-blocked)
     // origin, so it goes through the proxy too.
     proxy: config.proxy,
+    onRequest: countRequest,
   });
   const opts = httpOptions(config, {
     throttle: politeness,
@@ -127,6 +141,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             renderWithBrowser(url, { userAgent: config.userAgent }),
         }
       : {}),
+    onRequest: countRequest,
   });
   const concurrency = config.maxConcurrencyPerHost ?? DEFAULT_MAX_PER_HOST;
   const limiter = new HostLimiter(concurrency);
@@ -150,6 +165,9 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     // Tier 1: release the shared browser so the process can exit / the job
     // finishes cleanly (no-op when browser rendering was never used).
     if (config.useBrowser) await closeBrowser();
+    // A user-requested cancel must NOT be swallowed into an "empty result" —
+    // it unwinds the whole crawl so the worker can mark the job cancelled.
+    if (isCrawlCancelled(error)) throw error;
     return emptyResult(
       config,
       startedAt,
@@ -160,6 +178,8 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             crawlDelayMs: robotsSnapshot.crawlDelayMs,
           }
         : undefined,
+      // Requests made before the failure still count.
+      requestCount,
     );
   }
 
@@ -190,6 +210,10 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   // worker throws (e.g. a user onProgress callback).
   try {
     await runWithConcurrency(urlsToFetch, concurrency, async (url) => {
+      // Cooperative control: pause waits here, cancel throws. Checked before
+      // every URL so a pause/cancel lands within ~one in-flight request.
+      await waitForControl(config.control);
+
       // Resume fast-path: content unchanged since the last successful run
       // (sitemap lastmod match against Product.httpState, or etag match after
       // a conditional fetch) → reuse instead of refetching. Skipped products
@@ -304,6 +328,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       startedAt: new Date(startedAt).toISOString(),
       finishedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
+      requests: requestCount,
     },
     products,
     // Surface what each discovery strategy contributed (sitemap / html-crawl /
@@ -421,6 +446,7 @@ function emptyResult(
   startedAt: number,
   failures: CrawlFailure[],
   robots: RobotsInfo = { status: "skipped", crawlDelayMs: null },
+  requests = 0,
 ): CrawlResult {
   return {
     config: { origin: config.origin, collections: config.collections },
@@ -433,6 +459,7 @@ function emptyResult(
       startedAt: new Date(startedAt).toISOString(),
       finishedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
+      requests,
     },
     products: [],
     discovery: {

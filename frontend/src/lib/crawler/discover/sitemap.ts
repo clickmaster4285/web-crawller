@@ -19,6 +19,8 @@
 
 import { fetchText } from "../core/http.ts";
 import type { HttpOptions } from "../core/http.ts";
+import { runWithConcurrency } from "../core/queue.ts";
+import { waitForControl, type CrawlControl } from "../core/control.ts";
 
 /** A discovered URL and (when available) its last-modification date. */
 export interface DiscoveredUrl {
@@ -174,6 +176,7 @@ export async function fetchSitemapUrls(
   options: HttpOptions,
   depth = 0,
   prefetchedXml?: string,
+  control?: CrawlControl,
 ): Promise<SitemapFetchResult> {
   const xml = prefetchedXml ?? (await fetchText(sitemapUrl, options));
   const locs = extractLocs(xml);
@@ -189,11 +192,27 @@ export async function fetchSitemapUrls(
       (loc) =>
         !isNonProductSitemap(loc) && !WORDPRESS_NON_PRODUCT_CHILD_RE.test(loc),
     );
+    // Fetch index children in parallel (bounded at 6 in flight — the
+    // politeness throttle still gates every request, so this stays polite):
+    // a 23-child index like athletix.ae's was the sequential bottleneck that
+    // made discovery drag on for minutes. Each child checks the control
+    // handle so pause/cancel also work during the walk.
     const nested: DiscoveredUrl[] = [];
-    for (const loc of retained) {
-      const child = await fetchSitemapUrls(loc, options, depth + 1);
-      nested.push(...child.entries);
-    }
+    await runWithConcurrency(
+      retained,
+      Math.min(6, retained.length),
+      async (loc) => {
+        await waitForControl(control);
+        const child = await fetchSitemapUrls(
+          loc,
+          options,
+          depth + 1,
+          undefined,
+          control,
+        );
+        nested.push(...child.entries);
+      },
+    );
     // Trust the entries as products only when *every* retained child is a
     // known product sitemap. A mixed index (e.g. Rank Math's
     // `sitemap_index.xml` listing product-sitemap.xml + page-sitemap.xml)
@@ -227,6 +246,7 @@ export async function fetchSitemapUrls(
 export async function fetchSitemapCandidate(
   candidate: SitemapCandidate,
   options: HttpOptions,
+  control?: CrawlControl,
 ): Promise<SitemapCandidateResult> {
   const result: SitemapCandidateResult = {
     url: candidate.url,
@@ -250,7 +270,7 @@ export async function fetchSitemapCandidate(
   let all: SitemapFetchResult;
   try {
     // Pass the body we already fetched — no second request for the candidate.
-    all = await fetchSitemapUrls(candidate.url, options, 0, xml);
+    all = await fetchSitemapUrls(candidate.url, options, 0, xml, control);
   } catch (error) {
     result.status = "error";
     result.error = String(error);

@@ -43,11 +43,6 @@ export interface RawProduct {
   variants?: RawVariant[] | null;
 }
 
-function toNumber(value: string | null | undefined): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
-
 function toPrice(value: string | null | undefined): number {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : 0;

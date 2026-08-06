@@ -26,6 +26,7 @@
 
 import { fetchWithRetry } from "../core/http.ts";
 import type { HttpOptions } from "../core/http.ts";
+import { waitForControl, type CrawlControl } from "../core/control.ts";
 import type { CrawledProduct } from "../core/types.ts";
 
 /** A product as returned by `/wp-json/wc/v3/products` (fields we use). */
@@ -145,6 +146,7 @@ export async function discoverWooCommerceProducts(
   origin: string,
   options: HttpOptions,
   maxProducts = MAX_API_PRODUCTS,
+  control?: CrawlControl,
 ): Promise<{ urls: string[]; total: number | null; truncated: boolean }> {
   const urls = new Set<string>();
   const seen = new Set<number>();
@@ -154,6 +156,9 @@ export async function discoverWooCommerceProducts(
   let truncated = false;
 
   for (let page = 1; page <= MAX_API_PAGES; page++) {
+    // Cooperative control: pause waits here, cancel throws — a long API walk
+    // (up to 200 pages) must not ignore a user's pause/cancel.
+    await waitForControl(control);
     // Stop at the page count the API itself reported (`X-WP-TotalPages`).
     // This is the reliable signal — some hosts clamp `per_page` (e.g. 10 or
     // 50), which would otherwise make every full page look "short".

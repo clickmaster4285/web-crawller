@@ -140,6 +140,8 @@ export class Politeness implements RequestThrottle {
       respectRobots?: boolean;
       /** Tier 2 — residential proxy gateway URL (routes the robots.txt fetch too). */
       proxy?: string;
+      /** Debug — called once for the robots.txt fetch attempt. */
+      onRequest?: () => void;
     } = {},
   ): Promise<Politeness> {
     const baseDelay = options.delayMs ?? 1000;
@@ -157,6 +159,7 @@ export class Politeness implements RequestThrottle {
           userAgent: options.userAgent,
           proxy: options.proxy,
         });
+        options.onRequest?.();
         if (response.status >= 200 && response.status < 300) {
           robotsBody = await response.text();
           robots = parseRobotsTxt(
@@ -168,6 +171,8 @@ export class Politeness implements RequestThrottle {
           robotsCrawlDelayMs = robots.crawlDelayMs;
         }
       } catch {
+        // Count the failed robots attempt — it was still a real request.
+        options.onRequest?.();
         // 429 / network error fetching robots.txt → stay permissive; the
         // adaptive throttle will handle the rate limiting anyway.
         robotsStatus = "unreachable";

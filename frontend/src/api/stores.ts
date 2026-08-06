@@ -133,6 +133,24 @@ export const getStores = () =>
     "/stores",
   );
 
+/**
+ * Deletes a store everywhere (normalized collections + legacy CrawlResult) —
+ * the D1 read-path delete.
+ */
+export const deleteStore = (key: string) =>
+  http.del<{
+    success: boolean;
+    data: {
+      key: string;
+      deleted: {
+        products: number;
+        snapshots: number;
+        events: number;
+        legacy: number;
+      };
+    };
+  }>(`/stores/${encodeURIComponent(key)}`);
+
 /** Fetches one store's profile (record + latest snapshot). */
 export const getStore = (key: string) =>
   http.get<{ success: boolean; data: StoreProfileData }>(
