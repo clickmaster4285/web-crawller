@@ -116,6 +116,23 @@ function shutdown() {
 }
 
 /**
+ * Forces a full GC so V8 returns freed heap to the OS. Works because the
+ * worker is spawned with `--expose-gc` (see spawn.js / the npm script);
+ * without the flag this is a harmless no-op (manual `node worker.mjs` runs
+ * without the flag still work). Called between jobs and periodically mid-
+ * crawl: a long deep crawl otherwise leaves V8's heap at its multi-GB peak
+ * forever — the machine grinds to a halt at ~97% RAM as workers + API +
+ * Mongo fight for what's left.
+ */
+function gcNow() {
+  try {
+    global.gc?.();
+  } catch {
+    // --expose-gc missing — nothing to do.
+  }
+}
+
+/**
  * Sanitizes a crawler result into the persisted shape (the same mapping the
  * old in-SSR `runJob` used): identity fields survive the crawl → Mongo
  * boundary, failures stay capped, the full catalogue is kept.
@@ -224,6 +241,11 @@ async function processJob(job) {
           patch.fetchStartedAt = fetchStartedAt;
         }
         beat(patch);
+        // Periodic full GC mid-crawl (every 1000 products): the engine
+        // allocates large transient HTML/JSON per page and V8's heap only
+        // grows to the peak — this actively brings RSS back down so a
+        // 20-minute crawl can't freeze the machine.
+        if (processed > 0 && processed % 1000 === 0) gcNow();
       },
       onDiscoveryProgress: (discovery) => beat({ discovery }),
       // Debug: surface the live HTTP-request count on the job (throttled by
@@ -310,6 +332,9 @@ async function main() {
         () => {}
       );
     }
+    // Job finished (or failed) — hand the heap back to the OS before the
+    // next claim so memory can never ratchet up across consecutive jobs.
+    gcNow();
   }
 
   console.log(`👋 ${workerId} shutting down`);

@@ -6,7 +6,10 @@ import { Archive, Eye, PlayCircle, TriangleAlert } from "lucide-react";
 import { PageHeader } from "@/components/layout/app-shell";
 import { StoreProfile } from "@/components/crawls/store-profile";
 import { CancelCrawlDialog } from "@/components/crawls/cancel-crawl-dialog";
-import { CrawlSetupPanel } from "@/components/sources/crawl-setup-panel";
+import {
+  CrawlSetupPanel,
+  type RecentCrawl,
+} from "@/components/sources/crawl-setup-panel";
 import { CrawlProgressPanel } from "@/components/sources/crawl-progress-panel";
 import { CrawlResultsPanel } from "@/components/sources/crawl-results-panel";
 import { CrawlConfigPanel } from "@/components/sources/crawl-config-panel";
@@ -14,10 +17,14 @@ import { ActiveSchedulesPanel } from "@/components/sources/active-schedules-pane
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ErrorState, LoadingState } from "@/components/common/states";
-import { useSavedCrawls } from "@/hooks/useData";
+import { useSavedCrawlMetas } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import { useWorkspace } from "@/hooks/useWorkspace";
-import { invalidateCrawlData, type SavedCrawl } from "@/api";
+import {
+  getCrawlResultsData,
+  invalidateCrawlData,
+  type SavedCrawlMeta,
+} from "@/api";
 import {
   cancelCrawlJob,
   cancelCrawlSchedule,
@@ -74,7 +81,10 @@ export const Route = createFileRoute("/_authenticated/sources/")({
 
 function SourcesPage() {
   const { data: workspace, isLoading, isError } = useWorkspace();
-  const saved = useSavedCrawls();
+  // Lightweight crawl summaries (origin, product count, platform, discovery
+  // diagnostics — no product catalogues), polled every 30s. Full snapshots
+  // are fetched on demand below, only when a finished crawl needs the diff.
+  const saved = useSavedCrawlMetas();
   const queryClient = useQueryClient();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
@@ -375,16 +385,28 @@ function SourcesPage() {
   // The previous saved snapshot for the origin being crawled — everything
   // saved *after* this run started (including this run's own persistence)
   // is excluded, so the "what's new" diff is always against the last crawl
-  // that existed before this one.
+  // that existed before this one. Full product arrays are only needed once a
+  // crawl FINISHES (for the diff), so this targeted fetch fires then — the
+  // 30s summary poll never downloads catalogues.
+  const prevCrawlQuery = useQuery({
+    queryKey: ["crawl-prev", crawlOrigin.trim(), startedAt || 0],
+    // limit=2: newest-first, so index 0 is this run's own save (excluded by
+    // the startedAt filter below) and index 1 is the previous snapshot — no
+    // need to ship the origin's whole snapshot history for one diff.
+    queryFn: () =>
+      getCrawlResultsData({ origin: crawlOrigin.trim(), limit: 2 }),
+    enabled: !!result && startedAt > 0,
+    staleTime: 5 * 60_000,
+  });
   const prevCrawl = useMemo(() => {
     if (!startedAt) return undefined;
     const key = normalizeOrigin(crawlOrigin.trim());
-    return (saved.data?.data ?? []).find(
+    return (prevCrawlQuery.data?.data ?? []).find(
       (c) =>
         normalizeOrigin(c.origin) === key &&
         new Date(c.updatedAt).getTime() < startedAt,
     );
-  }, [saved.data, crawlOrigin, startedAt]);
+  }, [prevCrawlQuery.data, crawlOrigin, startedAt]);
 
   const diff = useMemo(
     () =>
@@ -392,24 +414,30 @@ function SourcesPage() {
     [result, prevCrawl],
   );
 
-  // Unique stores from saved crawls (newest first) — one-click re-runs.
-  const recentDomains = useMemo(() => {
+  // Unique stores from saved crawl summaries (newest first) — one-click
+  // re-runs. Built from metas, so this list never downloads catalogues.
+  const recentDomains = useMemo<RecentCrawl[]>(() => {
     const seen = new Set<string>();
-    const out: SavedCrawl[] = [];
+    const out: RecentCrawl[] = [];
     for (const c of saved.data?.data ?? []) {
       const key = normalizeOrigin(c.origin);
       if (!seen.has(key)) {
         seen.add(key);
-        out.push(c);
+        out.push({
+          _id: c._id,
+          origin: c.origin,
+          collections: c.collections,
+          productCount: c.productCount,
+        });
         if (out.length >= 6) break;
       }
     }
     return out;
   }, [saved.data]);
 
-  const pickRecent = (c: SavedCrawl) => {
+  const pickRecent = (c: RecentCrawl) => {
     setCrawlOrigin(c.origin);
-    setCollections(c.collections.join(", "));
+    setCollections((c.collections ?? []).join(", "));
     setJobId(null);
   };
 
@@ -422,8 +450,9 @@ function SourcesPage() {
 
   // Newest saved snapshot for the domain currently entered — feeds the
   // compact Store profile card (platform / sitemap / robots.txt detection).
+  // Metas carry the discovery diagnostics, so no catalogue is needed here.
   const profileKey = normalizeOrigin(crawlOrigin.trim());
-  const profileCrawl = useMemo(
+  const profileCrawl: SavedCrawlMeta | undefined = useMemo(
     () =>
       (saved.data?.data ?? []).find(
         (c) => normalizeOrigin(c.origin) === profileKey,
@@ -434,7 +463,7 @@ function SourcesPage() {
   // Newest shallow (sitemap-only) snapshot for the domain — the "Last quick
   // check" strip on the Store profile card. Old snapshots without a `type`
   // are all deep crawls, so they're excluded.
-  const lastShallowCrawl = useMemo(
+  const lastShallowCrawl: SavedCrawlMeta | undefined = useMemo(
     () =>
       (saved.data?.data ?? []).find(
         (c) =>
@@ -546,9 +575,10 @@ function SourcesPage() {
           crawl={profileCrawl}
           domain={profileKey}
           lastShallow={lastShallowCrawl}
+          productCount={profileCrawl?.productCount}
           onSuggestionClick={actionUrl}
           headerAction={
-            profileCrawl && profileCrawl.products.length > 0 ? (
+            (profileCrawl?.productCount ?? 0) > 0 ? (
               <Button asChild variant="outline" size="sm" className="h-7">
                 <Link to="/stores/$origin" params={{ origin: profileKey }}>
                   <Eye className="size-3.5" /> View catalogue

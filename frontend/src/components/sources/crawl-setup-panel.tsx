@@ -10,9 +10,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { SavedCrawl } from "@/api";
 import type { CrawlFrequency } from "@/lib/crawl";
 import { normalizeOrigin } from "@/utils/crawls";
+
+/**
+ * A recent store for one-click re-runs — built from the lightweight crawl
+ * summaries (`?meta=1`), so this panel never downloads full catalogues.
+ */
+export interface RecentCrawl {
+  _id: string;
+  origin: string;
+  collections?: string[];
+  productCount: number;
+}
 
 /** The "Start a crawl" card — domain, collections, recent stores and the
  * Run crawl / Quick check / Schedule actions. */
@@ -38,8 +48,8 @@ export function CrawlSetupPanel({
   onOriginChange: (value: string) => void;
   collections: string;
   onCollectionsChange: (value: string) => void;
-  recentDomains: SavedCrawl[];
-  onPickRecent: (crawl: SavedCrawl) => void;
+  recentDomains: RecentCrawl[];
+  onPickRecent: (crawl: RecentCrawl) => void;
   frequency: CrawlFrequency;
   onFrequencyChange: (value: CrawlFrequency) => void;
   onRunCrawl: () => void;
@@ -99,7 +109,7 @@ export function CrawlSetupPanel({
                   <Globe className="size-3 text-muted-foreground group-hover:text-primary" />
                   <span className="font-mono">{normalizeOrigin(c.origin)}</span>
                   <span className="text-muted-foreground">
-                    · {c.products.length} products
+                    · {c.productCount} products
                   </span>
                 </button>
               ))}

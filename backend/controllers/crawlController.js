@@ -20,14 +20,24 @@ const Store = require('../models/Store');
 
 const getCrawlResults = async (req, res) => {
   try {
-    const { origin, meta } = req.query;
+    const { origin, meta, limit } = req.query;
     const isMeta = meta === '1' || meta === 'true';
+    // Full mode: how many snapshots to return (default 50). The UI's "fetch
+    // the previous snapshot for a diff" call passes a small limit so it never
+    // pulls an origin's whole 20-snapshot history across the wire.
+    const parsedLimit = Number(limit);
+    const maxDocs = Number.isFinite(parsedLimit) && parsedLimit > 0
+      ? Math.min(parsedLimit, 200)
+      : 50;
     let docs;
     if (isMeta) {
       // Summary mode — used by store pickers/lists that only need origin,
-      // platform, product count and timestamps. Product catalogues are NOT
-      // loaded, so this stays tiny even with tens of thousands of products
-      // (10.8 MB of products -> ~10 KB of summaries).
+      // platform, product count, timestamps and the discovery diagnostics.
+      // Product catalogues are NOT loaded, so this stays tiny even with tens
+      // of thousands of products (10.8 MB of products -> ~10 KB of
+      // summaries). The sitemap candidates' `entries` (the full parsed URL
+      // lists — the whole catalogue again) are stripped out of `discovery`
+      // via the $map below, keeping even that field lean.
       const pipeline = [
         ...(origin ? [{ $match: { origin } }] : []),
         { $sort: { createdAt: -1 } },
@@ -37,18 +47,71 @@ const getCrawlResults = async (req, res) => {
             _id: 1,
             origin: 1,
             type: { $ifNull: ['$type', 'deep'] },
+            collections: 1,
             createdAt: 1,
             updatedAt: 1,
             stats: 1,
             productCount: { $size: { $ifNull: ['$products', []] } },
-            platform: { $ifNull: ['$discovery.platform.platform', null] }
+            platform: { $ifNull: ['$discovery.platform.platform', null] },
+            // Discovery diagnostics minus the sitemap candidate URL lists
+            // (`entries` can hold every URL in the catalogue — 10k+ entries
+            // for a big store). Everything else the UI reads from discovery
+            // (platform kind, robots, homepage analysis, findings, log) is
+            // preserved.
+            discovery: {
+              $cond: [
+                { $eq: ['$discovery', null] },
+                '$discovery',
+                {
+                  $mergeObjects: [
+                    '$discovery',
+                    {
+                      sitemap: {
+                        $cond: [
+                          { $eq: ['$discovery.sitemap', null] },
+                          '$discovery.sitemap',
+                          {
+                            $mergeObjects: [
+                              '$discovery.sitemap',
+                              {
+                                candidates: {
+                                  $cond: [
+                                    { $isArray: '$discovery.sitemap.candidates' },
+                                    {
+                                      $map: {
+                                        input: '$discovery.sitemap.candidates',
+                                        as: 'c',
+                                        in: {
+                                          url: '$$c.url',
+                                          source: '$$c.source',
+                                          status: '$$c.status',
+                                          urls: '$$c.urls',
+                                          productUrls: '$$c.productUrls',
+                                          error: '$$c.error',
+                                          isProductSitemap: '$$c.isProductSitemap'
+                                        }
+                                      }
+                                    },
+                                    '$discovery.sitemap.candidates'
+                                  ]
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
           }
         }
       ];
       docs = await CrawlResult.aggregate(pipeline);
     } else {
       const filter = origin ? { origin } : {};
-      docs = await CrawlResult.find(filter).sort({ createdAt: -1 }).limit(50);
+      docs = await CrawlResult.find(filter).sort({ createdAt: -1 }).limit(maxDocs);
     }
     res.json({
       success: true,

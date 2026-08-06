@@ -8,6 +8,10 @@
  *   PARITY_WORKERS=N      worker processes to spawn (default min(3, CPU cores)
  *                         in dev so queued crawls run in parallel, 0 in prod)
  *   PARITY_SCHEDULER=0/1  spawn the scheduler (default on in dev, off in prod)
+ *   PARITY_WORKER_MAX_OLD_SPACE_MB  worker V8 heap cap (default 3072) — bounds
+ *                         a deep crawl's heap so it can't balloon to a
+ *                         multi-GB high-water mark that never returns to the
+ *                         OS (the worker also forces GC mid-crawl/job-end).
  *
  * Production deployments should run `npm run worker` (N instances) and
  * `npm run scheduler` (single instance) under their own process manager
@@ -21,11 +25,12 @@ const BACKEND_ROOT = path.join(__dirname, '..');
 const children = new Set();
 let shuttingDown = false;
 
-function spawnProcess(label, script, env = {}) {
+function spawnProcess(label, script, env = {}, execArgv = []) {
   const child = spawn(process.execPath, [path.join(__dirname, script)], {
     cwd: BACKEND_ROOT,
     env: { ...process.env, ...env },
-    stdio: 'inherit'
+    stdio: 'inherit',
+    ...(execArgv.length > 0 ? { execArgv } : {})
   });
   children.add(child);
   let failures = 0;
@@ -72,8 +77,23 @@ function spawnCrawlInfra() {
       ? process.env.PARITY_SCHEDULER === '1'
       : !isProd;
 
+  // Heap bound + explicit GC for workers: a 20-minute deep crawl churns
+  // gigabytes of transient HTML/JSON through V8, whose old-space grows to the
+  // peak and never returns it to the OS. `--max-old-space-size` caps the heap
+  // (forcing V8 to compact/collect instead of ballooning) and `--expose-gc`
+  // lets worker.mjs call `global.gc()` between jobs and periodically mid-crawl
+  // so RSS actually comes back down.
+  const parsedMax = Number(process.env.PARITY_WORKER_MAX_OLD_SPACE_MB);
+  const maxOldSpaceMB =
+    Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 3072;
+  const workerExecArgv = ['--expose-gc', `--max-old-space-size=${maxOldSpaceMB}`];
   for (let i = 1; i <= workerCount; i++) {
-    spawnProcess(`worker ${i}`, 'worker.mjs', { PARITY_WORKER_ID: `worker-${i}` });
+    spawnProcess(
+      `worker ${i}`,
+      'worker.mjs',
+      { PARITY_WORKER_ID: `worker-${i}` },
+      workerExecArgv
+    );
   }
   if (schedulerOn) {
     spawnProcess('scheduler', 'scheduler.mjs');

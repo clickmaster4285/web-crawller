@@ -10,9 +10,28 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { SavedCrawl } from "@/api";
+import type { SavedCrawl, SavedCrawlProduct } from "@/api";
 import { formatCrawlDate, productUrlPattern, robotsText } from "@/utils/crawls";
 import { cn } from "@/lib/utils";
+
+/**
+ * Fields the profile card reads from a crawl snapshot — satisfied by both
+ * the legacy `SavedCrawl` (full product arrays) and the lightweight
+ * `SavedCrawlMeta` (summaries without products), so the read path can feed
+ * it directly without shipping catalogues to the browser.
+ */
+export interface StoreProfileCrawl {
+  updatedAt: string;
+  stats: { fetched: number };
+  discovery?: SavedCrawl["discovery"];
+  products?: SavedCrawlProduct[];
+}
+
+/** Fields the quick-check strip reads from the newest shallow snapshot. */
+export interface StoreProfileShallow {
+  updatedAt: string;
+  stats: { discovered: number };
+}
 
 function ProfileCell({
   label,
@@ -81,7 +100,7 @@ export function StoreProfile({
   urlPattern,
 }: {
   /** Newest saved snapshot for the domain being crawled (or undefined). */
-  crawl: SavedCrawl | undefined;
+  crawl: StoreProfileCrawl | undefined;
   /** Normalized host of the domain entered in the crawler. */
   domain: string;
   /** Optional action rendered in the header row (e.g. a "View catalogue" link). */
@@ -89,7 +108,7 @@ export function StoreProfile({
   /** Called when the user clicks a suggestion action (e.g. crawl the linked store). */
   onSuggestionClick?: (url: string) => void;
   /** Newest shallow (sitemap-only) snapshot — rendered as a "last quick check" strip. */
-  lastShallow?: SavedCrawl;
+  lastShallow?: StoreProfileShallow;
   /**
    * Product count override — the read path (D1) has no product arrays, so
    * callers pass the snapshot's `productCount` instead of `crawl.products`.
@@ -103,7 +122,7 @@ export function StoreProfile({
   urlPattern?: string | null;
 }) {
   const d = crawl?.discovery;
-  const count = productCount ?? crawl?.products.length ?? 0;
+  const count = productCount ?? crawl?.products?.length ?? 0;
   const parseRate =
     crawl && crawl.stats.fetched > 0
       ? Math.round((count / crawl.stats.fetched) * 100)
@@ -186,7 +205,9 @@ export function StoreProfile({
           label="URL pattern"
           value={
             urlPattern ??
-            (crawl.products[0] ? productUrlPattern(crawl.products[0].url) : "—")
+            (crawl.products?.[0]
+              ? productUrlPattern(crawl.products[0].url)
+              : "—")
           }
           mono
         />

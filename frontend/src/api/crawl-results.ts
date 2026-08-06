@@ -121,18 +121,23 @@ export interface CrawlResultsResponse<T = SavedCrawl> {
 /**
  * Lightweight crawl summary (`GET /api/data/crawl-results?meta=1`) — the
  * full product catalogues are omitted, so store lists stay tiny even with
- * tens of thousands of products saved.
+ * tens of thousands of products saved. The discovery diagnostics are kept
+ * (minus the sitemap candidates' URL lists), so profile cards and quick-check
+ * strips can render straight from summaries.
  */
 export interface SavedCrawlMeta {
   _id: string;
   origin: string;
   /** Job type ('shallow' sitemap-only check vs 'deep' full crawl). */
   type: "shallow" | "deep";
+  collections: string[];
   createdAt: string;
   updatedAt: string;
   stats: SavedCrawl["stats"];
   productCount: number;
   platform: string | null;
+  /** Discovery diagnostics without the sitemap candidate URL lists. */
+  discovery?: SavedCrawl["discovery"];
 }
 
 /** Query options for the saved-crawl list endpoint. */
@@ -141,6 +146,12 @@ export interface CrawlResultsParams {
   origin?: string;
   /** Return lightweight summaries instead of full crawl documents. */
   meta?: boolean;
+  /**
+   * Max snapshots to return (full mode default 50). Callers that only need
+   * the previous snapshot for a diff pass a small limit so an origin's whole
+   * history (up to 20 full catalogues) never crosses the wire.
+   */
+  limit?: number;
 }
 
 /**
@@ -154,6 +165,7 @@ export const getCrawlResultsData = <T = SavedCrawl>(
   const qs = new URLSearchParams();
   if (params.origin) qs.set("origin", params.origin);
   if (params.meta) qs.set("meta", "1");
+  if (params.limit != null) qs.set("limit", String(params.limit));
   const query = qs.toString();
   return http.get<CrawlResultsResponse<T>>(
     `/data/crawl-results${query ? `?${query}` : ""}`,

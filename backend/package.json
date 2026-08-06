@@ -10,7 +10,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "backfill": "node scripts/backfill.js",
-    "worker": "node workers/worker.mjs",
+    "worker": "node --expose-gc --max-old-space-size=3072 workers/worker.mjs",
     "scheduler": "node workers/scheduler.mjs",
     "reconcile-matches": "node scripts/reconcile-matches.js"
   },
