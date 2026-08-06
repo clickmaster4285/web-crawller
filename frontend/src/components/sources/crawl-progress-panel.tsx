@@ -1,4 +1,5 @@
 import {
+  Cpu,
   Loader2,
   Pause,
   Play,
@@ -100,6 +101,28 @@ export function CrawlProgressPanel({
               <Radar className="size-3" />
             )}
             {shallowRun ? "shallow check" : "deep crawl"}
+          </Badge>
+          {/* Claiming worker — mirrors the Active crawls page badge; amber
+              when the worker's heartbeat went stale (may have crashed). */}
+          <Badge
+            variant={job.heartbeatStale ? "secondary" : "outline"}
+            className={
+              job.heartbeatStale
+                ? "gap-1 border-amber-500/40 font-mono text-[11px] font-normal text-amber-600"
+                : "gap-1 border-accent/40 font-mono text-[11px] font-normal"
+            }
+            title={
+              job.heartbeatStale
+                ? "No heartbeat — this worker may have crashed"
+                : undefined
+            }
+          >
+            {job.heartbeatStale ? (
+              <TriangleAlert className="size-3" />
+            ) : (
+              <Cpu className="size-3 text-accent" />
+            )}
+            {job.workerId ?? "not claimed yet"}
           </Badge>
         </span>
         <span className="numeric">
@@ -266,7 +289,7 @@ export function CrawlProgressPanel({
           {job.params.storeSnapshots ? "snapshots on" : "no snapshots"}
         </Badge>
         <Badge variant="secondary" className="font-normal">
-          {job.params.useBrowser ? "browser rendering" : "http only"}
+          {job.params.useBrowser ? "auto JS rendering" : "http only"}
         </Badge>
         <Badge variant="secondary" className="font-normal">
           {job.params.proxy ? "residential proxy" : "direct"}

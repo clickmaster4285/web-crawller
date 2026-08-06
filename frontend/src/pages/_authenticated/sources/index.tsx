@@ -157,11 +157,15 @@ function SourcesPage() {
     "parity.sources.snapshots",
     true,
   );
-  // Tier 1 — Playwright browser rendering (opt-in): JS-shell pages are
-  // rendered in a headless browser so JS-rendered stores crawl properly.
+  // Tier 1 — Playwright browser rendering. AUTO by default (key bumped to v2
+  // so a previously-stored `false` from the old opt-in toggle doesn't keep
+  // auto-rendering disabled for existing users): the renderer is available
+  // and the engine renders only genuine JS-shell pages (Nuxt/SPA app-mounts)
+  // — content-rich server-rendered stores never touch the browser. Turn off
+  // for strict http-only crawls.
   const [useBrowser, setUseBrowser] = useLocalStorageState(
-    "parity.sources.useBrowser",
-    false,
+    "parity.sources.useBrowser.v2",
+    true,
   );
   // Tier 2 — rotating residential proxy gateway URL (opt-in). Credentials
   // stay in the user's own localStorage; only the boolean is ever sent to

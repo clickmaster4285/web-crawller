@@ -52,9 +52,11 @@ export interface CrawlRunInput {
    */
   storeSnapshots?: boolean;
   /**
-   * Tier 1 — Playwright browser rendering (default false). Renders JS-shell
-   * pages in a headless browser before discovery/extraction, unlocking
-   * JS-rendered stores. Slower; requires playwright + Chrome installed.
+   * Tier 1 — Playwright browser rendering (default true = AUTO). The renderer
+   * is available and the engine renders only content-poor JS-shell pages
+   * (Nuxt/SPA shells, bot-block pages) — content-rich server-rendered stores
+   * never touch the browser. Set false for strict http-only crawls.
+   * Requires playwright + Chrome installed.
    */
   useBrowser?: boolean;
   /**
@@ -255,6 +257,17 @@ export interface CrawlJob {
    * while the job is still queued.
    */
   workerId: string | null;
+  /**
+   * Last worker heartbeat (ms) — null while queued/terminal (never
+   * heartbeated, or released after a crash).
+   */
+  heartbeatAt: number | null;
+  /**
+   * True when a claimed job's worker stopped heartbeating within the server
+   * timeout (PARITY_HEARTBEAT_TIMEOUT_MS) — the worker may have crashed, so
+   * the Active crawls UI warns amber instead of showing it as healthy.
+   */
+  heartbeatStale: boolean;
   /**
    * Live HTTP-request count for this run (debug — every attempt counts,
    * including robots.txt, discovery and retries).

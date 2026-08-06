@@ -16,8 +16,10 @@
  *     chromium`). This keeps the feature working on machines with Chrome
  *     already present.
  *
- * Crawls opt in per-run (`config.useBrowser`); this module is dead code
- * otherwise.
+ * AUTO by default: the engine wires `renderWithBrowser` whenever
+ * `config.useBrowser !== false`, and `core/http.ts` decides per page whether
+ * rendering is genuinely needed (content-poor JS shells only). Only
+ * `useBrowser: false` disables the module entirely.
  */
 
 import { createRequire } from "node:module";

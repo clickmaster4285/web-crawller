@@ -2,12 +2,14 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
+  Cpu,
   ExternalLink,
   Loader2,
   Pause,
   Play,
   Radar,
   Square,
+  TriangleAlert,
   Zap,
 } from "lucide-react";
 
@@ -129,6 +131,21 @@ function CrawlerPage() {
   const controlPendingId = control.isPending
     ? (control.variables?.id ?? null)
     : null;
+  // Distinct workers currently holding a job — the live parallelism view:
+  // with PARITY_WORKERS=3 you should see worker-1/2/3 each crawling a
+  // different store. Workers with no job don't appear (they're idle).
+  // `workerStale` flags workers whose held job has a stale heartbeat — the
+  // worker may have crashed, and the UI warns amber instead of green.
+  const workerStale = new Map<string, boolean>();
+  for (const job of active) {
+    if (!job.workerId) continue;
+    workerStale.set(
+      job.workerId,
+      (workerStale.get(job.workerId) ?? false) || !!job.heartbeatStale,
+    );
+  }
+  const busyWorkers = [...workerStale.keys()].sort();
+  const staleWorkerCount = busyWorkers.filter((w) => workerStale.get(w)).length;
 
   // Dismiss the dialog if its job vanished from the active list while the
   // user was deciding (it finished or was pruned) — cancelling a ghost job
@@ -168,6 +185,54 @@ function CrawlerPage() {
               Refreshing every few seconds
             </span>
           </div>
+
+          {/* Live parallelism — the distinct workers holding a job right
+              now (idle workers have no job and don't appear). With 3
+              workers you should see worker-1/2/3 in parallel. A worker
+              whose job hasn't heartbeated within the timeout is shown
+              AMBER — it may have crashed (its job will be released and
+              requeued by the next claim, but the dead worker is visible
+              here without grepping logs). */}
+          {busyWorkers.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="label-caps text-muted-foreground">
+                Workers busy
+              </span>
+              {busyWorkers.map((w) =>
+                workerStale.get(w) ? (
+                  <Badge
+                    key={w}
+                    variant="secondary"
+                    className="gap-1 border-amber-500/40 font-mono text-[11px] font-normal text-amber-600"
+                    title="No heartbeat — this worker may have crashed"
+                  >
+                    <TriangleAlert className="size-3" />
+                    {w} · no heartbeat
+                  </Badge>
+                ) : (
+                  <Badge
+                    key={w}
+                    variant="secondary"
+                    className="gap-1 border-emerald-500/30 font-mono text-[11px] font-normal"
+                  >
+                    <Cpu className="size-3 text-emerald-500" />
+                    {w}
+                  </Badge>
+                ),
+              )}
+              <span
+                className={
+                  staleWorkerCount > 0
+                    ? "text-[11px] text-amber-600"
+                    : "text-[11px] text-muted-foreground/70"
+                }
+              >
+                {staleWorkerCount > 0
+                  ? `${busyWorkers.length} busy — ${staleWorkerCount} worker${staleWorkerCount === 1 ? "" : "s"} not heartbeating`
+                  : `${busyWorkers.length} of the configured workers are crawling`}
+              </span>
+            </div>
+          ) : null}
 
           {active.length === 0 ? (
             <div className="flex flex-col items-center gap-2 border border-dashed border-border bg-muted/30 px-8 py-12 text-center">
@@ -253,26 +318,59 @@ function CrawlerPage() {
                               Cancelling…
                             </Badge>
                           ) : null}
+                          {job.workerId ? (
+                            <Badge
+                              variant={
+                                job.heartbeatStale ? "secondary" : "outline"
+                              }
+                              className={
+                                job.heartbeatStale
+                                  ? "gap-1 border-amber-500/40 font-mono text-[11px] font-normal text-amber-600"
+                                  : "gap-1 border-accent/40 font-mono text-[11px] font-normal"
+                              }
+                              title={
+                                job.heartbeatStale
+                                  ? "No heartbeat — this worker may have crashed"
+                                  : undefined
+                              }
+                            >
+                              {job.heartbeatStale ? (
+                                <TriangleAlert className="size-3" />
+                              ) : (
+                                <Cpu className="size-3 text-accent" />
+                              )}
+                              {job.workerId}
+                            </Badge>
+                          ) : null}
                         </div>{" "}
                         <p className="mt-1 text-xs text-muted-foreground">
                           {job.startedAt > 0
                             ? `Started ${ago(Math.max(0, now - job.startedAt))}`
                             : "Just started"}
-                          {job.params.useBrowser ? " · browser rendering" : ""}
+                          {job.params.useBrowser ? " · auto JS rendering" : ""}
                           {job.params.proxy ? " · residential proxy" : ""}
                         </p>
-                        {/* Debug strip — worker id + live request count, so a
-                            crawl can be traced to a worker and its HTTP cost
-                            observed without opening worker logs. */}
+                        {/* Debug strip — live request count, so a crawl's HTTP
+                            cost can be observed without opening worker logs.
+                            The worker id itself is the badge above. */}
                         <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground/70">
                           <span className="label-caps">Debug</span>
-                          <span className="font-mono">
-                            {job.workerId ?? "not claimed yet"}
-                          </span>
-                          <span>
-                            {(job.requests ?? 0).toLocaleString()} request
-                            {(job.requests ?? 0) === 1 ? "" : "s"}
-                          </span>
+                          {job.workerId ? (
+                            <>
+                              <span>
+                                {(job.requests ?? 0).toLocaleString()} request
+                                {(job.requests ?? 0) === 1 ? "" : "s"}
+                              </span>
+                              {job.heartbeatAt ? (
+                                <span>
+                                  last beat{" "}
+                                  {ago(Math.max(0, now - job.heartbeatAt))}
+                                </span>
+                              ) : null}
+                            </>
+                          ) : (
+                            <span className="font-mono">not claimed yet</span>
+                          )}
                           {job.state === "retrying" ? (
                             <span className="text-amber-600">retrying…</span>
                           ) : null}
@@ -415,6 +513,7 @@ function CrawlerPage() {
                       {stateLabel(job.state)}
                     </Badge>{" "}
                     <span className="text-xs text-muted-foreground">
+                      {job.workerId ? `by ${job.workerId} · ` : ""}
                       {done
                         ? `${job.processed.toLocaleString()} products · `
                         : ""}

@@ -222,13 +222,14 @@ export async function fetchText(
 ): Promise<string> {
   const response = await fetchWithRetry(url, options);
   const body = await response.text();
-  // Tier 1 (Playwright) fallback: when enabled and the server HTML looks like
-  // a JS shell, render it in a browser and use the hydrated DOM. A renderer
-  // failure keeps the raw HTML — the crawl reports it honestly.
+  // Tier 1 (Playwright) auto fallback: when the renderer is available and the
+  // server HTML looks like a client-rendered shell, render it in a browser and
+  // use the hydrated DOM. A renderer failure keeps the raw HTML — the crawl
+  // reports it honestly.
   if (
     options.renderWithBrowser &&
     isProbablyHtml(body) &&
-    looksLikeJsShell(body)
+    needsBrowserRender(body)
   ) {
     try {
       return await options.renderWithBrowser(url);
@@ -255,26 +256,36 @@ function isProbablyHtml(body: string): boolean {
 }
 
 /**
- * True when server HTML looks like a client-rendered shell that needs JS:
- * an app-mount element (`#__nuxt`, `#__next`, `#root`, `#app`…) paired with a
- * JS bundle, or a page with almost no links and no structured data (a shell
- * or a bot-block page).
+ * Auto mode decision — true when server HTML looks like a client-rendered
+ * shell that genuinely needs JS to show its content. The check is deliberately
+ * CONTENT-POOR ONLY: rendering is expensive (headless Chromium, 1-5s/page), so
+ * a page is only ever re-rendered when its raw HTML can't stand alone — an
+ * app-mount shell (`#__nuxt`, `#__next`, `#root`…) with a JS bundle and almost
+ * no server-side links or structured data. Content-rich pages (server-rendered
+ * product pages with JSON-LD / og:title / itemprop or a normal link density)
+ * are NEVER rendered, so auto mode costs nothing on regular stores.
  */
-function looksLikeJsShell(body: string): boolean {
+function needsBrowserRender(body: string): boolean {
   const head = body.slice(0, 200_000);
+  const linkCount = body.match(/<a\s/g)?.length ?? 0;
+  // Structured data or a sensible link count = the server HTML already has
+  // the content extraction needs — no browser required, ever.
   if (
-    /id=["']?(__nuxt|__next|__gatsby|root|app|app-root)["']?/i.test(head) &&
-    /<script[^>]+src=[^>]*(\.mjs|\.js)/i.test(head)
+    /application\/ld\+json|og:title|itemprop=/i.test(head) ||
+    linkCount >= 10
   ) {
-    return true;
+    return false;
   }
-  if (
-    (body.match(/<a\s/g)?.length ?? 0) < 5 &&
-    !/application\/ld\+json|og:title|itemprop=/i.test(head)
-  ) {
-    return true;
-  }
-  return false;
+  // A genuine shell: an app-mount element paired with a JS bundle. This is
+  // the ONLY trigger — near-empty pages WITHOUT a mount marker are NOT
+  // rendered, so 404/empty category/bot-block pages on ordinary stores never
+  // pay the 1-5s headless-Chromium cost (extraction was going to fail on
+  // them anyway).
+  const hasBundle = /<script[^>]+src=[^>]*(\.mjs|\.js)/i.test(head);
+  return (
+    hasBundle &&
+    /id=["']?(__nuxt|__next|__gatsby|root|app|app-root)["']?/i.test(head)
+  );
 }
 
 /** Derives crawl-scoped HTTP options from a CrawlConfig, plus overrides. */

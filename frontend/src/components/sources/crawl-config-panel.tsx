@@ -216,10 +216,10 @@ export function CrawlConfigPanel({
 
         <div className="flex items-center justify-between gap-4">
           <div>
-            <Label htmlFor="browser">Browser rendering</Label>
+            <Label htmlFor="browser">Auto-detect JS-rendered pages</Label>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Playwright fallback for JS-rendered stores (Nuxt/SPA) — slower,
-              needs Chrome installed
+              Renders only pages that need it (Nuxt/SPA shells) — content-rich
+              stores stay on plain HTTP. Needs Chrome installed
             </p>
           </div>
           <Switch
@@ -231,12 +231,13 @@ export function CrawlConfigPanel({
         {useBrowser ? (
           <Alert className="border-accent/50 [&>svg]:text-accent lg:col-span-2">
             <Globe className="size-4" />
-            <AlertTitle>Tier 1 — browser rendering on</AlertTitle>
+            <AlertTitle>Tier 1 — auto JS rendering on</AlertTitle>
             <AlertDescription>
-              Pages that look like a JS shell are rendered in headless Chrome
-              before discovery and extraction see them. This is for stores whose
-              products load client-side; leave it off for regular stores to keep
-              crawls fast.
+              Recommended. Every page is checked automatically: only ones whose
+              raw HTML is a client-rendered shell (bare mount + JS bundle,
+              almost no links or structured data) are rendered in headless
+              Chrome. Server-rendered product pages are never re-rendered, so
+              regular stores keep crawling at full HTTP speed.
             </AlertDescription>
           </Alert>
         ) : null}

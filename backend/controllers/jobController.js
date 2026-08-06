@@ -79,7 +79,9 @@ function normalizeCrawlInput(body = {}) {
     respectRobotsTxt: body.respectRobotsTxt !== false,
     productOnly: body.productOnly !== false,
     storeSnapshots: body.storeSnapshots !== false,
-    useBrowser: body.useBrowser === true,
+    // Auto-detect JS rendering (default): renderer available, only content-
+    // poor shell pages rendered per-page. Explicit false = http-only.
+    useBrowser: body.useBrowser !== false,
     proxy: proxy.length > 0,
     proxyUrl: proxy || null,
     // A shallow check fetches ONLY new products — a partial catalogue must
@@ -191,7 +193,8 @@ const upsertSchedule = async (req, res) => {
               respectRobotsTxt: req.body.respectRobotsTxt !== false,
               productOnly: req.body.productOnly !== false,
               storeSnapshots: req.body.storeSnapshots !== false,
-              useBrowser: req.body.useBrowser === true,
+              // Auto-detect JS rendering (default) — see normalizeCrawlInput.
+              useBrowser: req.body.useBrowser !== false,
               proxy: proxy.length > 0,
               proxyUrl: proxy || null
             }

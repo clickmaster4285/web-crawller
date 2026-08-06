@@ -47,7 +47,9 @@ const crawlParamsSchema = new mongoose.Schema(
     respectRobotsTxt: { type: Boolean, default: true },
     productOnly: { type: Boolean, default: true },
     storeSnapshots: { type: Boolean, default: true },
-    useBrowser: { type: Boolean, default: false },
+    // AUTO by default: renderer available; only content-poor JS-shell pages
+    // are rendered per-page (core/http.ts needsBrowserRender). false = http-only.
+    useBrowser: { type: Boolean, default: true },
     proxy: { type: Boolean, default: false },
     proxyUrl: { type: String, default: null }
   },

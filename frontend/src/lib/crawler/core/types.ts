@@ -103,11 +103,12 @@ export interface CrawlConfig {
    */
   productOnly?: boolean;
   /**
-   * Tier 1 — Playwright browser rendering (default false). When true, pages
-   * whose server HTML looks like a client-side JS shell are rendered in a
-   * headless browser before discovery + extraction see them, unlocking
-   * JS-rendered stores (Nuxt/Next/SPA). Opt-in per crawl: it is slower and
-   * requires playwright + Chrome (see `core/browser.ts`).
+   * Tier 1 — Playwright browser rendering. Default (unset/true) is AUTO:
+   * the renderer is always wired and `core/http.ts` renders only content-poor
+   * JS-shell pages (Nuxt/SPA shells, bot-block pages) — content-rich
+   * server-rendered pages are never re-rendered, so regular stores pay
+   * nothing. Set to `false` to disable rendering entirely (http-only).
+   * Requires playwright + Chrome (see `core/browser.ts`).
    */
   useBrowser?: boolean;
   /**

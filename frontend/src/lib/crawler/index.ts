@@ -136,10 +136,14 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     isAllowed: respectRobots
       ? (url) => politeness.isUrlAllowed(url)
       : undefined,
-    // Tier 1 (Playwright): when opted in, discovery (homepage analysis,
-    // HTML BFS) and product fetches re-render JS-shell pages so the engine
-    // sees the hydrated DOM. Lazy — browser.ts only loads playwright on use.
-    ...(config.useBrowser
+    // Tier 1 (Playwright): AUTO mode (default). The renderer is always wired;
+    // core/http.ts's `needsBrowserRender` decides PER PAGE whether a browser
+    // is genuinely needed — only content-poor JS-shell pages (Nuxt/SPA shells,
+    // bot-block pages) are rendered in headless Chromium, so content-rich
+    // server-rendered stores never touch the browser and stay fast. Set
+    // `useBrowser: false` to disable rendering entirely. Lazy — browser.ts
+    // only loads playwright on first render.
+    ...(config.useBrowser !== false
       ? {
           renderWithBrowser: (url: string) =>
             renderWithBrowser(url, { userAgent: config.userAgent }),
@@ -168,7 +172,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     store?.close();
     // Tier 1: release the shared browser so the process can exit / the job
     // finishes cleanly (no-op when browser rendering was never used).
-    if (config.useBrowser) await closeBrowser();
+    if (config.useBrowser !== false) await closeBrowser();
     // A user-requested cancel must NOT be swallowed into an "empty result" —
     // it unwinds the whole crawl so the worker can mark the job cancelled.
     if (isCrawlCancelled(error)) throw error;
@@ -207,6 +211,17 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   // product by id (URL → id map from the walk) instead of scraping HTML.
   const bcApiAvailable =
     !shallow && discovered.diagnostics.bigCommerce?.status === "public";
+
+  // Tier 1 probe skip: when discovery positively identified a NON-Shopify
+  // platform (WooCommerce / WordPress / Magento / BigCommerce / Wix / …), the
+  // per-product Shopify /products/{handle}.json probe can only 404 — a wasted
+  // request per product, roughly HALF the fetch-phase traffic on big
+  // non-Shopify stores. "Unknown" (or absent detection) keeps probing: it may
+  // still be a Shopify store, and the probe is the cheap first guess there.
+  const skipShopifyProbe =
+    !shallow &&
+    discovered.diagnostics.platform?.platform != null &&
+    !["Shopify", "Unknown"].includes(discovered.diagnostics.platform.platform);
 
   // `onProgress` first arg = products in hand (freshly fetched + cache-reused),
   // i.e. progress through the run; `stats.fetched` is the fresh-only count.
@@ -294,6 +309,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             bcId,
             shallow,
             conditional,
+            skipShopifyProbe,
           );
           if (product) {
             // Persist before mutating run state so a storage failure can't
@@ -353,7 +369,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
 
   // Tier 1: release the shared browser once the crawl is done so the job
   // finishes cleanly and the Chromium process isn't left running.
-  if (config.useBrowser) await closeBrowser();
+  if (config.useBrowser !== false) await closeBrowser();
 
   return {
     config: { origin: config.origin, collections: config.collections },
@@ -402,6 +418,7 @@ async function fetchOneProduct(
   bcId: number | null = null,
   shallow = false,
   conditional?: ConditionalRequest,
+  skipShopifyProbe = false,
 ): Promise<FetchedProduct> {
   // The Shopify handle is needed by the HTML path too (it seeds the
   // extractor), so it's computed here, outside the shallow guard.
@@ -437,8 +454,10 @@ async function fetchOneProduct(
       }
     }
 
-    // Tier 1: Shopify JSON endpoint.
-    if (handle) {
+    // Tier 1: Shopify JSON endpoint. Skipped entirely when discovery already
+    // ruled Shopify out — the probe would 404 on every product (see
+    // `skipShopifyProbe` in runCrawl).
+    if (handle && !skipShopifyProbe) {
       try {
         const jsonUrl = `${origin}/products/${handle}.json`;
         const response = await fetchWithRetry(jsonUrl, {

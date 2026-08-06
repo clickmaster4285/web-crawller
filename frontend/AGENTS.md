@@ -45,7 +45,6 @@ seeded into MongoDB on backend boot.
 | `npm run lint`      | ESLint (run this after every change; currently 0 errors, 3 pre-existing`react-refresh/only-export-components` warnings in shadcn UI components; `@typescript-eslint/no-unused-vars` is **on as an error** with `^_` arg allowance so dead imports fail lint) |
 | `npm run format`    | Prettier write                                                                                                                                    |
 | `npx tsc --noEmit`  | Typecheck (strict mode)                                                                                                                           |
-| `npm run crawl`    | CLI crawl against obdesignsusa.com, checkpointing to `.crawler/` (gitignored)                                                                  |
 | `cd ../backend && npm start` | Start the Express API on :3000 (needs MongoDB running; seeds the demo admin user)                                                |
 | `cd ../backend && npm run worker` | Standalone crawl worker process (pulls jobs from the `CrawlJob` queue)                                                          |
 | `cd ../backend && npm run scheduler` | Standalone scheduler process (reads Store cadence, enqueues shallow/deep jobs; `--once` for a single pass)                    |
@@ -351,8 +350,7 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
   model; `POST/GET /api/data/crawl-results`, `DELETE` one
   `/api/data/crawl-results/:id` or a whole store
   `/api/data/crawl-results?origin=`) — the worker's skip-unchanged resume
-  state is `Product.httpState` (SQLite stays only for the `npm run crawl`
-  script). The backend keeps **snapshot history** (up to 20 per
+  state is `Product.httpState`. The backend keeps **snapshot history** (up to 20 per
   origin, `createdAt`-sorted) when `storeSnapshots` is true, or replaces the
   latest result when false. **Manual competitors + your store**: a
   `Competitor` model with `POST/DELETE /api/data/competitors` and a `MyStore`
@@ -483,9 +481,10 @@ green. Target architecture, with status:
   the full catalogue — no false removals), and every touched URL's
   etag/lastmod returns via `CrawlResult.httpStateByUrl` and is persisted by
   the ingest pipeline onto `Product.httpState`. ANY worker (any machine)
-  resumes where another stopped. SQLite stays only for `npm run crawl` — the worker never opens a
-  checkpoint anymore, and the per-run `.crawler` scratch (`crawl-<host>.db`
-  files) was deleted. **Etag/conditional revalidation — shipped.** The engine
+  resumes where another stopped. The worker never opens a checkpoint
+  anymore (the per-run `.crawler` scratch was deleted) — SQLite exists only
+  as the engine's offline fallback when no `resumeState` is supplied.
+  **Etag/conditional revalidation — shipped.** The engine
   now sends the stored validators as `If-None-Match` / `If-Modified-Since`
   (`HttpOptions.conditional`) whenever the sitemap-lastmod fast-path doesn't
   fire; an unchanged page answers `304` and the stored product is reused
@@ -841,8 +840,9 @@ step, pause and confirm before moving on.
   `stats.skippedUnchanged`), failures are recorded and retried next run,
   and crash-resume skips URLs whose sitemap lastmod is unchanged (URLs
   without a lastmod signal are always refetched). Transient failures
-  don't destroy the cached product. `npm run crawl` checkpoints to
-  `.crawler/` (gitignored). Verified with `tsc`/`lint`/`build`. Note: a
+  don't destroy the cached product. (The old CLI `npm run crawl` script was
+  deleted — crawls now run through the queue-backed workers.) Verified with
+  `tsc`/`lint`/`build`. Note: a
   full live crawl against obdesignsusa.com is currently blocked by the site
   rate-limiting this machine (HTTP 429); `fetchWithRetry` now has a 30s
   per-request timeout so a stalled connection can't hang a crawl.
@@ -919,11 +919,16 @@ step, pause and confirm before moving on.
 - Step 6 (Playwright browser fallback) — **done**. `core/browser.ts`
   (lazy Playwright renderer preferring system Chrome → Edge → bundled
   Chromium, hard timeout-guarded) wired through `core/http.ts`
-  (`renderWithBrowser` re-renders pages whose server HTML looks like a
+  (  `renderWithBrowser` re-renders pages whose server HTML looks like a
   JS shell — `#__nuxt`/`#__next`/`#root` + JS bundle, or a nearly-empty
   page), the engine (`index.ts` closes the shared browser on finish), and
-  the Sources page toggle (`useBrowser` param flows through
-  `CrawlRunInput` → job → schedule). Verified with a local Nuxt-style
+  the Sources page **Auto-detect JS-rendered pages** switch (default ON;
+  `useBrowser` param flows through `CrawlRunInput` → job → schedule).
+  **Auto by default:** the renderer is always wired unless `useBrowser:
+  false`, and `core/http.ts`'s `needsBrowserRender` decides per page — only
+  content-poor JS-shell pages (bare mount + bundle, <5 links, no structured
+  data) are rendered; content-rich server-rendered pages never touch
+  Chromium, so regular stores pay nothing. Verified with a local Nuxt-style
   fixture: shell → rendered DOM → `discoverByHtmlCrawl` found the injected
   product links → `extractFromHtml` parsed a JSON-LD product (name, price,
   stock).

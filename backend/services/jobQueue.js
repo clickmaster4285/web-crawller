@@ -52,7 +52,9 @@ async function enqueueJob({ origin, type = 'deep', params = {}, scheduledAt = ne
       respectRobotsTxt: true,
       productOnly: true,
       storeSnapshots: true,
-      useBrowser: false,
+      // AUTO by default: the renderer is available and the engine renders
+      // only content-poor JS-shell pages (see core/http.ts needsBrowserRender).
+      useBrowser: true,
       proxy: false,
       proxyUrl: null,
       fullCrawl: type === 'deep',
@@ -279,6 +281,16 @@ function publicJob(job, options = {}) {
           : 'running';
   const p = job.params ?? {};
   const pr = job.progress ?? {};
+  // Worker liveness: a claimed job whose heartbeat is older than
+  // HEARTBEAT_TIMEOUT_MS may have a crashed worker (the release sweep only
+  // requeues it when another worker claims, so it can sit visible here for a
+  // while). The UI warns on this so a dead worker is visible without grepping
+  // logs. Null for queued/terminal jobs (never heartbeated or released).
+  const heartbeatAt =
+    job.heartbeatAt instanceof Date ? job.heartbeatAt.getTime() : null;
+  const heartbeatStale =
+    job.status === 'claimed' &&
+    (heartbeatAt == null || Date.now() - heartbeatAt > HEARTBEAT_TIMEOUT_MS);
   return {
     // Raw backend state (queued/claimed/retrying/…) — the active-jobs UI
     // badges queued vs running vs retrying from it.
@@ -287,6 +299,13 @@ function publicJob(job, options = {}) {
     origin: job.origin,
     /** Worker that claimed/owns the job (null while queued — debugging). */
     workerId: job.workerId ?? null,
+    /** Last worker heartbeat (ms) — null while queued/terminal. */
+    heartbeatAt,
+    /**
+     * True when a claimed job's worker stopped heartbeating within the
+     * timeout — the worker may have crashed (amber warning in the UI).
+     */
+    heartbeatStale,
     /** Live HTTP-request count (debug — Active crawls page). */
     requests: pr.requests ?? 0,
     /** Cooperative control request: 'pause' | 'cancel' | null (run freely). */

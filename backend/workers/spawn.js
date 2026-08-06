@@ -5,7 +5,8 @@
  *
  * Env knobs:
  *   PARITY_INFRA=0        disable entirely (run workers manually)
- *   PARITY_WORKERS=N      worker processes to spawn (default 1 in dev, 0 in prod)
+ *   PARITY_WORKERS=N      worker processes to spawn (default min(3, CPU cores)
+ *                         in dev so queued crawls run in parallel, 0 in prod)
  *   PARITY_SCHEDULER=0/1  spawn the scheduler (default on in dev, off in prod)
  *
  * Production deployments should run `npm run worker` (N instances) and
@@ -13,6 +14,7 @@
  * instead of relying on this spawner.
  */
 const { spawn } = require('node:child_process');
+const os = require('node:os');
 const path = require('node:path');
 
 const BACKEND_ROOT = path.join(__dirname, '..');
@@ -57,7 +59,14 @@ function spawnCrawlInfra() {
     return;
   }
   const isProd = process.env.NODE_ENV === 'production';
-  const workerCount = Number(process.env.PARITY_WORKERS ?? (isProd ? 0 : 1));
+  // Dev default: a handful of workers so several queued crawls progress in
+  // parallel (one worker serializes every job, and deep crawls of 10k-product
+  // stores take tens of minutes each). Each worker is a separate process;
+  // jobs are claimed atomically so they never double-run.
+  const devWorkers = Math.min(3, os.cpus().length || 1);
+  const workerCount = Number(
+    process.env.PARITY_WORKERS ?? (isProd ? 0 : devWorkers)
+  );
   const schedulerOn =
     process.env.PARITY_SCHEDULER != null
       ? process.env.PARITY_SCHEDULER === '1'
