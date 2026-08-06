@@ -11,6 +11,26 @@ export interface CrawlConfig {
   origin: string;
   /** Collection handles to crawl, e.g. ["silicone-toys"] */
   collections: string[];
+  /**
+   * Crawl mode (architecture §3.2):
+   *   - "deep" (default) — full discovery (platform detection, homepage
+   *     analysis, collections, API probes, sitemap + HTML crawl) and the
+   *     complete fetch loop (API-first adapters, Shopify JSON, HTML chain).
+   *   - "shallow" — sitemap-only check: fetch the sitemap, keep only product
+   *     URLs NOT in `knownUrls`, and fetch just those new pages via the HTML
+   *     extractor (no platform detection, no homepage analysis, no HTML BFS,
+   *     no API probes, no API-first fetching). Cost ≈ 1 request + new
+   *     product pages, which is what a frequent shallow cadence needs.
+   */
+  mode?: "shallow" | "deep";
+  /**
+   * URLs the system already knows for this origin (from the Product
+   * collection). In shallow mode, discovery keeps only URLs NOT in this set
+   * — a shallow check therefore never re-fetches known products, so the
+   * "new products only" promise holds even for stores without a public
+   * platform API. Ignored in deep mode.
+   */
+  knownUrls?: Set<string>;
   /** Polite delay between requests (ms). Default 1000. */
   delayMs?: number;
   /** Retries on 429/5xx/network errors. Default 3. */
@@ -21,8 +41,34 @@ export interface CrawlConfig {
    * SQLite checkpoint DB path. When set, the engine stores per-URL status
    * + etag/lastmod + product JSON so a re-run can resume and skip
    * unchanged products (see `core/checkpoint.ts`). Omit to run stateless.
+   * Phase B (architecture §3.1): `resumeState` is the cross-worker
+   * replacement — when both are set, `resumeState` wins (SQLite is then the
+   * per-run scratch only).
    */
   checkpointPath?: string;
+  /**
+   * Phase B cross-worker resume state (architecture §3.1): a URL → cached
+   * product + etag/lastmod map loaded from `Product.httpState` (plus the
+   * stored product fields) for this origin. ANY worker can resume a store
+   * because the skip-unchanged state lives in Mongo, not on one machine's
+   * disk. The engine skips URLs whose sitemap lastmod matches the stored
+   * value and reuses the cached product as-is (so the ingest diff still
+   * sees the full catalogue); freshly fetched etag/lastmod is returned via
+   * `CrawlResult.httpStateByUrl` for the pipeline to persist. The etag is
+   * captured + persisted for future conditional-request revalidation but is
+   * NOT yet a skip signal itself (the skip key is the sitemap lastmod — a
+   * store whose sitemap carries no lastmod refetches every run, matching
+   * the pre-Phase-B checkpoint behavior for lastmod-less sitemaps). Omit
+   * to run stateless (or with `checkpointPath`).
+   */
+  resumeState?: Map<
+    string,
+    {
+      etag: string | null;
+      lastmod: number | null;
+      product: CrawledProduct;
+    }
+  >;
   /**
    * Max concurrent requests per host (step 5). Default 2. Bounded by
    * `core/queue.ts`; the adaptive throttle still gates request timing.
@@ -293,7 +339,7 @@ export interface DiscoveryDiagnostics {
 export interface CrawlStats {
   discovered: number;
   fetched: number;
-  /** Products reused from the checkpoint cache instead of re-fetched. */
+  /** Products reused from the checkpoint/resume cache instead of re-fetched. */
   skippedUnchanged: number;
   failed: number;
   failures: CrawlFailure[];
@@ -306,6 +352,15 @@ export interface CrawlResult {
   config: Pick<CrawlConfig, "origin" | "collections">;
   stats: CrawlStats;
   products: CrawledProduct[];
-  /** Per-strategy discovery diagnostics (sitemap / html-crawl / collections). */
+  /**
+   * Per-strategy discovery diagnostics (sitemap / html-crawl / collections).
+   */
   discovery: DiscoveryDiagnostics;
+  /**
+   * Phase B — the etag/lastmod captured for every URL this run touched
+   * (fetched AND reused). The worker hands it to the ingest pipeline so
+   * `Product.httpState` is updated in Mongo — the next worker (any machine)
+   * resumes from that state instead of re-fetching unchanged products.
+   */
+  httpStateByUrl?: Map<string, { etag: string | null; lastmod: number | null }>;
 }

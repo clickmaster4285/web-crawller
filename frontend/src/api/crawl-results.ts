@@ -1,72 +1,4 @@
-/**
- * Data API layer — REST client for the Parity Express backend.
- *
- * Every getter hits `GET /api/data/*` through `src/lib/http.ts` (dev-proxied
- * to the backend at :3000). The returned shapes are identical to the previous
- * TanStack server functions, so hooks and pages are unchanged.
- */
-
 import { http } from "@/lib/http";
-import type {
-  AlertItem,
-  BrandGap,
-  CategoryGap,
-  Competitor,
-  DashboardStats,
-  Insight,
-  MatchedProduct,
-  PricePoint,
-  ReportSummary,
-  Workspace,
-} from "@/types";
-
-export interface AnalyticsData {
-  hasData: boolean;
-  stats: {
-    competitors: number;
-    productsTracked: number;
-    yourProducts: number;
-    matchedProducts: number;
-    missingProducts: number;
-    outOfStock: number;
-    yourAvgPrice: number;
-    marketAvgPrice: number;
-    cheapestCompetitor: string;
-    mostExpensiveCompetitor: string;
-  };
-  competitors: Array<{
-    id: string;
-    name: string;
-    website: string;
-    lastCrawl: string;
-    products: number;
-    avgPriceIndex: number;
-  }>;
-  matchedProducts: Array<{
-    id: string;
-    name: string;
-    competitor: string;
-    competitorPrice: number;
-    yourPrice: number | null;
-    gap: number | null;
-  }>;
-  priceHistory: PricePoint[];
-  categoryGaps: Array<{ category: string; yours: number; theirs: number }>;
-  brandGaps: BrandGap[];
-}
-
-export interface PricingData {
-  competitors: Competitor[];
-  matchedProducts: MatchedProduct[];
-  priceHistory: PricePoint[];
-  stats: DashboardStats;
-}
-
-export interface CatalogueData {
-  categoryGaps: CategoryGap[];
-  brandGaps: BrandGap[];
-  stats: DashboardStats;
-}
 
 /** A product inside a persisted crawl result (backend `CrawlResult`). */
 export interface SavedCrawlProduct {
@@ -90,6 +22,11 @@ export interface SavedCrawlFailure {
 export interface SavedCrawl {
   _id: string;
   origin: string;
+  /**
+   * Job type: 'shallow' (sitemap-only check — fetched only new products) or
+   * 'deep' (full crawl). Missing on pre-field snapshots (all were deep).
+   */
+  type?: "shallow" | "deep";
   collections: string[];
   stats: {
     discovered: number;
@@ -175,67 +112,53 @@ export interface SavedCrawl {
 }
 
 /** Wrapper shape returned by `GET /api/data/crawl-results`. */
-export interface CrawlResultsResponse {
+export interface CrawlResultsResponse<T = SavedCrawl> {
   success: boolean;
   count: number;
-  data: SavedCrawl[];
+  data: T[];
 }
 
-export const getWorkspaceData = () => http.get<Workspace>("/data/workspace");
-
-export const getAnalyticsData = () =>
-  http.get<AnalyticsData>("/data/analytics");
-
-export const getCompetitorsData = () =>
-  http.get<Competitor[]>("/data/competitors");
-
-export interface CreateCompetitorInput {
-  /** Display name; falls back to a readable name derived from the domain. */
-  name: string;
-  /** Full origin URL, e.g. https://store.example.com */
+/**
+ * Lightweight crawl summary (`GET /api/data/crawl-results?meta=1`) — the
+ * full product catalogues are omitted, so store lists stay tiny even with
+ * tens of thousands of products saved.
+ */
+export interface SavedCrawlMeta {
+  _id: string;
   origin: string;
-  notes?: string;
+  /** Job type ('shallow' sitemap-only check vs 'deep' full crawl). */
+  type: "shallow" | "deep";
+  createdAt: string;
+  updatedAt: string;
+  stats: SavedCrawl["stats"];
+  productCount: number;
+  platform: string | null;
 }
 
-/** Adds a competitor to the monitored list (persisted on the backend). */
-export const createCompetitor = (input: CreateCompetitorInput) =>
-  http.post<{ success: boolean; data: unknown }>("/data/competitors", input);
-
-/** Removes a manually-added competitor (crawled origins are auto-derived). */
-export const deleteCompetitor = (id: string) =>
-  http.del<{
-    success: boolean;
-    data: { deleted: boolean; id: string; name: string };
-  }>(`/data/competitors/${id}`);
-
-/** The user's own store (single document) — used to compare against competitors. */
-export interface MyStore {
-  origin: string;
-  name: string;
+/** Query options for the saved-crawl list endpoint. */
+export interface CrawlResultsParams {
+  /** Only snapshots for this origin (exact match on the stored origin URL). */
+  origin?: string;
+  /** Return lightweight summaries instead of full crawl documents. */
+  meta?: boolean;
 }
 
-export const getMyStoreData = () =>
-  http.get<{ success: boolean; data: MyStore | null }>("/data/my-store");
-
-export const setMyStoreData = (input: { origin: string; name?: string }) =>
-  http.put<{ success: boolean; data: MyStore }>("/data/my-store", input);
-
-export const getMatchedProductsData = () =>
-  http.get<MatchedProduct[]>("/data/matched-products");
-
-export const getPricingData = () => http.get<PricingData>("/data/pricing");
-
-export const getCatalogueData = () =>
-  http.get<CatalogueData>("/data/catalogue");
-
-export const getInsightsData = () => http.get<Insight[]>("/data/insights");
-
-export const getAlertsData = () => http.get<AlertItem[]>("/data/alerts");
-
-export const getReportsData = () => http.get<ReportSummary[]>("/data/reports");
-
-export const getCrawlResultsData = () =>
-  http.get<CrawlResultsResponse>("/data/crawl-results");
+/**
+ * Lists saved snapshots, newest first — all origins by default, or a single
+ * origin when `params.origin` is set. Pass `params.meta` to get lightweight
+ * summaries without the product catalogues.
+ */
+export const getCrawlResultsData = <T = SavedCrawl>(
+  params: CrawlResultsParams = {},
+) => {
+  const qs = new URLSearchParams();
+  if (params.origin) qs.set("origin", params.origin);
+  if (params.meta) qs.set("meta", "1");
+  const query = qs.toString();
+  return http.get<CrawlResultsResponse<T>>(
+    `/data/crawl-results${query ? `?${query}` : ""}`,
+  );
+};
 
 /** Response shape of the DELETE crawl-results endpoints. */
 export interface DeleteCrawlResultResponse {

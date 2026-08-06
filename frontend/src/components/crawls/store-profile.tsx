@@ -1,9 +1,16 @@
 import type { ReactNode } from "react";
-import { ArrowUpRight, Home, Link2, Store } from "lucide-react";
+import {
+  ArrowUpRight,
+  CircleCheck,
+  Home,
+  Link2,
+  Store,
+  Zap,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { SavedCrawl } from "@/lib/api";
+import type { SavedCrawl } from "@/api";
 import { formatCrawlDate, productUrlPattern, robotsText } from "@/utils/crawls";
 import { cn } from "@/lib/utils";
 
@@ -69,6 +76,7 @@ export function StoreProfile({
   domain,
   headerAction,
   onSuggestionClick,
+  lastShallow,
 }: {
   /** Newest saved snapshot for the domain being crawled (or undefined). */
   crawl: SavedCrawl | undefined;
@@ -78,6 +86,8 @@ export function StoreProfile({
   headerAction?: ReactNode;
   /** Called when the user clicks a suggestion action (e.g. crawl the linked store). */
   onSuggestionClick?: (url: string) => void;
+  /** Newest shallow (sitemap-only) snapshot — rendered as a "last quick check" strip. */
+  lastShallow?: SavedCrawl;
 }) {
   const d = crawl?.discovery;
   const parseRate =
@@ -201,6 +211,37 @@ export function StoreProfile({
               </span>
             </span>
           ) : null}
+        </div>
+      ) : null}
+
+      {/* Last quick check (shallow sitemap-only run) — when it ran and what
+          it found. Shallow discovery filters the sitemap down to URLs the
+          store doesn't already sell, so `stats.discovered` IS the new-product
+          count — and it's uncapped, unlike `products.length` (which `maxPages`
+          can truncate). Zero new products reads as "nothing changed". */}
+      {lastShallow ? (
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-border px-5 py-3 text-xs">
+          <span className="inline-flex items-center gap-1.5 font-medium">
+            <Zap className="size-3.5 text-amber-500" />
+            Last quick check{" "}
+            <time
+              dateTime={lastShallow.updatedAt}
+              className="font-normal text-muted-foreground"
+            >
+              {formatCrawlDate(lastShallow.updatedAt)}
+            </time>
+          </span>
+          {lastShallow.stats.discovered > 0 ? (
+            <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+              <CircleCheck className="size-3.5 text-success" />
+              {lastShallow.stats.discovered.toLocaleString()} new product
+              {lastShallow.stats.discovered === 1 ? "" : "s"} found
+            </span>
+          ) : (
+            <span className="text-muted-foreground">
+              No new products since the last crawl
+            </span>
+          )}
         </div>
       ) : null}
 

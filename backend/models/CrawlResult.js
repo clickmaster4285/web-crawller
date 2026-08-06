@@ -8,8 +8,16 @@
  *     controller).
  *   - **replace** (`storeSnapshots: false`): one document per origin — the
  *     latest run replaces the previous one.
+ *
+ * Legacy model: it embeds the full product array per snapshot doc, which is
+ * exactly what the Phase-1 `Product`/`Snapshot` split replaces. It stays
+ * dual-written through the migration and is dropped in Phase 5 (decision D1).
+ * The stats/failure/discovery shapes are shared with the new `Snapshot` model
+ * via `./shared` so the dual-write window can't drift.
  */
 const mongoose = require('mongoose');
+
+const { statsSchema, discoverySchema, failureSchema } = require('./shared');
 
 const productSchema = new mongoose.Schema(
   {
@@ -26,132 +34,6 @@ const productSchema = new mongoose.Schema(
   { _id: false }
 );
 
-const failureSchema = new mongoose.Schema(
-  {
-    url: String,
-    error: String
-  },
-  { _id: false }
-);
-
-const discoveryCollectionSchema = new mongoose.Schema(
-  {
-    collection: String,
-    handles: Number,
-    error: String
-  },
-  { _id: false, suppressReservedKeysWarning: true }
-);
-
-const sitemapCandidateSchema = new mongoose.Schema(
-  {
-    url: String,
-    source: { type: String, enum: ['robots.txt', 'default'], default: 'default' },
-    status: { type: String, enum: ['ok', 'html', 'error'], default: 'ok' },
-    urls: { type: Number, default: 0 },
-    productUrls: { type: Number, default: 0 },
-    error: String
-  },
-  { _id: false }
-);
-
-const externalStoreLinkSchema = new mongoose.Schema(
-  {
-    url: String,
-    host: String,
-    label: String
-  },
-  { _id: false }
-);
-
-const homepageSchema = new mongoose.Schema(
-  {
-    productLinks: { type: Number, default: 0 },
-    categoryLinks: { type: Number, default: 0 },
-    looksLikeStore: { type: Boolean, default: false },
-    externalStoreLinks: { type: [externalStoreLinkSchema], default: [] },
-    note: String
-  },
-  { _id: false }
-);
-
-const findingActionSchema = new mongoose.Schema(
-  {
-    label: String,
-    url: String
-  },
-  { _id: false }
-);
-
-const findingSchema = new mongoose.Schema(
-  {
-    level: { type: String, enum: ['info', 'warning', 'success'], default: 'info' },
-    message: String,
-    action: { type: findingActionSchema, default: null }
-  },
-  { _id: false }
-);
-
-const discoverySchema = new mongoose.Schema(
-  {
-    collections: { type: [discoveryCollectionSchema], default: [] },
-    sitemap: {
-      urls: { type: Number, default: 0 },
-      lastmod: { type: Number, default: 0 },
-      error: String,
-      candidates: { type: [sitemapCandidateSchema], default: [] }
-    },
-    htmlCrawl: {
-      urls: { type: Number, default: 0 },
-      pagesVisited: { type: Number, default: 0 },
-      truncated: { type: Boolean, default: false },
-      error: String
-    },
-    platform: {
-      platform: { type: String, default: 'Unknown' },
-      signal: { type: String, default: '' },
-      kind: { type: String, enum: ['store', 'corporate', 'unknown'], default: 'unknown' },
-      cms: String,
-      builder: String,
-      seoPlugin: String,
-      server: String,
-      generator: String
-    },
-    robots: {
-      status: {
-        type: String,
-        enum: ['found', 'absent', 'unreachable', 'skipped'],
-        default: 'skipped'
-      },
-      crawlDelayMs: { type: Number, default: null }
-    },
-    homepage: { type: homepageSchema, default: null },
-    wooCommerce: {
-      status: {
-        type: String,
-        enum: ['public', 'auth-required', 'unavailable'],
-        default: 'unavailable'
-      },
-      total: { type: Number, default: null },
-      urls: { type: Number, default: 0 },
-      message: String
-    },
-    bigCommerce: {
-      status: {
-        type: String,
-        enum: ['public', 'auth-required', 'unavailable'],
-        default: 'unavailable'
-      },
-      total: { type: Number, default: null },
-      urls: { type: Number, default: 0 },
-      message: String
-    },
-    findings: { type: [findingSchema], default: [] },
-    log: { type: [String], default: [] }
-  },
-  { _id: false }
-);
-
 const crawlResultSchema = new mongoose.Schema(
   {
     origin: {
@@ -159,17 +41,18 @@ const crawlResultSchema = new mongoose.Schema(
       required: [true, 'Origin is required'],
       trim: true
     },
+    /**
+     * Job type this snapshot came from: 'shallow' (sitemap-only check that
+     * fetched only new products) or 'deep' (full crawl). Absent on docs saved
+     * before the field landed — those were all full crawls, so the UI reads
+     * missing as 'deep'.
+     */
+    type: { type: String, enum: ['shallow', 'deep'], default: 'deep' },
     collections: {
       type: [String],
       default: []
     },
-    stats: {
-      discovered: { type: Number, default: 0 },
-      fetched: { type: Number, default: 0 },
-      skippedUnchanged: { type: Number, default: 0 },
-      failed: { type: Number, default: 0 },
-      durationMs: { type: Number, default: 0 }
-    },
+    stats: { type: statsSchema, default: () => ({}) },
     products: {
       type: [productSchema],
       default: []

@@ -9,9 +9,11 @@ import {
   Globe,
   Loader2,
   Play,
+  Radar,
   RefreshCw,
   Search,
   Trash2,
+  Zap,
 } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
@@ -41,8 +43,9 @@ import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import {
   deleteCrawlResult,
   deleteCrawlResultsByOrigin,
+  invalidateCrawlData,
   type SavedCrawl,
-} from "@/lib/api";
+} from "@/api";
 import {
   computeCrawlDiff,
   formatCrawlDate,
@@ -51,6 +54,7 @@ import {
   robotsText,
 } from "@/utils/crawls";
 import { formatPrice } from "@/utils/format";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authenticated/crawls/")({
   head: () => ({
@@ -82,19 +86,36 @@ function CrawlsPage() {
     null,
   );
   const [confirm, setConfirm] = useState<ConfirmTarget | null>(null);
+  // Job-type filter — "all" shows every snapshot; "shallow"/"deep" focus on
+  // the sitemap-only checks (or full crawls) only. Persisted like the rest of
+  // the page state so a refresh keeps the view. Old snapshots without a `type`
+  // field were all deep crawls, so they count as deep.
+  const [typeFilter, setTypeFilter] = useLocalStorageState<TypeFilter>(
+    "parity.crawls.typeFilter",
+    "all",
+  );
   // Which stores have their snapshot history revealed — hidden by default.
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const isGroupOpen = (key: string) => openGroups[key] ?? false;
   const toggleGroup = (key: string) =>
     setOpenGroups((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  const crawls = useMemo(() => saved.data?.data ?? [], [saved.data]);
+  const allCrawls = useMemo(() => saved.data?.data ?? [], [saved.data]);
+  // Type-filtered snapshot list (before grouping) — stores with no matching
+  // snapshots disappear, and the stat cards reflect only what's shown.
+  const crawls = useMemo(
+    () =>
+      typeFilter === "all"
+        ? allCrawls
+        : allCrawls.filter((c) => crawlType(c) === typeFilter),
+    [allCrawls, typeFilter],
+  );
 
   const closeConfirm = () => setConfirm(null);
   const deleteOne = useMutation({
     mutationFn: (id: string) => deleteCrawlResult(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["saved-crawls"] });
+      invalidateCrawlData(queryClient);
       setConfirm(null);
     },
     onError: closeConfirm,
@@ -102,7 +123,7 @@ function CrawlsPage() {
   const clearOrigin = useMutation({
     mutationFn: (origin: string) => deleteCrawlResultsByOrigin(origin),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["saved-crawls"] });
+      invalidateCrawlData(queryClient);
       setConfirm(null);
     },
     onError: closeConfirm,
@@ -172,6 +193,16 @@ function CrawlsPage() {
       urls: crawls.reduce((n, c) => n + c.stats.discovered, 0),
     }),
     [crawls],
+  );
+
+  // Per-type counts over ALL snapshots (unfiltered) — the toggle shows real
+  // numbers even while a filter is active.
+  const typeCounts = useMemo(
+    () => ({
+      shallow: allCrawls.filter((c) => crawlType(c) === "shallow").length,
+      deep: allCrawls.filter((c) => crawlType(c) === "deep").length,
+    }),
+    [allCrawls],
   );
 
   /** Prefills the crawler page (it reads these localStorage keys on mount). */
@@ -260,19 +291,62 @@ function CrawlsPage() {
         />
       ) : (
         <div className="space-y-8 px-6 pb-8">
-          <div className="relative max-w-sm">
-            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Filter by domain…"
-              className="pl-9"
-            />
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative min-w-0 max-w-sm flex-1">
+              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Filter by domain…"
+                className="pl-9"
+              />
+            </div>
+            <div
+              role="group"
+              aria-label="Filter by crawl type"
+              className="flex items-center gap-1 rounded-md border border-border bg-card p-1"
+            >
+              {typeFilterOptions(typeCounts).map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  onClick={() => setTypeFilter(t.value)}
+                  aria-pressed={typeFilter === t.value}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-sm px-2.5 py-1.5 text-xs font-medium transition-colors",
+                    typeFilter === t.value
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  {t.icon}
+                  {t.label}
+                  {t.count != null ? (
+                    <span
+                      className={cn(
+                        "rounded-full px-1.5 text-[10px] leading-4",
+                        typeFilter === t.value
+                          ? "bg-primary-foreground/15 text-primary-foreground"
+                          : "bg-muted text-muted-foreground",
+                      )}
+                    >
+                      {t.count.toLocaleString()}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
           </div>
 
           {filtered.length === 0 ? (
             <p className="border border-border bg-card p-8 text-center text-sm text-muted-foreground">
-              No saved crawls match “{query}”.
+              {query.trim()
+                ? `No saved crawls match “${query}”.`
+                : typeFilter === "all"
+                  ? "No saved crawls yet."
+                  : typeFilter === "shallow"
+                    ? "No shallow checks saved — run a Quick check on /sources to spot new products between deep crawls."
+                    : "No deep crawls saved — run a full crawl on /sources to build the catalogue."}
             </p>
           ) : (
             <div className="space-y-8">
@@ -295,7 +369,10 @@ function CrawlsPage() {
                           </p>
                           <p className="mt-0.5 text-xs text-muted-foreground">
                             {group.length} snapshot
-                            {group.length > 1 ? "s" : ""} ·{" "}
+                            {group.length > 1 ? "s" : ""}
+                            {typeFilter === "all"
+                              ? ""
+                              : ` (${typeFilter})`} ·{" "}
                             {group.reduce((n, c) => n + c.products.length, 0)}{" "}
                             products · last {formatCrawlDate(latest.updatedAt)}
                           </p>
@@ -435,6 +512,32 @@ function CrawlsPage() {
   );
 }
 
+/** Crawl job type — old snapshots without the field were all deep crawls. */
+type TypeFilter = "all" | "shallow" | "deep";
+
+function crawlType(crawl: SavedCrawl): "shallow" | "deep" {
+  return (crawl.type ?? "deep") === "shallow" ? "shallow" : "deep";
+}
+
+/** Toggle options with real per-type counts (shown even while filtered). */
+function typeFilterOptions(counts: { shallow: number; deep: number }) {
+  return [
+    { value: "all" as const, label: "All", icon: null, count: null },
+    {
+      value: "shallow" as const,
+      label: "Shallow checks",
+      icon: <Zap className="size-3.5 text-amber-500" />,
+      count: counts.shallow,
+    },
+    {
+      value: "deep" as const,
+      label: "Deep crawls",
+      icon: <Radar className="size-3.5" />,
+      count: counts.deep,
+    },
+  ];
+}
+
 function CrawlRow({
   crawl,
   previous,
@@ -452,6 +555,10 @@ function CrawlRow({
 }) {
   const diff = computeCrawlDiff(crawl.products, previous?.products);
   const d = crawl.discovery;
+  // Shallow runs are sitemap-only checks — they fetch just new products, so
+  // their results are partial (never a full catalogue). Missing type on old
+  // snapshots = deep (they were all full crawls before the field landed).
+  const shallow = crawlType(crawl) === "shallow";
   const parseRate =
     crawl.stats.fetched > 0
       ? Math.round((crawl.products.length / crawl.stats.fetched) * 100)
@@ -508,6 +615,19 @@ function CrawlRow({
             first snapshot
           </Badge>
         )}
+
+        <Badge
+          variant={shallow ? "secondary" : "outline"}
+          className="gap-1 font-normal"
+          title={
+            shallow
+              ? "Sitemap-only check — fetched only new product pages"
+              : "Full catalogue crawl"
+          }
+        >
+          {shallow ? <Zap className="size-3" /> : <Radar className="size-3" />}
+          {shallow ? "shallow check" : "deep crawl"}
+        </Badge>
 
         <div className="flex shrink-0 items-center gap-1">
           <Button variant="outline" size="sm" onClick={onRecrawl}>
@@ -640,6 +760,11 @@ function CrawlRow({
                 ))}
               </ul>
             </div>
+          ) : shallow ? (
+            <p className="text-sm text-muted-foreground">
+              The shallow check found no new products — nothing to add to the
+              stored catalogue.
+            </p>
           ) : (
             <p className="text-sm text-muted-foreground">
               No products were parsed — the store may have rate-limited the

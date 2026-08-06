@@ -1,17 +1,20 @@
 /**
  * Per-domain data hooks. All data is fetched from the server API layer
- * (`src/lib/api.ts`) via TanStack Query — nothing imports mock data directly
+ * (`src/api/*`) via TanStack Query — nothing imports mock data directly
  * anymore.
  *
  * Each hook returns `{ data, isLoading, isError }` so pages can distinguish a
  * server failure from a load in progress (rather than showing an infinite
  * loading state when a server function fails).
+ *
+ * Query defaults (staleTime, refetchOnWindowFocus, retry) live on the
+ * QueryClient in `src/router.tsx`; the heavy matcher-backed endpoints get a
+ * longer per-hook staleTime here so they're only recomputed when they change.
  */
 
 import { useQuery } from "@tanstack/react-query";
 
 import {
-  getAlertsData,
   getCatalogueData,
   getCompetitorsData,
   getCrawlResultsData,
@@ -19,10 +22,21 @@ import {
   getMatchedProductsData,
   getPricingData,
   getReportsData,
-} from "@/lib/api";
+  MATCHER_STALE_TIME,
+  queryKeys,
+  type SavedCrawlMeta,
+} from "@/api";
 
-function useApiQuery<T>(key: string, queryFn: () => Promise<T>) {
-  const query = useQuery({ queryKey: [key], queryFn });
+function useApiQuery<T>(
+  key: readonly unknown[],
+  queryFn: () => Promise<T>,
+  options: { staleTime?: number } = {},
+) {
+  const query = useQuery({
+    queryKey: key,
+    queryFn,
+    ...(options.staleTime != null ? { staleTime: options.staleTime } : {}),
+  });
   return {
     data: query.data,
     isLoading: query.isLoading,
@@ -31,31 +45,35 @@ function useApiQuery<T>(key: string, queryFn: () => Promise<T>) {
 }
 
 export function useCompetitors() {
-  return useApiQuery("competitors", () => getCompetitorsData());
+  return useApiQuery(queryKeys.competitors, () => getCompetitorsData());
 }
 
 export function useMatchedProducts() {
-  return useApiQuery("matched-products", () => getMatchedProductsData());
+  return useApiQuery(
+    queryKeys.matchedProducts,
+    () => getMatchedProductsData(),
+    { staleTime: MATCHER_STALE_TIME },
+  );
 }
 
 export function usePricing() {
-  return useApiQuery("pricing", () => getPricingData());
+  return useApiQuery(queryKeys.pricing, () => getPricingData(), {
+    staleTime: MATCHER_STALE_TIME,
+  });
 }
 
 export function useCatalogue() {
-  return useApiQuery("catalogue", () => getCatalogueData());
+  return useApiQuery(queryKeys.catalogue, () => getCatalogueData(), {
+    staleTime: MATCHER_STALE_TIME,
+  });
 }
 
 export function useInsights() {
-  return useApiQuery("insights", () => getInsightsData());
-}
-
-export function useAlerts() {
-  return useApiQuery("alerts", () => getAlertsData());
+  return useApiQuery(queryKeys.insights, () => getInsightsData());
 }
 
 export function useReports() {
-  return useApiQuery("reports", () => getReportsData());
+  return useApiQuery(queryKeys.reports, () => getReportsData());
 }
 
 /**
@@ -67,8 +85,26 @@ export function useReports() {
  */
 export function useSavedCrawls() {
   const query = useQuery({
-    queryKey: ["saved-crawls"],
+    queryKey: queryKeys.savedCrawls,
     queryFn: () => getCrawlResultsData(),
+    refetchInterval: 30_000,
+  });
+  return {
+    data: query.data,
+    isLoading: query.isLoading,
+    isError: query.isError,
+  };
+}
+
+/**
+ * Lightweight crawl summaries (`?meta=1`) — origins, platform, product count
+ * and timestamps only, no product catalogues. Ideal for store pickers and
+ * competitor lists: a full crawl dump of 45k products (~10 MB) becomes ~10 KB.
+ */
+export function useSavedCrawlMetas() {
+  const query = useQuery({
+    queryKey: queryKeys.savedCrawlMetas,
+    queryFn: () => getCrawlResultsData<SavedCrawlMeta>({ meta: true }),
     refetchInterval: 30_000,
   });
   return {

@@ -19,7 +19,7 @@ import {
   NoRealDataState,
 } from "@/components/common/states";
 import { usePricing, useSavedCrawls } from "@/hooks/useData";
-import type { SavedCrawl } from "@/lib/api";
+import type { SavedCrawl } from "@/api";
 import { gbp } from "@/utils/formatCurrency";
 import { normalizeOrigin } from "@/utils/crawls";
 import { formatPrice } from "@/utils/format";

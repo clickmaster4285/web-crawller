@@ -100,6 +100,7 @@ export async function discoverProducts(
   /** robots.txt snapshot already fetched by the politeness layer (no refetch). */
   robots?: RobotsSnapshot | null,
 ): Promise<ProductDiscovery> {
+  const shallow = config.mode === "shallow";
   const urlSet = new Set<string>();
   const lastmod = new Map<string, string>();
   const productIds = new Map<string, number>();
@@ -142,91 +143,101 @@ export async function discoverProducts(
   };
 
   // ── 0. Platform detection + homepage analysis ────────────────────────
+  // Skipped entirely in shallow mode: a sitemap-only check must cost ~1
+  // request, and detection/homepage analysis would add 2+ more. The
+  // diagnostics honestly report "Unknown" with a note in the log.
   let homepageHtml = "";
-  try {
-    const detection = await detectPlatform(config.origin, opts, robots?.body);
-    homepageHtml = detection.homepageHtml;
-    diagnostics.platform = {
-      platform: detection.platform,
-      signal: detection.signal,
-      kind: detection.kind,
-      cms: detection.cms,
-      builder: detection.builder,
-      seoPlugin: detection.seoPlugin,
-      server: detection.server,
-      generator: detection.generator,
-    };
+  if (shallow) {
     log.push(
-      `Platform: ${detection.platform} (${detection.kind}) — ${detection.signal}`,
+      "Shallow check: skipping platform detection and homepage analysis to keep the request count at ~1.",
     );
-    if (detection.builder) log.push(`Built with ${detection.builder}`);
-    if (detection.seoPlugin) log.push(`SEO plugin: ${detection.seoPlugin}`);
-    if (detection.server) log.push(`Server stack: ${detection.server}`);
-  } catch (error) {
-    diagnostics.platform = {
-      platform: "Unknown",
-      signal: `Detection failed: ${String(error)}`,
-      kind: "unknown",
-    };
-  }
-  tick("sitemap", "Detecting platform and analyzing the homepage…");
-
-  if (homepageHtml) {
-    const home = analyzeHomepage(homepageHtml, config.origin);
-    diagnostics.homepage = {
-      productLinks: home.productLinks,
-      categoryLinks: home.categoryLinks,
-      looksLikeStore: home.looksLikeStore,
-      externalStoreLinks: home.externalStoreLinks,
-      note: home.note,
-    };
-    log.push(home.note);
-    // Homepage evidence refines the platform kind: a corporate-looking site
-    // whose homepage links to product pages is a store after all, and a
-    // platform that looked like a store but shows no product links is
-    // reported honestly as corporate/unknown. Only downgrade from a hard
-    // robots-based store signal when the homepage clearly contradicts it.
-    if (home.looksLikeStore && diagnostics.platform.kind !== "store") {
+  } else {
+    try {
+      const detection = await detectPlatform(config.origin, opts, robots?.body);
+      homepageHtml = detection.homepageHtml;
       diagnostics.platform = {
-        ...diagnostics.platform,
-        kind: "store",
+        platform: detection.platform,
+        signal: detection.signal,
+        kind: detection.kind,
+        cms: detection.cms,
+        builder: detection.builder,
+        seoPlugin: detection.seoPlugin,
+        server: detection.server,
+        generator: detection.generator,
       };
-    } else if (!home.looksLikeStore && home.productLinks === 0) {
-      diagnostics.platform = {
-        ...diagnostics.platform,
-        kind: diagnostics.platform.kind === "store" ? "unknown" : "corporate",
-      };
-    }
-    if (home.looksLikeStore) {
-      findings.push({
-        level: "success",
-        message: `The homepage links to ${home.productLinks} product pages — this is a store.`,
-      });
-    } else if (home.externalStoreLinks.length > 0) {
-      findings.push({
-        level: "info",
-        message:
-          "This looks like a corporate site. It links out to a store — crawl that domain instead.",
-        action: {
-          label: `Crawl ${home.externalStoreLinks[0].host}`,
-          url: home.externalStoreLinks[0].url,
-        },
-      });
       log.push(
-        `External store link found: ${home.externalStoreLinks[0].host}${home.externalStoreLinks[0].label ? ` ("${home.externalStoreLinks[0].label}")` : ""}`,
+        `Platform: ${detection.platform} (${detection.kind}) — ${detection.signal}`,
       );
-    } else {
-      findings.push({
-        level: "warning",
-        message:
-          "No product links on the homepage — this site may not sell products directly.",
-      });
+      if (detection.builder) log.push(`Built with ${detection.builder}`);
+      if (detection.seoPlugin) log.push(`SEO plugin: ${detection.seoPlugin}`);
+      if (detection.server) log.push(`Server stack: ${detection.server}`);
+    } catch (error) {
+      diagnostics.platform = {
+        platform: "Unknown",
+        signal: `Detection failed: ${String(error)}`,
+        kind: "unknown",
+      };
     }
-  }
-  tick("sitemap", "Homepage analyzed.");
+    tick("sitemap", "Detecting platform and analyzing the homepage…");
+
+    if (homepageHtml) {
+      const home = analyzeHomepage(homepageHtml, config.origin);
+      diagnostics.homepage = {
+        productLinks: home.productLinks,
+        categoryLinks: home.categoryLinks,
+        looksLikeStore: home.looksLikeStore,
+        externalStoreLinks: home.externalStoreLinks,
+        note: home.note,
+      };
+      log.push(home.note);
+      // Homepage evidence refines the platform kind: a corporate-looking site
+      // whose homepage links to product pages is a store after all, and a
+      // platform that looked like a store but shows no product links is
+      // reported honestly as corporate/unknown. Only downgrade from a hard
+      // robots-based store signal when the homepage clearly contradicts it.
+      if (home.looksLikeStore && diagnostics.platform.kind !== "store") {
+        diagnostics.platform = {
+          ...diagnostics.platform,
+          kind: "store",
+        };
+      } else if (!home.looksLikeStore && home.productLinks === 0) {
+        diagnostics.platform = {
+          ...diagnostics.platform,
+          kind: diagnostics.platform.kind === "store" ? "unknown" : "corporate",
+        };
+      }
+      if (home.looksLikeStore) {
+        findings.push({
+          level: "success",
+          message: `The homepage links to ${home.productLinks} product pages — this is a store.`,
+        });
+      } else if (home.externalStoreLinks.length > 0) {
+        findings.push({
+          level: "info",
+          message:
+            "This looks like a corporate site. It links out to a store — crawl that domain instead.",
+          action: {
+            label: `Crawl ${home.externalStoreLinks[0].host}`,
+            url: home.externalStoreLinks[0].url,
+          },
+        });
+        log.push(
+          `External store link found: ${home.externalStoreLinks[0].host}${home.externalStoreLinks[0].label ? ` ("${home.externalStoreLinks[0].label}")` : ""}`,
+        );
+      } else {
+        findings.push({
+          level: "warning",
+          message:
+            "No product links on the homepage — this site may not sell products directly.",
+        });
+      }
+    }
+    tick("sitemap", "Homepage analyzed.");
+  } // end non-shallow platform/homepage block
 
   // ── 1. Shopify collection handles → product URLs. ────────────────────
-  if (config.collections?.length) {
+  // Shallow checks are sitemap-only — collection walks add requests per page.
+  if (!shallow && config.collections?.length) {
     for (const collection of config.collections) {
       try {
         log.push(`Walking collection "${collection}"…`);
@@ -342,9 +353,12 @@ export async function discoverProducts(
   // and let the fetch loop parse structured JSON (SKU/GTIN/stock) instead
   // of HTML. Auth-required APIs are the common case (consumer-key only);
   // that's recorded honestly and the crawl continues via sitemap/HTML.
+  // Skipped in shallow mode (platform detection is skipped too, so the
+  // platform would read "Unknown" — and probes would cost extra requests).
   if (
-    diagnostics.platform.platform === "WooCommerce" ||
-    diagnostics.platform.platform === "WordPress"
+    !shallow &&
+    (diagnostics.platform.platform === "WooCommerce" ||
+      diagnostics.platform.platform === "WordPress")
   ) {
     log.push("WooCommerce API: probing /wp-json/wc/v3/products…");
     const probe = await probeWooCommerceApi(config.origin, opts);
@@ -403,7 +417,8 @@ export async function discoverProducts(
   // A public API is the highest-fidelity product source — walk it for URLs
   // (remembering URL → id so the fetch loop pulls structured JSON) and record
   // the outcome honestly when the API is unavailable or credential-gated.
-  if (diagnostics.platform.platform === "BigCommerce") {
+  // Skipped in shallow mode (see WooCommerce above).
+  if (!shallow && diagnostics.platform.platform === "BigCommerce") {
     log.push("BigCommerce API: probing /api/storefront/catalog/products…");
     const probe = await probeBigCommerceApi(config.origin, opts);
     if (probe.status === "public") {
@@ -458,52 +473,91 @@ export async function discoverProducts(
   }
 
   // ── 3. HTML link-graph BFS from the site root. ───────────────────────
-  try {
-    log.push("HTML crawl: following category and product links from the root…");
-    const html = await discoverByHtmlCrawl(config.origin, opts, {
-      maxPages: DISCOVERY_MAX_PAGES,
-      maxDepth: DISCOVERY_MAX_DEPTH,
-      onPageVisited: (pagesVisited, productsFound) => {
-        config.onDiscoveryProgress?.({
-          phase: "htmlCrawl",
-          urlsFound: urlSet.size + productsFound,
-          sitemapUrls: diagnostics.sitemap.urls,
-          htmlUrls: productsFound,
-          htmlPagesVisited: pagesVisited,
-          collectionHandles: diagnostics.collections.reduce(
-            (n, c) => n + c.handles,
-            0,
-          ),
-          step: `Visited ${pagesVisited} pages, ${productsFound} product URLs so far`,
-          log: [...log],
-        });
-      },
-    });
-    for (const u of html.productUrls) urlSet.add(u);
-    diagnostics.htmlCrawl = {
-      urls: html.productUrls.length,
-      pagesVisited: html.pagesVisited,
-      truncated: html.truncated,
-    };
+  // Shallow mode never BFS-crawls the site — the sitemap is the catalogue.
+  if (shallow) {
     log.push(
-      `HTML crawl: ${html.pagesVisited} pages visited, ${html.productUrls.length} product URLs found${html.truncated ? " (capped)" : ""}.`,
+      "Shallow check: skipping the HTML link-graph crawl — sitemap only.",
     );
-  } catch (error) {
-    diagnostics.htmlCrawl.error = String(error);
-    log.push(`HTML crawl failed: ${String(error)}`);
+  } else {
+    try {
+      log.push(
+        "HTML crawl: following category and product links from the root…",
+      );
+      const html = await discoverByHtmlCrawl(config.origin, opts, {
+        maxPages: DISCOVERY_MAX_PAGES,
+        maxDepth: DISCOVERY_MAX_DEPTH,
+        onPageVisited: (pagesVisited, productsFound) => {
+          config.onDiscoveryProgress?.({
+            phase: "htmlCrawl",
+            urlsFound: urlSet.size + productsFound,
+            sitemapUrls: diagnostics.sitemap.urls,
+            htmlUrls: productsFound,
+            htmlPagesVisited: pagesVisited,
+            collectionHandles: diagnostics.collections.reduce(
+              (n, c) => n + c.handles,
+              0,
+            ),
+            step: `Visited ${pagesVisited} pages, ${productsFound} product URLs so far`,
+            log: [...log],
+          });
+        },
+      });
+      for (const u of html.productUrls) urlSet.add(u);
+      diagnostics.htmlCrawl = {
+        urls: html.productUrls.length,
+        pagesVisited: html.pagesVisited,
+        truncated: html.truncated,
+      };
+      log.push(
+        `HTML crawl: ${html.pagesVisited} pages visited, ${html.productUrls.length} product URLs found${html.truncated ? " (capped)" : ""}.`,
+      );
+    } catch (error) {
+      diagnostics.htmlCrawl.error = String(error);
+      log.push(`HTML crawl failed: ${String(error)}`);
+    }
+  } // end non-shallow html-crawl block
+
+  // ── 3.5 Shallow filter: keep only URLs the store doesn't already sell. ──
+  // The worker passes the Product collection's URLs as `knownUrls`, so a
+  // shallow check (sitemap-only) returns exactly the NEW products — the
+  // fetch loop below downloads only those pages, never the whole catalogue.
+  if (shallow && config.knownUrls && config.knownUrls.size > 0) {
+    const before = urlSet.size;
+    for (const u of [...urlSet]) {
+      if (config.knownUrls.has(u)) urlSet.delete(u);
+    }
+    log.push(
+      `Shallow check: ${before} sitemap URLs, ${before - urlSet.size} already known, ${urlSet.size} new.`,
+    );
   }
 
   // ── Wrap-up ──────────────────────────────────────────────────────────
   if (urlSet.size === 0) {
-    findings.push({
-      level: "warning",
-      message:
-        "No products discovered. This site may not expose a crawlable catalogue.",
-    });
+    // Shallow: "no NEW products" is only a success when a sitemap actually
+    // resolved and the only reason there's nothing to fetch is that every
+    // URL was already known. A missing/errored/empty sitemap discovered
+    // NOTHING — that's a warning (the "No product URLs from sitemaps"
+    // finding above already fires in that case), not a clean bill of health.
+    findings.push(
+      shallow && diagnostics.sitemap.urls > 0
+        ? {
+            level: "success",
+            message:
+              "No new products since the last crawl — nothing to fetch (≈1 request).",
+          }
+        : {
+            level: "warning",
+            message: shallow
+              ? "Shallow check found no sitemap product URLs — nothing to compare against."
+              : "No products discovered. This site may not expose a crawlable catalogue.",
+          },
+    );
   } else {
     findings.push({
       level: "success",
-      message: `Discovered ${urlSet.size} product URLs.`,
+      message: shallow
+        ? `Shallow check found ${urlSet.size} new product(s) to fetch.`
+        : `Discovered ${urlSet.size} product URLs.`,
     });
   }
   config.onDiscoveryProgress?.({

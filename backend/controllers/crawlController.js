@@ -8,13 +8,19 @@
  *
  * `GET /api/data/crawl-results?origin=` lists saved snapshots, newest first,
  * optionally filtered by origin.
+ *
+ * Since Phase 2 the heavy lifting lives in `services/saveCrawl.js` (shared
+ * with the standalone crawl worker); this controller is the HTTP entry point.
  */
 
 const mongoose = require('mongoose');
 const CrawlResult = require('../models/CrawlResult');
-
-/** Max snapshots kept per origin in history mode. */
-const SNAPSHOT_LIMIT = 20;
+const Product = require('../models/Product');
+const Snapshot = require('../models/Snapshot');
+const ProductEvent = require('../models/ProductEvent');
+const CrawlJob = require('../models/CrawlJob');
+const Store = require('../models/Store');
+const { saveFinishedCrawl } = require('../services/saveCrawl');
 
 const saveCrawlResult = async (req, res) => {
   try {
@@ -25,7 +31,8 @@ const saveCrawlResult = async (req, res) => {
       products,
       failures,
       discovery,
-      storeSnapshots
+      storeSnapshots,
+      fullCrawl
     } = req.body || {};
     if (!origin) {
       return res.status(400).json({
@@ -33,56 +40,29 @@ const saveCrawlResult = async (req, res) => {
         message: 'origin is required'
       });
     }
-    const payload = {
+    // Forward the job type (validated) so the back-compat HTTP dual-write
+    // records the right legacy-doc type AND the right Store cadence anchor
+    // (lastShallowAt vs lastDeepAt) — a shallow post must never look deep.
+    const type = req.body?.type === 'shallow' ? 'shallow' : 'deep';
+    const { doc, dualWrite } = await saveFinishedCrawl({
       origin,
-      collections: Array.isArray(collections) ? collections : [],
-      stats: stats || {},
-      products: Array.isArray(products) ? products : [],
-      failures: Array.isArray(failures) ? failures : [],
-      discovery: discovery || null
-    };
-
-    let doc;
-    if (storeSnapshots === false) {
-      // Replace mode — keep only the latest snapshot per origin (removes any
-      // earlier snapshots left by history mode). The metadata check guards a
-      // rare race: without a unique index, two concurrent replace-upserts for
-      // the same origin can both *insert*; running deleteMany unconditionally
-      // would then let each delete the other's doc (leaving zero). Only clean
-      // up when this call actually updated an existing doc.
-      const result = await CrawlResult.findOneAndUpdate(
-        { origin },
-        payload,
-        {
-          upsert: true,
-          new: true,
-          runValidators: true,
-          includeResultMetadata: true
-        }
-      );
-      doc = result.value;
-      if (result.lastErrorObject?.updatedExisting) {
-        await CrawlResult.deleteMany({ origin, _id: { $ne: doc._id } });
-      }
-    } else {
-      // History mode — append a snapshot, then cap history per origin.
-      doc = await CrawlResult.create(payload);
-      const keep = await CrawlResult.find({ origin })
-        .sort({ createdAt: -1 })
-        .limit(SNAPSHOT_LIMIT)
-        .select('_id');
-      await CrawlResult.deleteMany({
-        origin,
-        _id: { $nin: keep.map((d) => d._id) }
-      });
-    }
+      collections,
+      stats,
+      products,
+      failures,
+      discovery,
+      storeSnapshots,
+      fullCrawl,
+      type
+    });
     console.log(
       `💾 Saved crawl result for ${origin}: ${doc.products.length} products` +
         (storeSnapshots === false ? ' (replace mode)' : ' (snapshot mode)')
     );
     res.json({
       success: true,
-      data: doc
+      data: doc,
+      dualWrite
     });
   } catch (error) {
     console.error('Save crawl result error:', error);
@@ -95,8 +75,36 @@ const saveCrawlResult = async (req, res) => {
 
 const getCrawlResults = async (req, res) => {
   try {
-    const filter = req.query.origin ? { origin: req.query.origin } : {};
-    const docs = await CrawlResult.find(filter).sort({ createdAt: -1 }).limit(50);
+    const { origin, meta } = req.query;
+    const isMeta = meta === '1' || meta === 'true';
+    let docs;
+    if (isMeta) {
+      // Summary mode — used by store pickers/lists that only need origin,
+      // platform, product count and timestamps. Product catalogues are NOT
+      // loaded, so this stays tiny even with tens of thousands of products
+      // (10.8 MB of products -> ~10 KB of summaries).
+      const pipeline = [
+        ...(origin ? [{ $match: { origin } }] : []),
+        { $sort: { createdAt: -1 } },
+        { $limit: 500 },
+        {
+          $project: {
+            _id: 1,
+            origin: 1,
+            type: { $ifNull: ['$type', 'deep'] },
+            createdAt: 1,
+            updatedAt: 1,
+            stats: 1,
+            productCount: { $size: { $ifNull: ['$products', []] } },
+            platform: { $ifNull: ['$discovery.platform.platform', null] }
+          }
+        }
+      ];
+      docs = await CrawlResult.aggregate(pipeline);
+    } else {
+      const filter = origin ? { origin } : {};
+      docs = await CrawlResult.find(filter).sort({ createdAt: -1 }).limit(50);
+    }
     res.json({
       success: true,
       count: docs.length,
@@ -153,8 +161,25 @@ const deleteCrawlResultsByOrigin = async (req, res) => {
       });
     }
     const result = await CrawlResult.deleteMany({ origin });
+    // Phase 1 dual-write mirror: clearing a store's history also clears the
+    // normalized model for that origin, so no orphaned Product/Snapshot/Event
+    // rows survive the UI's "clear history" and resurface after Phase 3.
+    await Promise.all([
+      Product.deleteMany({ origin }),
+      Snapshot.deleteMany({ origin }),
+      ProductEvent.deleteMany({ origin }),
+      // Phase 2: drop pending/claimed jobs so a deleted store stops being
+      // crawled, and disable its schedule (the Store doc stays — the worker
+      // may still update it after a manual run, and re-scheduling re-enables).
+      CrawlJob.deleteMany({
+        origin,
+        status: { $in: ['queued', 'claimed', 'retrying'] }
+      }),
+      Store.updateMany({ origin }, { $set: { 'cadence.enabled': false } })
+    ]);
     console.log(
-      `🗑️ Cleared ${result.deletedCount} crawl result(s) for ${origin}`
+      `🗑️ Cleared ${result.deletedCount} crawl result(s) for ${origin}` +
+        ' (dual-write mirror cleared)'
     );
     res.json({
       success: true,

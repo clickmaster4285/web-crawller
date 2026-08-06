@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { createCompetitor } from "@/lib/api";
+import { createCompetitor, queryKeys } from "@/api";
 import { toOriginUrl } from "@/utils/crawls";
 
 export function AddCompetitorDialog({
@@ -31,7 +31,7 @@ export function AddCompetitorDialog({
     mutationFn: (input: { name: string; origin: string }) =>
       createCompetitor(input),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["competitors"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.competitors });
       setName("");
       setOrigin("");
       onOpenChange(false);

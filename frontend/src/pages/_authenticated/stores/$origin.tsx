@@ -55,7 +55,11 @@ import {
 import { useSavedCrawls } from "@/hooks/useData";
 import { usePagination } from "@/hooks/usePagination";
 import { PaginationBar } from "@/components/common/pagination";
-import { deleteCrawlResultsByOrigin, type SavedCrawlProduct } from "@/lib/api";
+import {
+  deleteCrawlResultsByOrigin,
+  invalidateCrawlData,
+  type SavedCrawlProduct,
+} from "@/api";
 import {
   formatCrawlDate,
   normalizeOrigin,
@@ -294,7 +298,7 @@ function StoreCataloguePage() {
   const deleteStore = useMutation({
     mutationFn: (origin: string) => deleteCrawlResultsByOrigin(origin),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["saved-crawls"] });
+      invalidateCrawlData(queryClient);
       setConfirmDelete(false);
       navigate({ to: "/crawls" });
     },

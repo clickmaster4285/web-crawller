@@ -76,11 +76,30 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   const startedAt = Date.now();
   const products: CrawledProduct[] = [];
   const failures: CrawlFailure[] = [];
-  const store = config.checkpointPath
-    ? openCheckpointStore(config.checkpointPath)
-    : null;
+  // Phase B: cross-worker resume state (Product.httpState in Mongo) beats the
+  // per-machine SQLite checkpoint — ANY worker can skip what another already
+  // fetched. Falls back to the checkpoint when no resume state is supplied.
+  const store = config.resumeState
+    ? null
+    : config.checkpointPath
+      ? openCheckpointStore(config.checkpointPath)
+      : null;
+  // etag/lastmod captured per URL this run (fetched AND reused) — the worker
+  // hands it to the ingest pipeline so httpState lands in Mongo.
+  const httpStateByUrl = new Map<
+    string,
+    { etag: string | null; lastmod: number | null }
+  >();
   let fetchedCount = 0;
   let skippedUnchanged = 0;
+
+  // Shallow mode (architecture §3.2): a sitemap-only check that fetches just
+  // the NEW products. Discovery is sitemap-only (no platform detection, no
+  // homepage analysis, no HTML BFS, no API probes) and filters out the URLs
+  // the system already knows (`knownUrls` from the Product collection); the
+  // fetch loop uses the HTML extractor only — no API-first adapters, no
+  // Shopify JSON probes — so the whole run costs ≈1 request + new pages.
+  const shallow = config.mode === "shallow";
 
   // Step 5 politeness: robots.txt (fetched once, unless disabled) + adaptive
   // throttle + bounded per-host concurrency. Every HTTP request in this crawl
@@ -154,24 +173,53 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
 
   // Tier 3 (WooCommerce native): when discovery found a public /wp-json/wc/v3
   // API, the fetch loop prefers structured per-product JSON (SKU/GTIN/price/
-  // stock) over the Shopify probe + HTML extractor chain.
+  // stock) over the Shopify probe + HTML extractor chain. Shallow mode never
+  // probes these (platform detection was skipped), so both are always false
+  // there — the HTML-only path is exactly what a 1-request check needs.
   const wooApiAvailable =
-    discovered.diagnostics.wooCommerce?.status === "public";
+    !shallow && discovered.diagnostics.wooCommerce?.status === "public";
   // Tier 3 (BigCommerce Storefront): same idea — when discovery walked the
   // public /api/storefront/catalog/products, the fetch loop pulls each
   // product by id (URL → id map from the walk) instead of scraping HTML.
   const bcApiAvailable =
-    discovered.diagnostics.bigCommerce?.status === "public";
+    !shallow && discovered.diagnostics.bigCommerce?.status === "public";
 
   // `onProgress` first arg = products in hand (freshly fetched + cache-reused),
   // i.e. progress through the run; `stats.fetched` is the fresh-only count.
-  // try/finally guarantees the checkpoint store is closed even if a worker
-  // throws (e.g. a user onProgress callback).
+  // try/finally guarantees the checkpoint/resume store is closed even if a
+  // worker throws (e.g. a user onProgress callback).
   try {
     await runWithConcurrency(urlsToFetch, concurrency, async (url) => {
-      // Checkpoint fast-path: content unchanged since the last successful run
-      // (sitemap lastmod match) → reuse the cached product instead of refetching.
+      // Resume fast-path: content unchanged since the last successful run
+      // (sitemap lastmod match against Product.httpState, or etag match after
+      // a conditional fetch) → reuse instead of refetching. Skipped products
+      // are counted in `skippedUnchanged` and INCLUDED in the result, so the
+      // ingest diff sees the full catalogue (no false removals) — and their
+      // httpState is carried forward for persistence.
       const lastmod = discovered.lastmod.get(url) ?? undefined;
+      const lastmodNum =
+        lastmod && !Number.isNaN(Date.parse(lastmod))
+          ? Date.parse(lastmod)
+          : null;
+      // Phase B resume fast-path: sitemap lastmod unchanged since the last
+      // crawl (Product.httpState) → reuse the stored product instead of
+      // refetching. The reused product IS part of the result, so the ingest
+      // diff still sees the full catalogue (no false removals).
+      const prev = config.resumeState?.get(url);
+      if (prev && lastmodNum === prev.lastmod) {
+        products.push(prev.product);
+        skippedUnchanged++;
+        // Carry the stored etag forward — the product didn't change, so its
+        // etag is still valid. Keyed by the PRODUCT's stored URL (not the
+        // sitemap loc) so the ingest pipeline's httpState lookup by product
+        // URL always finds it.
+        httpStateByUrl.set(prev.product.url, {
+          etag: prev.etag,
+          lastmod: lastmodNum,
+        });
+        config.onProgress?.(products.length, urlsToFetch.length);
+        return;
+      }
       if (
         store &&
         !store.shouldFetch({ origin: config.origin, url, lastmod })
@@ -180,6 +228,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
         if (cached) {
           products.push(cached);
           skippedUnchanged++;
+          httpStateByUrl.set(url, { etag: null, lastmod: lastmodNum });
           config.onProgress?.(products.length, urlsToFetch.length);
           return;
         }
@@ -201,6 +250,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             opts,
             wooApiAvailable,
             bcId,
+            shallow,
           );
           if (product) {
             // Persist before mutating run state so a storage failure can't
@@ -217,6 +267,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
               productJson: JSON.stringify(product),
               lastFetchedAt: new Date().toISOString(),
             });
+            httpStateByUrl.set(url, { etag, lastmod: lastmodNum });
             products.push(product);
             fetchedCount++;
           } else {
@@ -245,7 +296,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     stats: {
       discovered: discovered.urls.length,
       // `fetched` = actually fetched this run; `skippedUnchanged` = reused
-      // from the checkpoint cache. `fetched + skippedUnchanged === products.length`.
+      // from the checkpoint/resume cache. `fetched + skippedUnchanged === products.length`.
       fetched: fetchedCount,
       skippedUnchanged,
       failed: failures.length,
@@ -258,6 +309,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     // Surface what each discovery strategy contributed (sitemap / html-crawl /
     // collections) so the UI can show real numbers instead of placeholders.
     discovery: discovered.diagnostics,
+    httpStateByUrl,
   };
 }
 
@@ -283,48 +335,58 @@ async function fetchOneProduct(
   opts: ReturnType<typeof httpOptions>,
   useWooApi = false,
   bcId: number | null = null,
+  shallow = false,
 ): Promise<FetchedProduct> {
-  // Tier 3 (BigCommerce Storefront): structured JSON by id beats HTML
-  // scraping. The id comes from the discovery walk's URL → id map. Never
-  // throws (null on any failure), so a null result falls through below.
-  if (bcId != null) {
-    const product = await fetchBigCommerceProductById(origin, bcId, opts);
-    if (product) {
-      return { product, etag: null, statusCode: 200 };
-    }
-  }
+  // The Shopify handle is needed by the HTML path too (it seeds the
+  // extractor), so it's computed here, outside the shallow guard.
+  const handle = shopifyHandleFromUrl(url);
 
-  // Tier 3 (WooCommerce native): structured JSON beats HTML scraping. Tried
-  // before the Shopify probe — on a WooCommerce store the Shopify JSON probe
-  // would be a wasted 404. `fetchWooCommerceProductBySlug` never throws
-  // (null on any failure), so no try/catch is needed here — a null result
-  // simply falls through to the Shopify probe + HTML chain.
-  if (useWooApi) {
-    const slug = slugFromUrl(url);
-    if (slug) {
-      const product = await fetchWooCommerceProductBySlug(origin, slug, opts);
+  // Shallow mode: the API-first tiers (BigCommerce / WooCommerce / Shopify
+  // JSON probes) each cost an extra request per product — exactly what a
+  // 1-request shallow check must not do. New pages are fetched once, through
+  // the HTML extractor chain only.
+  if (!shallow) {
+    // Tier 3 (BigCommerce Storefront): structured JSON by id beats HTML
+    // scraping. The id comes from the discovery walk's URL → id map. Never
+    // throws (null on any failure), so a null result falls through below.
+    if (bcId != null) {
+      const product = await fetchBigCommerceProductById(origin, bcId, opts);
       if (product) {
         return { product, etag: null, statusCode: 200 };
       }
     }
-  }
 
-  // Tier 1: Shopify JSON endpoint.
-  const handle = shopifyHandleFromUrl(url);
-  if (handle) {
-    try {
-      const jsonUrl = `${origin}/products/${handle}.json`;
-      const response = await fetchWithRetry(jsonUrl, opts);
-      const envelope = (await response.json()) as ShopifyProductEnvelope;
-      if (envelope?.product) {
-        return {
-          product: parseShopifyProduct(envelope.product, origin),
-          etag: response.headers.get("etag"),
-          statusCode: response.status,
-        };
+    // Tier 3 (WooCommerce native): structured JSON beats HTML scraping. Tried
+    // before the Shopify probe — on a WooCommerce store the Shopify JSON probe
+    // would be a wasted 404. `fetchWooCommerceProductBySlug` never throws
+    // (null on any failure), so no try/catch is needed here — a null result
+    // simply falls through to the Shopify probe + HTML chain.
+    if (useWooApi) {
+      const slug = slugFromUrl(url);
+      if (slug) {
+        const product = await fetchWooCommerceProductBySlug(origin, slug, opts);
+        if (product) {
+          return { product, etag: null, statusCode: 200 };
+        }
       }
-    } catch {
-      // Not a Shopify JSON product — fall through to the HTML path.
+    }
+
+    // Tier 1: Shopify JSON endpoint.
+    if (handle) {
+      try {
+        const jsonUrl = `${origin}/products/${handle}.json`;
+        const response = await fetchWithRetry(jsonUrl, opts);
+        const envelope = (await response.json()) as ShopifyProductEnvelope;
+        if (envelope?.product) {
+          return {
+            product: parseShopifyProduct(envelope.product, origin),
+            etag: response.headers.get("etag"),
+            statusCode: response.status,
+          };
+        }
+      } catch {
+        // Not a Shopify JSON product — fall through to the HTML path.
+      }
     }
   }
 

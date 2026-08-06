@@ -1,41 +1,37 @@
 /**
- * Crawler server functions — job-based, with live progress.
+ * Crawler server functions — Phase 2: queue-backed.
  *
- * The real crawler is a Node-only TypeScript module with native deps
- * (better-sqlite3), so it runs on the TanStack Start server (Nitro SSR) —
- * it is not proxied to Express. See the crawler section of AGENTS.md.
+ * The crawler no longer runs inside the SSR process. It runs in standalone
+ * worker processes (backend/workers/worker.mjs) that pull jobs from the
+ * MongoDB `CrawlJob` queue (architecture §3.3, decision D4). These server
+ * functions are thin clients of the Express queue API:
  *
- * TanStack Start server functions are one-shot RPC (no SSE support), so
- * progress is delivered with a job/poll pattern:
+ *   startCrawl({ origin, collections }) → { jobId }
+ *     POST /api/crawl-jobs — enqueues a deep crawl; a worker claims it.
+ *   getCrawlProgress(jobId)  → CrawlJob | null
+ *     GET /api/crawl-jobs/:id — reads the same counters the old in-memory
+ *     job exposed, so the Sources UI is unchanged.
  *
- *   startCrawl({ origin, collections }) → { jobId }   (kicks the crawl off in
- *     the background and returns immediately)
- *   getCrawlProgress(jobId)             → CrawlJob | null   (poll this)
+ * Recurring crawls are Store records (cadence + params) read by the
+ * standalone scheduler process:
  *
- * The job store is a module-scope Map inside the running server process —
- * fine for the single-process demo. The background crawl keeps Node's event
- * loop alive until it finishes, so a returned jobId always has a live job
- * behind it unless the server restarts mid-crawl (the client shows a hint
- * in that case).
+ *   scheduleCrawl / getCrawlSchedules / cancelCrawlSchedule
+ *     POST|GET /api/crawl-jobs/schedules(/:origin)
  *
- * Two persistence layers:
- *   - **SQLite checkpoint** (`.crawler/crawl-<host>.db`, gitignored): each
- *     product is written as it is crawled, so a crash mid-run loses nothing
- *     already saved and a re-run skips unchanged products (etag/lastmod)
- *     instead of refetching them.
- *   - **MongoDB backend** (`POST /api/data/crawl-results` on the Express
- *     API): when a crawl finishes, the sanitized result is saved so the
- *     dashboard can read it without re-crawling. With `storeSnapshots` the
- *     backend keeps per-origin history (capped); otherwise it replaces.
- *
- * Recurring crawls: `scheduleCrawl` registers a frequency (1h/6h/daily/
- * weekly) in an in-memory store and a lazy 30s interval (started only from a
- * handler) kicks off due crawls. Schedules reset when the server restarts.
+ * The proxy gateway URL is sent to the backend with the enqueue request and
+ * stored worker-side only; every API response exposes just the boolean, so
+ * credentials never reach the client (same rule as the old in-memory path).
  */
 import { createServerFn } from "@tanstack/react-start";
 
 export interface CrawlRunInput {
   origin: string;
+  /**
+   * Job type: `deep` (full crawl — default) or `shallow` (sitemap-only
+   * check that fetches just the NEW products, ≈1 request). Shallow runs
+   * never soft-delete the catalogue (partial results).
+   */
+  type?: "shallow" | "deep";
   /** Collection handles to scope the crawl to (e.g. ["silicone-toys"]). */
   collections: string[];
   /** Base delay between requests (ms). Default 1000. */
@@ -64,9 +60,8 @@ export interface CrawlRunInput {
   /**
    * Tier 2 — rotating residential proxy gateway URL (default unset = direct
    * requests). Every request in the crawl exits through this proxy. The URL
-   * is kept in server memory / the caller's own browser storage only — it is
-   * never persisted to crawl results or logs, and job params only record the
-   * boolean (whether proxied) for the UI badge.
+   * is kept server-side only — never persisted to crawl results or logs, and
+   * job responses only record the boolean for the UI badge.
    */
   proxy?: string;
 }
@@ -205,7 +200,10 @@ export const FREQUENCY_MS: Record<CrawlFrequency, number> = {
   weekly: 7 * 24 * 60 * 60 * 1000,
 };
 
-/** A recurring crawl registration (in-memory; resets on server restart). */
+/**
+ * A recurring crawl registration (persisted on the backend `Store` record;
+ * the standalone scheduler process turns it into jobs).
+ */
 export interface CrawlSchedule {
   origin: string;
   collections: string[];
@@ -215,9 +213,8 @@ export interface CrawlSchedule {
   nextRunAt: number;
   running: boolean;
   /**
-   * The proxy gateway URL for scheduled runs. Server-memory only — stripped
-   * from every response (`publicSchedule`) so it never reaches the client or
-   * the schedules cache.
+   * The proxy gateway URL for scheduled runs. Server-side only — stripped
+   * from every response so it never reaches the client.
    */
   proxyUrl?: string;
 }
@@ -233,13 +230,15 @@ export interface ScheduleCrawlInput {
   productOnly?: boolean;
   storeSnapshots?: boolean;
   useBrowser?: boolean;
-  /** Tier 2 — residential proxy gateway URL (server-memory only). */
+  /** Tier 2 — residential proxy gateway URL (server-side only). */
   proxy?: string;
 }
 
 /** Live snapshot of a crawl job, returned by `getCrawlProgress`. */
 export interface CrawlJob {
   status: "running" | "done" | "error";
+  /** shallow = sitemap-only check (new products only); deep = full crawl. */
+  type: "shallow" | "deep";
   /** Crawl parameters captured at start (used by the UI's progress text). */
   params: CrawlJobParams;
   /** URLs discovered so far (0 while still in the discovery phase). */
@@ -264,29 +263,17 @@ export interface CrawlJob {
   persisted?: boolean;
 }
 
-// Single-process job store. Lives on the server; along with the handler code
-// it is stripped from the client bundle by the Start plugin.
-const jobs = new Map<string, CrawlJob>();
-let nextJobId = 0;
+/** Base backend URL for the Express API (dev-proxied same-origin otherwise). */
+const backendUrl = () =>
+  process.env.PARITY_BACKEND_URL ?? "http://localhost:3000";
 
-// Single-process schedule store (in-memory; resets on server restart) and
-// the lazy scheduler interval. The interval is only ever started from a
-// server-function handler, so the client bundle never executes it.
-const schedules = new Map<string, CrawlSchedule>();
-let schedulerTimer: ReturnType<typeof setInterval> | null = null;
-
-function createJobId(): string {
-  nextJobId += 1;
-  return `crawl-${Date.now().toString(36)}-${nextJobId}`;
-}
-
-/** Removes terminal jobs older than 10 minutes so the store stays bounded. */
-function pruneFinishedJobs(): void {
-  const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const [id, job] of jobs) {
-    if (job.status !== "running" && (job.finishedAt ?? 0) < cutoff) {
-      jobs.delete(id);
-    }
+/** Reads the backend's error message out of a failed response. */
+async function backendError(res: Response): Promise<Error> {
+  try {
+    const body = (await res.json()) as { message?: string };
+    return new Error(body.message ?? `Request failed (${res.status})`);
+  } catch {
+    return new Error(`Request failed (${res.status})`);
   }
 }
 
@@ -299,356 +286,110 @@ function normalizeProxy(proxy: string | undefined): string | undefined {
   return trimmed;
 }
 
+/** Light client-side validation (the backend clamps + re-validates). */
 function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
-  // SSRF guard: the crawler fetches server-side, so only http(s) origins
-  // are accepted.
   const origin = input.origin.trim();
   if (!/^https?:\/\/\S+/i.test(origin)) {
     throw new Error("Origin must be a valid http(s) URL");
   }
-  const proxy = normalizeProxy(input.proxy);
-  // Clamp crawl parameters to sane ranges.
-  const delayMs =
-    input.delayMs == null
-      ? undefined
-      : Math.min(10_000, Math.max(100, Math.round(input.delayMs)));
-  const maxConcurrencyPerHost =
-    input.maxConcurrencyPerHost == null
-      ? undefined
-      : Math.min(12, Math.max(1, Math.round(input.maxConcurrencyPerHost)));
-  const maxPages =
-    input.maxPages == null
-      ? undefined
-      : Math.max(1, Math.round(input.maxPages));
   return {
     ...input,
     origin,
-    proxy,
-    delayMs,
-    maxConcurrencyPerHost,
-    maxPages,
-    respectRobotsTxt: input.respectRobotsTxt !== false,
-    productOnly: input.productOnly !== false,
-    storeSnapshots: input.storeSnapshots !== false,
-    useBrowser: input.useBrowser === true,
+    type: input.type === "shallow" ? "shallow" : "deep",
+    proxy: normalizeProxy(input.proxy),
   };
 }
 
 /**
- * Starts a crawl in the background and returns its job id immediately. The
- * client polls `getCrawlProgress` for live progress, then the final result.
+ * Starts a crawl: enqueues a deep CrawlJob on the backend queue and returns
+ * its id immediately. A worker process picks it up; the client polls
+ * `getCrawlProgress` for live progress, then the final result.
  */
 export const startCrawl = createServerFn({ method: "POST" })
   .validator((input: CrawlRunInput) => validateCrawlInput(input))
   .handler(async ({ data }): Promise<{ jobId: string }> => {
-    pruneFinishedJobs();
-    const jobId = createJobId();
-    jobs.set(jobId, {
-      status: "running",
-      total: 0,
-      processed: 0,
-      startedAt: Date.now(),
-      fetchStartedAt: null,
-      discovery: null,
-      finishedAt: null,
-      params: {
-        delayMs: data.delayMs ?? 1000,
-        maxConcurrencyPerHost: data.maxConcurrencyPerHost ?? 2,
-        maxPages: data.maxPages ?? null,
-        respectRobotsTxt: data.respectRobotsTxt !== false,
-        productOnly: data.productOnly !== false,
-        storeSnapshots: data.storeSnapshots !== false,
-        useBrowser: data.useBrowser === true,
-        proxy: !!data.proxy,
-      },
+    const res = await fetch(`${backendUrl()}/api/crawl-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data),
     });
-    // Fire and forget — the client polls progress. The event loop stays
-    // alive while the crawl's fetches are in flight.
-    void runJob(jobId, data);
-    return { jobId };
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: { jobId: string };
+    };
+    return { jobId: body.data.jobId };
   });
 
 /** Returns the current snapshot of a crawl job, or null for an unknown id. */
 export const getCrawlProgress = createServerFn({ method: "POST" })
   .validator((jobId: string) => jobId)
-  .handler(({ data: jobId }): CrawlJob | null => jobs.get(jobId) ?? null);
-
-const FREQUENCIES: CrawlFrequency[] = ["1h", "6h", "daily", "weekly"];
+  .handler(async ({ data: jobId }): Promise<CrawlJob | null> => {
+    const res = await fetch(
+      `${backendUrl()}/api/crawl-jobs/${encodeURIComponent(jobId)}`,
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: CrawlJob | null;
+    };
+    return body.data ?? null;
+  });
 
 function validateScheduleInput(input: ScheduleCrawlInput): ScheduleCrawlInput {
   const origin = input.origin.trim();
   if (!/^https?:\/\/\S+/i.test(origin)) {
     throw new Error("Origin must be a valid http(s) URL");
   }
-  if (!FREQUENCIES.includes(input.frequency)) {
+  if (!FREQUENCY_MS[input.frequency]) {
     throw new Error(`Unsupported frequency: ${String(input.frequency)}`);
   }
-  const proxy = normalizeProxy(input.proxy);
-  const delayMs =
-    input.delayMs == null
-      ? undefined
-      : Math.min(10_000, Math.max(100, Math.round(input.delayMs)));
-  const maxConcurrencyPerHost =
-    input.maxConcurrencyPerHost == null
-      ? undefined
-      : Math.min(12, Math.max(1, Math.round(input.maxConcurrencyPerHost)));
-  const maxPages =
-    input.maxPages == null
-      ? undefined
-      : Math.max(1, Math.round(input.maxPages));
-  return {
-    origin,
-    collections: input.collections,
-    frequency: input.frequency,
-    proxy,
-    delayMs,
-    maxConcurrencyPerHost,
-    maxPages,
-    respectRobotsTxt: input.respectRobotsTxt !== false,
-    productOnly: input.productOnly !== false,
-    storeSnapshots: input.storeSnapshots !== false,
-    useBrowser: input.useBrowser === true,
-  };
+  return { ...input, origin, proxy: normalizeProxy(input.proxy) };
 }
 
 /**
- * The schedule as returned to clients — the proxy gateway URL is stripped
- * so credentials never leave the server (it lives only in the in-memory
- * schedule record, used to reconstruct the CrawlRunInput on tick).
- */
-function publicSchedule(sched: CrawlSchedule): CrawlSchedule {
-  const { proxyUrl: _proxyUrl, ...rest } = sched;
-  return rest;
-}
-
-/**
- * Registers (or replaces) a recurring crawl for an origin. Schedules live in
- * memory on the server and reset on restart; the 30s tick starts due crawls
- * as background jobs visible through the normal progress flow.
+ * Registers (or replaces) a recurring crawl for an origin — persisted on the
+ * backend `Store` record, ticked by the standalone scheduler process, so
+ * schedules survive API restarts (unlike the old in-memory store).
  */
 export const scheduleCrawl = createServerFn({ method: "POST" })
   .validator((input: ScheduleCrawlInput) => validateScheduleInput(input))
-  .handler(({ data }): CrawlSchedule => {
-    ensureSchedulerStarted();
-    const now = Date.now();
-    const sched: CrawlSchedule = {
-      origin: data.origin,
-      collections: data.collections,
-      frequency: data.frequency,
-      params: {
-        delayMs: data.delayMs ?? 1000,
-        maxConcurrencyPerHost: data.maxConcurrencyPerHost ?? 2,
-        maxPages: data.maxPages ?? null,
-        respectRobotsTxt: data.respectRobotsTxt !== false,
-        productOnly: data.productOnly !== false,
-        storeSnapshots: data.storeSnapshots !== false,
-        useBrowser: data.useBrowser === true,
-        proxy: !!data.proxy,
-      },
-      proxyUrl: data.proxy,
-      lastRunAt: null,
-      nextRunAt: now + FREQUENCY_MS[data.frequency],
-      running: false,
+  .handler(async ({ data }): Promise<CrawlSchedule> => {
+    const res = await fetch(`${backendUrl()}/api/crawl-jobs/schedules`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: CrawlSchedule;
     };
-    schedules.set(data.origin, sched);
-    return publicSchedule(sched);
+    return body.data;
   });
 
-/** Lists the active recurring crawls (newest registration first). */
+/** Lists the active recurring crawls (most recently updated first). */
 export const getCrawlSchedules = createServerFn({ method: "POST" }).handler(
-  (): CrawlSchedule[] => [...schedules.values()].reverse().map(publicSchedule),
+  async (): Promise<CrawlSchedule[]> => {
+    const res = await fetch(`${backendUrl()}/api/crawl-jobs/schedules`);
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: CrawlSchedule[];
+    };
+    return body.data ?? [];
+  },
 );
 
 /** Removes the recurring crawl for an origin. */
 export const cancelCrawlSchedule = createServerFn({ method: "POST" })
   .validator((origin: string) => origin.trim())
-  .handler(({ data: origin }): { cancelled: boolean } => {
-    schedules.delete(origin);
+  .handler(async ({ data: origin }): Promise<{ cancelled: boolean }> => {
+    const res = await fetch(
+      `${backendUrl()}/api/crawl-jobs/schedules/${encodeURIComponent(origin)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) throw await backendError(res);
     return { cancelled: true };
   });
-
-/** Starts the scheduler interval on first use (handler-only, never client). */
-function ensureSchedulerStarted(): void {
-  if (schedulerTimer) return;
-  schedulerTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [origin, sched] of [...schedules.entries()]) {
-      if (sched.running || sched.nextRunAt > now) continue;
-      sched.running = true;
-      sched.lastRunAt = now;
-      sched.nextRunAt = now + FREQUENCY_MS[sched.frequency];
-      void runScheduledCrawl(origin, sched);
-    }
-  }, 30_000);
-}
-
-/** Runs a due scheduled crawl as a normal background job. */
-async function runScheduledCrawl(
-  origin: string,
-  sched: CrawlSchedule,
-): Promise<void> {
-  const jobId = createJobId();
-  jobs.set(jobId, {
-    status: "running",
-    total: 0,
-    processed: 0,
-    startedAt: Date.now(),
-    fetchStartedAt: null,
-    discovery: null,
-    finishedAt: null,
-    params: sched.params,
-  });
-  try {
-    await runJob(jobId, {
-      origin: sched.origin,
-      collections: sched.collections,
-      delayMs: sched.params.delayMs,
-      maxConcurrencyPerHost: sched.params.maxConcurrencyPerHost,
-      maxPages: sched.params.maxPages ?? undefined,
-      respectRobotsTxt: sched.params.respectRobotsTxt,
-      productOnly: sched.params.productOnly,
-      storeSnapshots: sched.params.storeSnapshots,
-      useBrowser: sched.params.useBrowser,
-      proxy: sched.proxyUrl,
-    });
-  } finally {
-    // Clear the running flag in a finally so an unexpected throw (e.g. a
-    // transport failure) can never wedge the schedule. Only clear it if the
-    // stored schedule is still this one — a cancelled-then-re-added schedule
-    // for the same origin mid-run must not have its flag cleared by the
-    // stale run.
-    if (schedules.get(origin) === sched) sched.running = false;
-  }
-}
-
-/**
- * Runs the real crawler for a job, updating the shared job record.
- *
- * Honors the crawl parameters from the Sources page (delay, concurrency,
- * max pages), defaulting to the polite values: max 2 concurrent requests
- * per host, robots.txt respected, adaptive throttle. A per-origin SQLite
- * checkpoint persists every product as it is crawled (crash-safe) and skips
- * unchanged products on re-runs. On completion the sanitized result is
- * upserted to the Express/MongoDB backend before the job flips to "done".
- */
-async function runJob(jobId: string, input: CrawlRunInput): Promise<void> {
-  const job = jobs.get(jobId);
-  if (!job) return;
-  try {
-    const { runCrawl } = await import("@/lib/crawler/index.ts");
-    // Node-only imports stay inside the handler so the client bundle never
-    // sees them (same pattern as the crawler dynamic import).
-    const { join } = await import("node:path");
-    const host = new URL(input.origin).host.replace(/[^a-z0-9.-]/gi, "_");
-    // Default to <cwd>/.crawler (gitignored); override with
-    // PARITY_CHECKPOINT_DIR when the server isn't started from `frontend/`.
-    const checkpointDir =
-      process.env.PARITY_CHECKPOINT_DIR ?? join(process.cwd(), ".crawler");
-    const checkpointPath = join(checkpointDir, `crawl-${host}.db`);
-    const result = await runCrawl({
-      origin: input.origin,
-      collections: input.collections,
-      delayMs: input.delayMs,
-      maxConcurrencyPerHost: input.maxConcurrencyPerHost,
-      maxPages: input.maxPages,
-      respectRobotsTxt: input.respectRobotsTxt,
-      productOnly: input.productOnly,
-      useBrowser: input.useBrowser === true,
-      proxy: input.proxy,
-      maxRetries: 1,
-      // Per-product incremental saves + skip-unchanged on re-runs. The
-      // engine writes each product to SQLite as it is fetched, so a crash
-      // mid-run never loses what's already been crawled.
-      checkpointPath,
-      // `onProgress` fires after each URL: first arg = products in hand
-      // (freshly fetched + cache-reused), second = URLs discovered.
-      onProgress: (processed, total) => {
-        const current = jobs.get(jobId);
-        if (current) {
-          // First tick with a known URL count marks the end of discovery:
-          // from here the ETA can be computed on fetch throughput alone.
-          if (current.fetchStartedAt === null && total > 0) {
-            current.fetchStartedAt = Date.now();
-          }
-          current.processed = processed;
-          current.total = total;
-        }
-      },
-      // `onDiscoveryProgress` fires throughout the discovery phase so the
-      // progress panel can show live sitemap/page counts, not a spinner.
-      onDiscoveryProgress: (progress) => {
-        const current = jobs.get(jobId);
-        if (current) {
-          current.discovery = progress;
-        }
-      },
-    });
-    const current = jobs.get(jobId);
-    if (current) {
-      const sanitized: CrawlRunResult = {
-        stats: {
-          discovered: result.stats.discovered,
-          fetched: result.stats.fetched,
-          skippedUnchanged: result.stats.skippedUnchanged,
-          failed: result.stats.failed,
-          durationMs: result.stats.durationMs,
-        },
-        // The full catalogue is saved — comparisons and every product view
-        // need all of it, not a sample. Failures stay capped (they're retried
-        // on the next run anyway).
-        failures: result.stats.failures.slice(0, 100),
-        // Identity fields (SKU/GTIN) are persisted too — the matching layer
-        // matches GTIN > SKU > slug > fuzzy, so exact identity needs to
-        // survive the crawl → Mongo boundary.
-        products: result.products.map((p) => ({
-          name: p.name,
-          brand: p.brand,
-          price: p.price,
-          available: p.available,
-          url: p.url,
-          sku: p.variants?.[0]?.sku ?? "",
-          gtin: p.variants?.[0]?.barcode ?? "",
-        })),
-        discovery: result.discovery,
-      };
-      // Persist to MongoDB BEFORE flipping to "done" so the client's final
-      // poll sees an accurate `persisted` flag. Best-effort: a down backend
-      // just means the badge doesn't show; the checkpoint cache still holds
-      // the data.
-      let persisted = false;
-      try {
-        const backendUrl =
-          process.env.PARITY_BACKEND_URL ?? "http://localhost:3000";
-        const res = await fetch(`${backendUrl}/api/data/crawl-results`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            origin: input.origin,
-            collections: input.collections,
-            stats: sanitized.stats,
-            products: sanitized.products,
-            failures: sanitized.failures,
-            discovery: sanitized.discovery,
-            storeSnapshots: input.storeSnapshots,
-          }),
-        });
-        persisted = res.ok;
-      } catch {
-        persisted = false;
-      }
-      current.status = "done";
-      current.total = result.stats.discovered;
-      current.processed = result.products.length;
-      current.finishedAt = Date.now();
-      current.result = sanitized;
-      current.persisted = persisted;
-    }
-  } catch (error) {
-    const current = jobs.get(jobId);
-    if (current) {
-      current.status = "error";
-      current.finishedAt = Date.now();
-      current.error = error instanceof Error ? error.message : String(error);
-    }
-  }
-}

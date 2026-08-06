@@ -1,7 +1,15 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { GitCompareArrows, Play, Plus, Store, UserPlus, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  GitCompareArrows,
+  Loader2,
+  Play,
+  Plus,
+  Store,
+  UserPlus,
+  X,
+} from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { AddCompetitorDialog } from "@/components/competitors/add-competitor-dialog";
@@ -9,14 +17,24 @@ import {
   ComparePanel,
   CompareSectionHeading,
 } from "@/components/competitors/compare-stores";
-import { StorePickerDialog } from "@/components/competitors/store-picker-dialog";
+import {
+  StorePickerDialog,
+  type StoreOption,
+} from "@/components/competitors/store-picker-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { ErrorState, LoadingState } from "@/components/common/states";
-import { useSavedCrawls } from "@/hooks/useData";
+import { useSavedCrawlMetas } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
-import { getMyStoreData, setMyStoreData, type SavedCrawl } from "@/lib/api";
+import {
+  getCrawlResultsData,
+  getMyStoreData,
+  invalidateMatchingData,
+  queryKeys,
+  setMyStoreData,
+  type SavedCrawl,
+} from "@/api";
 import {
   formatCrawlDate,
   normalizeOrigin,
@@ -51,21 +69,31 @@ function CompetitorsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  // Every crawled website (one latest snapshot per origin) — the source list
-  // for both "your website" and the competitor slots.
-  const { data: saved, isLoading, isError } = useSavedCrawls();
-  const stores = useMemo(() => {
-    const latest = new Map<string, SavedCrawl>();
+  // Lightweight crawl summaries (origin, platform, product count, timestamp —
+  // no product arrays). Full catalogues are fetched lazily below, only for
+  // the stores actually selected, so this page never downloads every store's
+  // products at once (tens of thousands of products ≈ 10 MB).
+  const { data: saved, isLoading, isError } = useSavedCrawlMetas();
+  const stores = useMemo<StoreOption[]>(() => {
+    const latest = new Map<string, StoreOption>();
     for (const c of saved?.data ?? []) {
       const key = normalizeOrigin(c.origin);
-      if (!latest.has(key)) latest.set(key, c);
+      if (!latest.has(key)) {
+        latest.set(key, {
+          key,
+          origin: c.origin,
+          productCount: c.productCount,
+          platform: c.platform,
+          updatedAt: c.updatedAt,
+        });
+      }
     }
-    return [...latest.entries()].map(([key, crawl]) => ({ key, crawl }));
+    return [...latest.values()];
   }, [saved]);
 
   // Your website — a single persisted selection, used as store A everywhere.
   const myStoreQuery = useQuery({
-    queryKey: ["my-store"],
+    queryKey: queryKeys.myStore,
     queryFn: () => getMyStoreData(),
   });
   const myStore = myStoreQuery.data?.data ?? null;
@@ -103,6 +131,54 @@ function CompetitorsPage() {
     ? Math.min(0.95, Math.max(0.5, rawThreshold))
     : 0.8;
 
+  // Full catalogues (with products) for the selected stores. Fetched lazily
+  // and cached; refreshed only when a store's meta says it was re-crawled
+  // (updatedAt changed), so the 30s poll never re-downloads unchanged data.
+  const [fullCrawls, setFullCrawls] = useState<Record<string, SavedCrawl>>({});
+  const [materializedAt, setMaterializedAt] = useState<Record<string, string>>(
+    {},
+  );
+  const [loadFailed, setLoadFailed] = useState<Record<string, boolean>>({});
+  const [retryNonce, setRetryNonce] = useState(0);
+  const neededStores = useMemo(() => {
+    const keys = new Set<string>();
+    if (myStoreKey) keys.add(myStoreKey);
+    for (const k of validSlots) if (k) keys.add(k);
+    return stores.filter((s) => keys.has(s.key));
+  }, [stores, myStoreKey, validSlots]);
+
+  useEffect(() => {
+    let cancelled = false;
+    for (const s of neededStores) {
+      if (materializedAt[s.key] === s.updatedAt) continue; // already fresh
+      getCrawlResultsData({ origin: s.origin })
+        .then((res) => {
+          const latest = res.data?.[0]; // newest snapshot for this origin
+          if (!latest || cancelled) return;
+          setFullCrawls((prev) => ({ ...prev, [s.key]: latest }));
+          setMaterializedAt((prev) => ({ ...prev, [s.key]: s.updatedAt }));
+          setLoadFailed((prev) =>
+            prev[s.key] ? { ...prev, [s.key]: false } : prev,
+          );
+        })
+        .catch(() => {
+          if (!cancelled) {
+            // Keep whatever we have — the cards still render from meta, and
+            // the Retry button (or the next poll) re-attempts the fetch.
+            setLoadFailed((prev) => ({ ...prev, [s.key]: true }));
+          }
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [neededStores, materializedAt, retryNonce]);
+
+  const retryLoad = () => {
+    setLoadFailed({});
+    setRetryNonce((n) => n + 1);
+  };
+
   // Which picker is open: "mine" for your website, a number for a slot index.
   const [pickerFor, setPickerFor] = useState<"mine" | number | null>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -118,19 +194,22 @@ function CompetitorsPage() {
     return [];
   }, [pickerFor, validSlots, myStoreKey]);
 
-  const selectMyStore = async (crawl: SavedCrawl) => {
+  const selectMyStore = async (origin: string) => {
     try {
-      await setMyStoreData({ origin: crawl.origin });
-      void queryClient.invalidateQueries({ queryKey: ["my-store"] });
-      void queryClient.invalidateQueries({ queryKey: ["competitors"] });
+      await setMyStoreData({ origin });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.myStore });
+      // Your store drives the matching layer — refresh everything derived
+      // from it (competitors list, matched products, analytics, pricing).
+      // The saved crawl snapshots themselves are untouched.
+      invalidateMatchingData(queryClient);
     } catch (error) {
       // The dialog already closed on select; surface failures to the console.
       console.error("Failed to set your website:", error);
     }
   };
 
-  const selectSlot = (index: number) => (crawl: SavedCrawl) => {
-    const key = normalizeOrigin(crawl.origin);
+  const selectSlot = (index: number) => (origin: string) => {
+    const key = normalizeOrigin(origin);
     setSlots((prev) => {
       const next = [...prev];
       while (next.length < SLOT_COUNT) next.push("");
@@ -152,16 +231,17 @@ function CompetitorsPage() {
     navigate({ to: "/sources" });
   };
 
-  const myCrawl = myStoreKey
-    ? stores.find((s) => s.key === myStoreKey)?.crawl
+  const myStoreMeta = myStoreKey
+    ? stores.find((s) => s.key === myStoreKey)
     : undefined;
+  const myCrawl = myStoreKey ? fullCrawls[myStoreKey] : undefined;
   const filledSlots = useMemo(() => {
-    const out: Array<{ index: number; key: string; crawl: SavedCrawl }> = [];
+    const out: Array<{ index: number; key: string; store: StoreOption }> = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
       const key = validSlots[i];
       if (!key) continue;
-      const crawl = stores.find((s) => s.key === key)?.crawl;
-      if (crawl) out.push({ index: i, key, crawl });
+      const store = stores.find((s) => s.key === key);
+      if (store) out.push({ index: i, key, store });
     }
     return out;
   }, [validSlots, stores]);
@@ -233,7 +313,7 @@ function CompetitorsPage() {
                       onClick={() => myStore && crawlNow(myStore.origin)}
                     >
                       <Play className="size-3.5" />
-                      {myCrawl ? "Crawl again" : "Crawl your website"}
+                      {myStoreMeta ? "Crawl again" : "Crawl your website"}
                     </Button>
                   </>
                 ) : (
@@ -254,22 +334,22 @@ function CompetitorsPage() {
                 <div>
                   <p className="label-caps">Products</p>
                   <p className="mt-1 numeric">
-                    {myCrawl ? myCrawl.products.length.toLocaleString() : "—"}
+                    {myStoreMeta
+                      ? myStoreMeta.productCount.toLocaleString()
+                      : "—"}
                   </p>
                 </div>
                 <div>
                   <p className="label-caps">Platform</p>
-                  <p className="mt-1">
-                    {myCrawl?.discovery?.platform?.platform ?? "—"}
-                  </p>
+                  <p className="mt-1">{myStoreMeta?.platform ?? "—"}</p>
                 </div>
                 <div>
                   <p className="label-caps">Last crawl</p>
                   <p className="mt-1">
-                    {myCrawl ? formatCrawlDate(myCrawl.updatedAt) : "—"}
+                    {myStoreMeta ? formatCrawlDate(myStoreMeta.updatedAt) : "—"}
                   </p>
                 </div>
-                {!myCrawl ? (
+                {!myStoreMeta ? (
                   <p className="w-full text-xs text-muted-foreground">
                     Your website hasn't been crawled yet — crawl it so its
                     catalogue can be compared against competitors.
@@ -332,12 +412,9 @@ function CompetitorsPage() {
                   </h3>
                   <dl className="mt-3 space-y-1.5 text-xs">
                     {[
-                      ["Products", slot.crawl.products.length.toLocaleString()],
-                      [
-                        "Platform",
-                        slot.crawl.discovery?.platform?.platform ?? "—",
-                      ],
-                      ["Last crawl", formatCrawlDate(slot.crawl.updatedAt)],
+                      ["Products", slot.store.productCount.toLocaleString()],
+                      ["Platform", slot.store.platform ?? "—"],
+                      ["Last crawl", formatCrawlDate(slot.store.updatedAt)],
                     ].map(([k, v]) => (
                       <div key={k} className="flex justify-between gap-2">
                         <dt className="text-muted-foreground">{k}</dt>
@@ -357,7 +434,7 @@ function CompetitorsPage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => crawlNow(slot.crawl.origin)}
+                      onClick={() => crawlNow(slot.store.origin)}
                     >
                       <Play className="size-3.5" /> Crawl
                     </Button>
@@ -374,7 +451,7 @@ function CompetitorsPage() {
                 <GitCompareArrows className="size-4 text-muted-foreground" />
                 <h2 className="font-display text-xl">Comparisons</h2>
               </div>
-              {myCrawl && filledSlots.length > 0 ? (
+              {myStoreMeta && filledSlots.length > 0 ? (
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                   <label
                     htmlFor="compare-fuzzy"
@@ -423,7 +500,7 @@ function CompetitorsPage() {
 
             {!myStoreKey ? (
               <EmptyStateCard message="Choose your website above to compare it against competitors." />
-            ) : !myCrawl ? (
+            ) : !myStoreMeta ? (
               <EmptyStateCard
                 message="Your website hasn't been crawled yet. Crawl it to compare catalogues."
                 actionLabel="Crawl your website"
@@ -432,26 +509,55 @@ function CompetitorsPage() {
             ) : filledSlots.length === 0 ? (
               <EmptyStateCard message="Select a competitor card above to see the comparison." />
             ) : (
-              filledSlots.map((slot) => (
-                <section
-                  key={slot.key}
-                  className="border border-border bg-card"
-                >
-                  <div className="border-b border-border px-5 py-3.5">
-                    <CompareSectionHeading labelA={myLabel} labelB={slot.key} />
-                  </div>
-                  <div className="p-5">
-                    <ComparePanel
-                      storeA={myCrawl}
-                      storeB={slot.crawl}
-                      labelA={myLabel}
-                      labelB={slot.key}
-                      fuzzy={fuzzy}
-                      threshold={threshold}
-                    />
-                  </div>
-                </section>
-              ))
+              filledSlots.map((slot) => {
+                const slotCrawl = fullCrawls[slot.key];
+                const failed =
+                  loadFailed[slot.key] ||
+                  (myStoreKey ? !!loadFailed[myStoreKey] : false);
+                return (
+                  <section
+                    key={slot.key}
+                    className="border border-border bg-card"
+                  >
+                    <div className="border-b border-border px-5 py-3.5">
+                      <CompareSectionHeading
+                        labelA={myLabel}
+                        labelB={slot.key}
+                      />
+                    </div>
+                    <div className="p-5">
+                      {myCrawl && slotCrawl ? (
+                        <ComparePanel
+                          storeA={myCrawl}
+                          storeB={slotCrawl}
+                          labelA={myLabel}
+                          labelB={slot.key}
+                          fuzzy={fuzzy}
+                          threshold={threshold}
+                        />
+                      ) : failed ? (
+                        <div className="flex flex-wrap items-center justify-between gap-3 border border-dashed border-destructive/40 bg-destructive/5 p-6 text-sm text-muted-foreground">
+                          <p>
+                            Couldn't load {slot.key}'s catalogue for comparison.
+                          </p>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={retryLoad}
+                          >
+                            Retry
+                          </Button>
+                        </div>
+                      ) : (
+                        <p className="flex items-center gap-3 border border-dashed border-border bg-muted/30 p-8 text-sm text-muted-foreground">
+                          <Loader2 className="size-4 shrink-0 animate-spin" />
+                          Loading {slot.key}'s catalogue…
+                        </p>
+                      )}
+                    </div>
+                  </section>
+                );
+              })
             )}
           </div>
         </>

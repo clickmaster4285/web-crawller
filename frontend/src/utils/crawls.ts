@@ -1,4 +1,4 @@
-import type { SavedCrawl } from "@/lib/api";
+import type { SavedCrawl } from "@/api";
 
 /**
  * Ensures an origin input has an http(s) scheme (defaults to https) and is

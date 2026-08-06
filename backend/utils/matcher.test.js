@@ -1,5 +1,7 @@
 /**
- * Temporary fixture test for `matchCatalogues` (deleted after running).
+ * Fixture test for `matchCatalogues`. Converted from a standalone script to a
+ * proper jest suite (one `test()` block asserting the accumulated checks) so
+ * `npm test` runs it alongside the other suites without a worker crash.
  */
 const { matchCatalogues } = require('./matcher');
 
@@ -35,7 +37,7 @@ check('GTIN tier wins over SKU', methodOf('Wireless Mouse') === 'GTIN', `got ${m
 check('SKU tier', methodOf('Mechanical Keyboard') === 'SKU', `got ${methodOf('Mechanical Keyboard')}`);
 check('GTIN tier (barcode)', methodOf('4K Monitor') === 'GTIN', `got ${methodOf('4K Monitor')}`);
 check('URL slug tier', methodOf('Laptop Stand') === 'URL slug', `got ${methodOf('Laptop Stand')}`);
-check('fuzzy tier', methodOf('USB-C Cable 2m') === 'AI similarity', `got ${methodOf('USB-C Cable 2m')}`);
+check('fuzzy tier', methodOf('USB-C Cable 2m') === 'fuzzy', `got ${methodOf('USB-C Cable 2m')}`);
 check('fuzzy confidence', matched.find((p) => p.mine.name === 'USB-C Cable 2m')?.confidence >= 80, `got ${matched.find((p) => p.mine.name === 'USB-C Cable 2m')?.confidence}`);
 check('each product matches once', matched.length === 6, `matched ${matched.length}`);
 check('onlyMine empty', onlyMine.length === 0, `got ${onlyMine.length}: ${onlyMine.map((m) => m.name).join(', ')}`);
@@ -66,5 +68,13 @@ const greedy = matchCatalogues(
 );
 check('greedy one-to-one', greedy.matched.length === 1 && greedy.onlyMine.length === 1, `matched ${greedy.matched.length}, onlyMine ${greedy.onlyMine.length}`);
 
-console.log(`\n${failures === 0 ? 'ALL PASS ✅' : `${failures} FAILURES ❌`}`);
-process.exit(failures === 0 ? 0 : 1);
+test('nameTokens splits normalized tokens', () => {
+  const { nameTokens } = require('./matcher');
+  expect(nameTokens('USB-C Cable 2m')).toEqual(['usb', 'c', 'cable', '2m']);
+  expect(nameTokens('  Blue T-Shirt  ')).toEqual(['blue', 't', 'shirt']);
+});
+
+test('matchCatalogues fixture — all 11 checks', () => {
+  console.log(`\n${failures === 0 ? 'ALL PASS ✅' : `${failures} FAILURES ❌`}`);
+  expect(failures).toBe(0);
+});

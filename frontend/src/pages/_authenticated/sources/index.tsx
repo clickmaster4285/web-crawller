@@ -11,8 +11,10 @@ import {
   Link2,
   Loader2,
   Play,
+  Radar,
   RefreshCw,
   TriangleAlert,
+  Zap,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -21,7 +23,10 @@ import { PageHeader } from "@/components/layout/app-shell";
 import { StoreProfile } from "@/components/crawls/store-profile";
 import { DiscoveryLog } from "@/components/crawls/discovery-log";
 import { SectionTitle } from "@/components/cards/stat-card";
-import { CrawlDiffSummary } from "@/components/cards/crawl-diff-summary";
+import {
+  CrawlDiffSummary,
+  NewProductsList,
+} from "@/components/cards/crawl-diff-summary";
 import { CrawlStatsGrid } from "@/components/cards/crawl-stats-grid";
 import { ProductCell } from "@/components/common/product-cell";
 import { StockBadge } from "@/components/common/stock-badge";
@@ -43,7 +48,7 @@ import { ErrorState, LoadingState } from "@/components/common/states";
 import { useSavedCrawls } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import { useWorkspace } from "@/hooks/useWorkspace";
-import type { SavedCrawl } from "@/lib/api";
+import { invalidateCrawlData, type SavedCrawl } from "@/api";
 import {
   cancelCrawlSchedule,
   getCrawlProgress,
@@ -263,12 +268,17 @@ function SourcesPage() {
     isRunning && jobId != null && jobId !== startedInThisSession.current;
   const result: CrawlRunResult | undefined =
     job?.status === "done" ? job.result : undefined;
+  // Shallow = sitemap-only check: the badge, and the "no new products"
+  // zero-fetch state, only apply to those runs (deep runs keep the full
+  // results layout).
+  const shallowRun = job?.type === "shallow";
 
-  // When a crawl finishes and persists, refresh the Saved crawls list so the
-  // new result shows up without a manual reload.
+  // When a crawl finishes and persists, every crawl-derived query is stale —
+  // refresh the saved-crawls list (and mark the rest stale) so results show
+  // up without a manual reload.
   useEffect(() => {
     if (job?.persisted) {
-      void queryClient.invalidateQueries({ queryKey: ["saved-crawls"] });
+      invalidateCrawlData(queryClient);
     }
   }, [job?.persisted, queryClient]);
 
@@ -288,6 +298,10 @@ function SourcesPage() {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, [isRunning]);
+
+  // Which job kind this session started — only the button actually clicked
+  // shows the "Starting…" spinner (the start mutation is shared by both).
+  const [starting, setStarting] = useState<"deep" | "shallow" | null>(null);
 
   const startedAt = job?.startedAt ?? 0;
   const fetchStartedAt = job?.fetchStartedAt ?? null;
@@ -380,6 +394,17 @@ function SourcesPage() {
     [saved.data, profileKey],
   );
 
+  // Newest shallow (sitemap-only) snapshot for the domain — the "Last quick
+  // check" strip on the Store profile card. Old snapshots without a `type`
+  // are all deep crawls, so they're excluded.
+  const lastShallowCrawl = useMemo(
+    () =>
+      (saved.data?.data ?? []).find(
+        (c) => c.type === "shallow" && normalizeOrigin(c.origin) === profileKey,
+      ),
+    [saved.data, profileKey],
+  );
+
   const collectionsList = collections
     .split(",")
     .map((c) => c.trim())
@@ -388,19 +413,32 @@ function SourcesPage() {
   if (isError) return <ErrorState />;
   if (isLoading || !workspace) return <LoadingState label="Loading crawler…" />;
 
-  const runCrawl = () =>
-    start.mutate({
-      origin: crawlOrigin.trim(),
-      collections: collectionsList,
-      delayMs: crawlDelay,
-      maxConcurrencyPerHost: maxConcurrency,
-      maxPages: maxPages ?? undefined,
-      respectRobotsTxt: respectRobots,
-      productOnly,
-      storeSnapshots,
-      useBrowser,
-      proxy: proxy.trim() || undefined,
-    });
+  const buildCrawlInput = (type: "deep" | "shallow") => ({
+    origin: crawlOrigin.trim(),
+    collections: collectionsList,
+    delayMs: crawlDelay,
+    maxConcurrencyPerHost: maxConcurrency,
+    maxPages: maxPages ?? undefined,
+    respectRobotsTxt: respectRobots,
+    productOnly,
+    storeSnapshots,
+    useBrowser,
+    proxy: proxy.trim() || undefined,
+    type,
+  });
+  const runCrawl = () => {
+    setStarting("deep");
+    start.mutate(buildCrawlInput("deep"));
+  };
+  // Quick check — a shallow sitemap-only crawl: discovery is sitemap-only and
+  // only NEW product pages are fetched (~1 request when nothing changed).
+  // Partial results never soft-delete the catalogue (fullCrawl: false).
+  const runQuickCheck = () => {
+    setStarting("shallow");
+    start.mutate(buildCrawlInput("shallow"));
+  };
+  const pendingDeep = start.isPending && starting === "deep";
+  const pendingShallow = start.isPending && starting === "shallow";
 
   const scheduleIt = () =>
     schedule.mutate({
@@ -501,16 +539,30 @@ function SourcesPage() {
                 onClick={runCrawl}
                 disabled={start.isPending || isRunning || !crawlOrigin.trim()}
               >
-                {start.isPending || isRunning ? (
+                {pendingDeep || isRunning ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
                   <Play className="size-4" />
                 )}
-                {start.isPending
+                {pendingDeep
                   ? "Starting…"
                   : isRunning
                     ? "Crawling…"
                     : "Run crawl"}
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                onClick={runQuickCheck}
+                disabled={start.isPending || isRunning || !crawlOrigin.trim()}
+                title="Sitemap-only check — fetches only new product pages (~1 request when nothing changed). The stored catalogue is never touched."
+              >
+                {pendingShallow ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Zap className="size-4" />
+                )}
+                {pendingShallow ? "Checking…" : "Quick check"}
               </Button>
               <div className="flex flex-wrap items-center gap-2">
                 <Select
@@ -538,9 +590,11 @@ function SourcesPage() {
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Recurring crawls run automatically on the server (schedules are
-              in-memory and reset on restart). Re-scheduling an origin replaces
-              its existing schedule.
+              Quick check runs a sitemap-only crawl — it fetches just the new
+              product pages (≈1 request when nothing changed). Recurring crawls
+              run automatically via the scheduler (schedules persist on the
+              server, so they survive restarts). Re-scheduling an origin
+              replaces its existing schedule.
             </p>
           </div>
         </section>
@@ -549,6 +603,7 @@ function SourcesPage() {
         <StoreProfile
           crawl={profileCrawl}
           domain={profileKey}
+          lastShallow={lastShallowCrawl}
           onSuggestionClick={(url) => {
             // "Crawl {linked store}" — prefill the crawler with the store
             // this site links out to (e.g. a corporate site → its shop).
@@ -586,10 +641,21 @@ function SourcesPage() {
               </div>
             ) : null}
             <div className="flex items-baseline justify-between gap-4 text-sm">
-              <span className="text-muted-foreground">
+              <span className="flex flex-wrap items-center gap-2 text-muted-foreground">
                 {job.total === 0
                   ? "Discovering product URLs…"
                   : "Crawling product URLs…"}
+                <Badge
+                  variant={shallowRun ? "secondary" : "outline"}
+                  className="gap-1 font-normal"
+                >
+                  {shallowRun ? (
+                    <Zap className="size-3" />
+                  ) : (
+                    <Radar className="size-3" />
+                  )}
+                  {shallowRun ? "shallow check" : "deep crawl"}
+                </Badge>
               </span>
               <span className="numeric">
                 {job.total > 0
@@ -799,9 +865,49 @@ function SourcesPage() {
                   database
                 </Badge>
               ) : null}
-            </div>
-
-            {diff ? (
+              <Badge
+                variant={shallowRun ? "secondary" : "outline"}
+                className="gap-1 font-normal"
+              >
+                {shallowRun ? (
+                  <Zap className="size-3" />
+                ) : (
+                  <Radar className="size-3" />
+                )}
+                {shallowRun ? "Shallow check" : "Deep crawl"}
+              </Badge>
+            </div>{" "}
+            {/* Shallow runs return a PARTIAL catalogue (only new products), so
+                the deep-crawl diff tiles would report every not-re-fetched
+                product as "no longer listed" — bogus. Instead: zero new → a
+                positive "nothing changed" panel; some new → just the new
+                products list. Removals/price changes are deep-crawl news. */}
+            {shallowRun ? (
+              result.products.length === 0 ? (
+                <div className="rounded-md border border-success/30 bg-success/5 p-4">
+                  <p className="flex items-center gap-2 text-sm font-medium text-success">
+                    <CircleCheck className="size-4" />
+                    No new products since the last crawl
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    The shallow check fetches only new product pages (≈1
+                    request) — none were found, so the catalogue is unchanged
+                    since the last deep crawl.
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <p className="label-caps mb-2">
+                    New products found —{" "}
+                    {result.products.length.toLocaleString()}
+                  </p>
+                  <NewProductsList
+                    products={result.products}
+                    footer="Shallow checks only detect new products — removals and price changes are caught by deep crawls."
+                  />
+                </div>
+              )
+            ) : diff ? (
               <div>
                 <p className="label-caps mb-2">
                   What's new since the last crawl
@@ -815,9 +921,7 @@ function SourcesPage() {
                 />
               </div>
             ) : null}
-
             <CrawlStatsGrid stats={result.stats} />
-
             {/* Detection summary captured from this run. */}
             {result.discovery ? (
               <div className="flex flex-wrap gap-2">
@@ -858,7 +962,6 @@ function SourcesPage() {
                 ) : null}
               </div>
             ) : null}
-
             {/* Verbose findings + full discovery log from this run. */}
             {result.discovery?.findings?.length ? (
               <div>
@@ -908,7 +1011,6 @@ function SourcesPage() {
               </div>
             ) : null}
             <DiscoveryLog lines={result.discovery?.log ?? []} />
-
             {result.failures.length > 0 ? (
               <div>
                 <p className="label-caps mb-2">Failures</p>
@@ -931,7 +1033,6 @@ function SourcesPage() {
                 </ul>
               </div>
             ) : null}
-
             {result.products.length > 0 ? (
               <div>
                 <p className="label-caps mb-2">
@@ -960,7 +1061,7 @@ function SourcesPage() {
                   ))}
                 </ul>
               </div>
-            ) : (
+            ) : shallowRun ? null : (
               <p className="text-sm text-muted-foreground">
                 No products were parsed — the store may have rate-limited this
                 machine (HTTP 429) or no structured data was found. Check the
@@ -1185,7 +1286,8 @@ function SourcesPage() {
         cachedSchedules.length > 0 ? (
           <p className="text-xs text-muted-foreground">
             Server unreachable — showing the last known schedules from memory.
-            Recurring crawls live server-side and reset on restart.
+            Recurring crawls persist server-side; they'll resync when the
+            connection returns.
           </p>
         ) : null}
         {schedules.length > 0 ? (

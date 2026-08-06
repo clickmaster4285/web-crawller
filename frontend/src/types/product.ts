@@ -11,12 +11,7 @@ export interface MatchedProduct {
   competitor: string;
   competitorPrice: Money;
   matchMethod:
-    | "GTIN"
-    | "SKU"
-    | "URL slug"
-    | "Brand + Model"
-    | "AI similarity"
-    | "Unmatched";
+    "GTIN" | "SKU" | "URL slug" | "Brand + Model" | "fuzzy" | "Unmatched";
   confidence: number;
   stock: StockStatus;
   delivery: string;

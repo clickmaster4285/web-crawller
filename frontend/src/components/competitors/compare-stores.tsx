@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { BadgePercent, GitCompareArrows } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { BadgePercent, GitCompareArrows, Loader2 } from "lucide-react";
 
 import { PaginationBar } from "@/components/common/pagination";
 import { usePagination } from "@/hooks/usePagination";
@@ -17,8 +17,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { SavedCrawl, SavedCrawlProduct } from "@/lib/api";
-import { compareStores } from "@/utils/compare";
+import type { SavedCrawl, SavedCrawlProduct } from "@/api";
+import { compareStoresAsync, type StoreComparison } from "@/utils/compare";
 import { formatPrice } from "@/utils/format";
 
 /** Which store sells a matched product cheaper — or "same price". */
@@ -132,22 +132,83 @@ export function ComparePanel({
   fuzzy: boolean;
   threshold: number;
 }) {
-  const comparison = useMemo(
+  // Cheap fingerprint of everything that affects the result. The page's 30s
+  // refetch hands back fresh object identities with *identical* data, so the
+  // effect keys on this fingerprint instead of the objects — otherwise the
+  // whole comparison (tens of thousands of products) would recompute on every
+  // poll for data that didn't change.
+  const fingerprint = useMemo(
     () =>
-      compareStores(storeA.products, storeB.products, {
+      [
+        storeA.updatedAt,
+        storeA.products.length,
+        storeB.updatedAt,
+        storeB.products.length,
         fuzzy,
-        fuzzyThreshold: threshold,
-      }),
+        threshold,
+      ].join("|"),
     [storeA, storeB, fuzzy, threshold],
   );
+  const fingerprintRef = useRef<string | null>(null);
+  const [comparison, setComparison] = useState<StoreComparison | null>(null);
+  const [computing, setComputing] = useState(true);
 
-  const matched = [...comparison.matched].sort(
-    (x, y) => Math.abs(y.priceDiff) - Math.abs(x.priceDiff),
+  useEffect(() => {
+    // Same snapshots as last time (e.g. the 30s refetch found nothing new) —
+    // keep the existing result instead of recomputing the comparison. The
+    // fingerprint is only recorded *after* a run completes, so a cancelled
+    // invocation (e.g. a double-mount) is always retried by the next one
+    // instead of being skipped.
+    if (fingerprintRef.current === fingerprint) return;
+    let cancelled = false;
+    setComparison(null);
+    setComputing(true);
+    // Async + chunked: the fuzzy pass yields to the event loop between
+    // slices, so large catalogues never block the main thread (no "Page
+    // Unresponsive" while this runs).
+    void compareStoresAsync(storeA.products, storeB.products, {
+      fuzzy,
+      fuzzyThreshold: threshold,
+    })
+      .then((result) => {
+        if (cancelled) return;
+        setComparison(result);
+        fingerprintRef.current = fingerprint;
+      })
+      .finally(() => {
+        if (!cancelled) setComputing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fingerprint, storeA, storeB, fuzzy, threshold]);
+
+  // Hooks must be unconditional — derive paginated rows from a memoised list
+  // so the computing guard below can early-return safely.
+  const matched = useMemo(
+    () =>
+      comparison
+        ? [...comparison.matched].sort(
+            (x, y) => Math.abs(y.priceDiff) - Math.abs(x.priceDiff),
+          )
+        : [],
+    [comparison],
   );
+  const matchedPager = usePagination(matched, 25);
+
+  if (computing || !comparison) {
+    return (
+      <div className="flex items-center gap-3 border border-dashed border-border bg-muted/30 p-8 text-sm text-muted-foreground">
+        <Loader2 className="size-4 shrink-0 animate-spin" />
+        Comparing {storeA.products.length.toLocaleString()} vs{" "}
+        {storeB.products.length.toLocaleString()} products…
+      </div>
+    );
+  }
+
   const onlyA = comparison.onlyA;
   const onlyB = comparison.onlyB;
   const fuzzyCount = matched.filter((m) => m.fuzzy).length;
-  const matchedPager = usePagination(matched, 25);
 
   return (
     <div className="space-y-5">
@@ -173,6 +234,14 @@ export function ComparePanel({
           label="price differs"
         />
       </div>
+
+      {comparison.fuzzySkipped ? (
+        <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
+          Fuzzy matching was stopped partway — the catalogues are too large to
+          compare in the browser. Exact matches (identical name / URL slug) and
+          the fuzzy matches found so far are shown.
+        </p>
+      ) : null}
 
       {fuzzy && fuzzyCount > 0 ? (
         <p className="text-xs text-muted-foreground">

@@ -569,9 +569,8 @@ const dataController = {
     res.json([]);
   },
 
-  async alerts(req, res) {
-    res.json([]);
-  },
+  // Alerts moved to controllers/alertsController.js (Phase 4) — the feed is
+  // derived from ProductEvent rows with per-user read/dismiss state.
 
   async reports(req, res) {
     res.json([]);

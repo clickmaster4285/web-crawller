@@ -8,7 +8,11 @@
     "dev": "nodemon index.js",
     "test": "jest",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "backfill": "node scripts/backfill.js",
+    "worker": "node workers/worker.mjs",
+    "scheduler": "node workers/scheduler.mjs",
+    "reconcile-matches": "node scripts/reconcile-matches.js"
   },
   "keywords": [
     "nodejs",

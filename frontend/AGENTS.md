@@ -47,6 +47,8 @@ seeded into MongoDB on backend boot.
 | `npx tsc --noEmit`  | Typecheck (strict mode)                                                                                                                           |
 | `npm run crawl`    | CLI crawl against obdesignsusa.com, checkpointing to `.crawler/` (gitignored)                                                                  |
 | `cd ../backend && npm start` | Start the Express API on :3000 (needs MongoDB running; seeds the demo admin user)                                                |
+| `cd ../backend && npm run worker` | Standalone crawl worker process (pulls jobs from the `CrawlJob` queue)                                                          |
+| `cd ../backend && npm run scheduler` | Standalone scheduler process (reads Store cadence, enqueues shallow/deep jobs; `--once` for a single pass)                    |
 
 Verification loop for any change: `npx tsc --noEmit` → `npm run lint` → `npm run build`.
 
@@ -89,17 +91,16 @@ src/
 │   └── sidebar.ts
 ├── hooks/
 │   ├── useWorkspace.ts       # useWorkspace + useAnalytics (fetch from backend /api/data)
-│   ├── useData.ts            # per-domain useApiQuery hooks (competitors, products, …) + useSavedCrawls (polls saved crawls every 30s)
+│   ├── useData.ts            # per-domain useApiQuery hooks (competitors, products, …) + useSavedCrawls + useSavedCrawlMetas (lightweight ?meta=1 summaries, no product arrays — both poll every 30s)
 │   ├── useLocalStorage.ts    # SSR-safe localStorage-backed useState (refresh-proof UI state: job id, crawl config, …)
 │   └── use-mobile.tsx
 ├── layouts/
 │   ├── AuthLayout.tsx
 │   └── DashboardLayout.tsx
+├── api/                      # per-domain REST clients (workspace, analytics, competitors, pricing, …) + central queryKeys
 ├── lib/
 │   ├── http.ts               # token-aware fetch client (/api prefix + Bearer JWT)
-│   ├── api.ts                # REST getters for GET /api/data/* (workspace, analytics, … + crawl-results)
-│   ├── auth.ts               # real JWT auth (signIn → POST /api/auth/login; token + session in localStorage)
-│   ├── crawl.ts              # startCrawl/getCrawlProgress job API (live discovery+fetch progress, params snapshot) + scheduleCrawl/getCrawlSchedules/cancelCrawlSchedule (checkpointed crawler, persisted to backend)
+│   ├── auth.ts               # real JWT auth (signIn → POST /api/auth/login; token + session in localStorage)  │   ├── crawl.ts              # startCrawl/getCrawlProgress job API (live discovery+fetch progress, params snapshot) + scheduleCrawl/getCrawlSchedules/cancelCrawlSchedule (queue-backed crawler, persisted to backend)
 │   ├── error-page.ts         # SSR error HTML
 │   ├── error-capture.ts      # SSR error capture used by server.ts
 │   └── utils.ts
@@ -201,15 +202,21 @@ no page imports local mock data. There are no placeholder shells left:
 | ---------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
 | Overview         | `/`            | Stat cards + competitor snapshot via`useAnalytics()`; `NoRealDataState` when no crawls exist yet  |
 | Competitors      | `/competitors` | **Empty-by-default slot flow**: a "Your website" picker (persisted via `GET/PUT /api/data/my-store`, used as store A everywhere) + **4 competitor slot cards** (selections persisted under `parity.competitors.slots`), each opening a searchable `StorePickerDialog` of crawled stores that excludes already-used ones. Every filled slot renders its own **ComparePanel** (your website vs that competitor): in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with a **Cheapest** column, all **paginated** (25/page). One **Fuzzy matching** toggle + **Similarity threshold** slider applies to every comparison (both persisted under `parity.competitors.*`); fuzzy matching is **on by default**. A manual **Add competitor** dialog still exists |
-| Saved crawls     | `/crawls`      | Snapshot history per store via`useSavedCrawls()`: history **hidden by default** with a per-store **Show history / Hide history** toggle, "+N new / removed · price changed / no change / first snapshot" badges, expandable rows (stats, changes vs previous, discovery, first-8 products, failures), a **View all N products** link to the full **Store catalogue** page, **Re-crawl** (prefills the crawler via `prefillCrawlerOrigin`), **Delete snapshot** / **Clear history** (`DELETE /api/data/crawl-results/:id` / `/crawl-results?origin=`) |
+| Saved crawls     | `/crawls`      | Snapshot history per store via`useSavedCrawls()`: history **hidden by default** with a per-store **Show history / Hide history** toggle, a **type filter toggle** (All / Shallow checks / Deep crawls — persisted under `parity.crawls.typeFilter`, filters snapshots *before* grouping so stat cards + stores reflect the subset, per-type counts shown even while filtered, missing `type` reads as deep), "+N new / removed · price changed / no change / first snapshot" badges, **shallow check / deep crawl** badges per snapshot (`CrawlResult.type`, persisted from the job; old snapshots read as deep), expandable rows (stats, changes vs previous, discovery, first-8 products, failures), a **View all N products** link to the full **Store catalogue** page, **Re-crawl** (prefills the crawler via `prefillCrawlerOrigin`), **Delete snapshot** / **Clear history** (`DELETE /api/data/crawl-results/:id` / `/crawl-results?origin=`) |
 | Store catalogue  | `/stores/$origin` | Full-page product list for one store via`useSavedCrawls()` (dynamic route keyed by **normalized origin**): newest-snapshot default with a **snapshot picker** (a stale id falls back to the newest), a crawl **stats row** + **Store profile** card + **Discovery log** (the specific per-candidate reasons behind a crawl result), and **searchable + sortable + paginated** Products tables (50 rows/page, 25/50/100 selector) in two views: a single snapshot, or **All snapshots** — the union of every product with a per-product **price sparkline** + price range + "seen in N snapshots". Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler), **Delete store** (clears all snapshots) and a **Saved crawls** back link; dynamic `document.title` |
 | Matched products | `/products`    | **Real matching engine**: `useMatchedProducts()` pulls rows from the backend matcher (`backend/utils/matcher.js` — GTIN > SKU > URL slug > fuzzy name). Your crawled catalogue is matched against each competitor with method + confidence, a your-price / price-gap column, and competitor products you don't carry listed as **Unmatched**; searchable / filterable / paginated. Honestly empty until you set your store on `/competitors` and crawl it + competitors |
 | Pricing          | `/pricing`     | **Real price history**: market/cheapest/your-store trend chart + market-relative price index + "biggest price movements" list, all derived from saved snapshots via `computePriceHistory` (same data feeds the dashboard trend). Honest "crawl again" hint when <2 snapshot events |
 | Catalogue gaps   | `/catalogue`   | Charts/gaps empty until the category/brand gap analysis is built (the matching layer is live); honest`NoRealDataState`               |
 | AI insights      | `/insights`    | `NoRealDataState` (needs the insight engine)                                                     |
-| Alerts           | `/alerts`      | `NoRealDataState` (needs the alert engine)                                                       |
+| Alerts           | `/alerts`      | **Real alert feed** from `ProductEvent` (Phase 4): price drops/rises with **% + amount** and severity tiers, new/removed products, stock changes; type filter, server pagination, **unread badge + Mark all read**, per-alert **click-to-read + dismiss**, honest empty states (`hasAnyEvents` distinguishes "no crawls yet" from "filtered/dismissed"). Read/dismiss state is per-user on the backend (`AlertState`, auth-protected routes) |
 | Reports          | `/reports`     | `NoRealDataState` (needs the report generator)                                                   |
-| Data sources     | `/sources`     | Domain-first **Start a crawl** card (domain + collections + run/schedule + "Recently crawled" chips) + a **Store profile** card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %, product count) + **Live crawl** panel (live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning) + **"What's new since the last crawl"** diff vs the previous snapshot + **Frequency scheduler**. Full snapshot history now lives on the separate **`/crawls`** page. Panel state is **refresh-proof**: config, running `jobId`, expanded saved-crawl row and schedules cache persist via `useLocalStorageState`, and the job id is mirrored to `?job=` so a reload (even in another tab) reconnects to the running crawl ("Reconnected to running crawl" badge) |
+| Data sources     | `/sources`     | Domain-first **Start a crawl** card (domain + collections + **Run crawl** / **Quick check** shallow sitemap-only + schedule + "Recently crawled" chips) + a **Store profile** card detected from the **last saved crawl** (platform, URL pattern, sitemap, robots.txt + crawl-delay, parse %, product count) — plus a **"Last quick check"** strip when the domain has a shallow snapshot (when it ran + how many new products `stats.discovered` found, or "No new products since the last crawl"; the count is `discovered` because shallow discovery filters the sitemap to new URLs and it's uncapped, unlike `products.length`) + **Live crawl** panel (live discovery diagnostics, fetch-phase ETA, "Running with" params + mid-run config warning) + **"What's new since the last crawl"** diff vs the previous snapshot + **Frequency scheduler**. Full snapshot history now lives on the separate **`/crawls`** page. Panel state is **refresh-proof**: config, running `jobId`, expanded saved-crawl row and schedules cache persist via `useLocalStorageState`, and the job id is mirrored to `?job=` so  a reload (even in another tab) reconnects to the running crawl ("Reconnected
+  to running crawl" badge). Running and finished jobs badge **shallow check
+  vs deep crawl** (Zap/Radar), zero-fetch shallow runs render a positive
+  **"No new products since the last crawl"** panel, and shallow results
+  show the new-products list instead of the deep-crawl diff (shallow results
+  are partial catalogues — the diff tiles would fake "no longer listed"
+  counts) |
 
 Existing shared primitives: `PageHeader`/`DashboardLayout`/`Sidebar`
 (`components/layout/`), `StatCard`/`SectionTitle`/`CrawlStat`/`CrawlStatsGrid`/
@@ -254,11 +261,15 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 
 ### Layer 3 — Real client/server split — **done** (split + dashboard wiring)
 
-- **Frontend API layer** — `src/lib/api.ts` is now a REST client: every
+- **Frontend API layer** — `src/lib/api.ts` was split into `src/api/*`
+  (per-domain REST clients — `workspace.ts`, `analytics.ts`, `competitors.ts`,
+  `matching.ts`, … — plus `query-keys.ts` for central query keys). Every
   getter hits `GET /api/data/*` on the Express backend via `src/lib/http.ts`
-  (which prefixes `/api` and attaches the JWT). The `AnalyticsData`,
-  `PricingData`, `CatalogueData` shapes are unchanged from the previous
-  server-function era, so hooks and pages were untouched.
+  (which prefixes `/api` and attaches the JWT). Matcher-backed endpoints carry
+  a longer per-hook `staleTime` (`MATCHER_STALE_TIME`) so heavy responses are
+  only recomputed when data changes. The `AnalyticsData`, `PricingData`,
+  `CatalogueData` shapes are unchanged from the previous server-function era,
+  so hooks and pages were untouched.
 - **Auth migrated** — `mock-auth.ts` replaced by `src/lib/auth.ts`; the login
   page awaits the real `POST /api/auth/login` and surfaces backend errors
   (e.g. "Invalid credentials"). The demo admin user is seeded on boot
@@ -336,9 +347,9 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 - Persistence: crawl results are saved to MongoDB (backend `CrawlResult`
   model; `POST/GET /api/data/crawl-results`, `DELETE` one
   `/api/data/crawl-results/:id` or a whole store
-  `/api/data/crawl-results?origin=`) plus per-origin SQLite checkpoints
-  (`.crawler/crawl-<host>.db`) for skip-unchanged re-crawls and crash-safe
-  incremental saves. The backend keeps **snapshot history** (up to 20 per
+  `/api/data/crawl-results?origin=`) — the worker's skip-unchanged resume
+  state is `Product.httpState` (SQLite stays only for the `npm run crawl`
+  script). The backend keeps **snapshot history** (up to 20 per
   origin, `createdAt`-sorted) when `storeSnapshots` is true, or replaces the
   latest result when false. **Manual competitors + your store**: a
   `Competitor` model with `POST/DELETE /api/data/competitors` and a `MyStore`
@@ -361,8 +372,10 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 ### Layer 4 — Data ingestion & alerts
 
 - Real data-source connectors (web crawlers/APIs) feeding competitors,
-  products, and prices.
-- Alert engine: detect price drops, catalogue gaps, stock changes → alert feed.
+  products, and prices. *(Done — crawler + workers + scheduler.)*
+- Alert engine: detect price drops, catalogue gaps, stock changes → alert
+  feed. *(Done — Phase 4: `/alerts` derives from `ProductEvent` with
+  per-user unread/dismiss state; catalogue-gap alerts remain.)*
 - Insight generation from collected data.
 
 ### Layer 5 — Productionize
@@ -370,6 +383,137 @@ intelligence product**. Work proceeds in layers; each layer keeps the app green
 - Error handling, loading/skeleton states, and analytics instrumentation.
 - Automated tests (component + e2e).
 - Deployment: build via Nitro (`dist/server`), configure host, CI pipeline.
+
+### Layer 6 — Scale: 100+ stores · 10k+ products per store
+
+Full design in `plan.md` §9 + `architecture.md` (§11 decisions D1–D4 are
+**resolved**). **Phases 1 (storage refactor), 2 (worker pool) and 3 (indexed
+matching) are DONE and live-Mongo verified** — crawling runs in separate
+worker processes fed by a Mongo `CrawlJob` queue, and matching runs through
+the indexed `ProductMatch` pipeline, while the app stays unchanged and
+green. Target architecture, with status:
+
+- **Storage — normalize. ✅ Phase 1 shipped.** `Product` (current state, one
+  doc per origin+identity key, sparse-indexed `gtin`/`sku`/`slug`, capped
+  `priceHistory`, `httpState`), `Snapshot` (metadata only, cap **10/origin**
+  — D3), `ProductEvent` (change log, TTL 90d), `ProductMatch` (persisted
+  pairs), `Store` (profile + cadence), `MarketProduct` (minimal aggregate —
+  D2). No duplicated catalogues; history = metadata + events + capped price
+  arrays. New files: `backend/models/{Store,Product,Snapshot,ProductEvent,
+  ProductMatch,MarketProduct,shared}.js`, `backend/services/crawlSync.js`
+  (dual-write pipeline: bulk Product upserts + identity diff → events +
+  snapshot), `backend/utils/identity.js` (identity keys + host normalize),
+  `backend/scripts/backfill.js` (`npm run backfill` — replays legacy
+  `CrawlResult`s with original timestamps, strips `''` gtin/sku → undefined,
+  idempotent with `--force`/`--dry-run`, self-heals partial state).
+- **Fetch — least compute. ✅ Phase 2 shipped.** The crawler left the SSR
+  process. `CrawlJob` (Mongo queue: status machine, heartbeat, retries,
+  TTL-cleaned terminal jobs) + `services/jobQueue.js` (atomic claim,
+  stale-claim release, job-timeout backstop, exponential backoff → dead,
+  `publicJob` shape) + `services/saveCrawl.js` (shared by the worker and the
+  `POST /crawl-results` controller: legacy doc + dual-write + Store upsert).
+  Standalone processes under `backend/workers/`:  `worker.mjs` (claim loop,
+  runs the existing crawler engine verbatim via Node 24 type-stripping,
+  throttled heartbeats, `PARITY_CRAWLER_MODULE` test seam, no SQLite
+  checkpoint — resume state is `Product.httpState` only) and
+  `scheduler.mjs` (decision D4 — reads Store
+  cadence, enqueues shallow + deep jobs with jitter + `hasActiveJob`
+  min-interval guard; `--once` supported). `index.js` auto-spawns them in
+  dev (`PARITY_INFRA=0` / `PARITY_WORKERS` / `PARITY_SCHEDULER` to control;
+  `spawn.js` respawns crashed children with capped backoff). Queue API:
+  `POST /api/crawl-jobs`, `GET /api/crawl-jobs/:id`, schedules CRUD under
+  `/api/crawl-jobs/schedules` — `src/lib/crawl.ts` server functions are now
+  thin clients of it (all types unchanged, so the Sources page is untouched).
+  Cadence: UI schedules store `frequency`; the scheduler derives hours
+  (shallow at the frequency, deep floored at 6h), so a 1h schedule = hourly
+  shallow checks + 6-hourly deep crawls; a store is only auto-scheduled
+  when the user registers a schedule (`cadence.enabled` defaults false).
+  Worker writes per-type anchors `lastShallowAt`/`lastDeepAt` on Store so
+  the two cadences never blur. **Shallow mode is now REAL (not a full crawl):
+  the engine has a `mode: 'shallow'` sitemap-only path** — `runCrawl` skips
+  platform detection, homepage analysis, collection walks, API probes and the
+  HTML BFS, filters the sitemap's product URLs against the Product
+  collection (`knownUrls`, loaded by the worker), and fetches ONLY the new
+  pages via the HTML extractor (no API-first/Shopify-JSON probes). Cost ≈ 1
+  request + new product pages; zero new products = exactly 1 request.
+  `fullCrawl: false` still guards the ingest removal diff. The Sources UI
+  surfaces the distinction: running + finished jobs badge **shallow check vs
+  deep crawl**, zero-fetch shallow runs show a positive **"No new products
+  since the last crawl"** panel, and the sitemap-only findings ("Shallow
+  check found N new product(s)" / no-sitemap warning) render in "What the
+  crawler found" — the deep-crawl diff is skipped for shallow results
+  because they're partial catalogues (the removed count would be bogus). A
+  **Quick check** button on the Sources page starts one manually (not just
+  via the scheduler): `POST /api/crawl-jobs` with `type: 'shallow'` — the
+  controller sets `params.fullCrawl = false` so a partial result can never
+  soft-delete the store; `CrawlRunInput.type` defaults to `'deep'`.
+- **Resume — cross-worker. ✅ Phase B shipped.** The skip-unchanged state
+  moved from per-machine SQLite into `Product.httpState` (etag + lastmod):
+  the worker loads it once per job (`loadResumeState` → `resumeState` map
+  with the stored product data), the engine skips URLs whose sitemap lastmod
+  is unchanged and reuses the stored product (so the ingest diff still sees
+  the full catalogue — no false removals), and every touched URL's
+  etag/lastmod returns via `CrawlResult.httpStateByUrl` and is persisted by
+  the ingest pipeline onto `Product.httpState`. ANY worker (any machine)
+  resumes where another stopped. SQLite stays only for `npm run crawl` — the worker never opens a
+  checkpoint anymore, and the per-run `.crawler` scratch (`crawl-<host>.db`
+  files) was deleted. Documented gap: etag is
+  persisted but not yet a skip signal — a sitemap without lastmod refetches
+  every run (same as before).
+- **Compare — efficient. ✅ Phase 3 shipped.** `Product.tokens` (normalized
+  name tokens, written at ingest + on rename) with a `{origin, tokens}`
+  multikey index; `backend/services/matchService.js` matches via index
+  lookups: exact tiers (GTIN > SKU > slug) are `$in` queries on the sparse
+  indexes, fuzzy candidates come from `tokens: { $in: myTokens }` (only
+  those are similarity-scored — the full cross product is never enumerated).
+  `reconcilePair` persists `ProductMatch` rows (full-pair replace) after
+  every finished crawl through the shared `saveFinishedCrawl` (worker +
+  controller); `reconcile-matches.js` backfills legacy products (lazy
+  per-origin token backfill included). Read path: `GET /api/match?origin=&page=&limit=`
+  returns paginated matches + latest prices + `onlyTheirs` — zero
+  recomputation on page load. Trade-off (recorded in architecture.md §9):
+  fuzzy candidates must share a token, so near-duplicate names with disjoint
+  tokens (e.g. "Nike Air" vs "NikeAri") are missed — accepted recall cost of
+  the inverted index.
+- **Change detection — at ingest. ✅ Phase 1 shipped.** Identity-set diff per
+  crawl → `ProductEvent` rows (added/removed/price_changed/stock_changed)
+  power "what's new" diffs, sparklines, biggest movers, and the Layer 4 alert
+  engine with zero recomputation on read.
+- **Alerts — on events. ✅ Phase 4 shipped.** `backend/services/alertsService.js`
+  maps `ProductEvent` rows to alerts — `added` → new_product (low), `removed`
+  → removed (high), `price_changed` → price_drop/price_rise with signed % +
+  amount and severity tiers (≥15% high, ≥5% medium), `stock_changed` → stock
+  (restock low / out medium). `GET /api/data/alerts?type=&page=&limit=` is
+  auth-protected, excludes dismissed events, and returns `unreadCount` +
+  `hasAnyEvents`; `POST /api/data/alerts/{read,read-all,dismiss}` persist
+  per-user state in `backend/models/AlertState.js` (unique userId+eventId,
+  TTL 95d — outlives its event so the unread count stays consistent). The
+  Alerts page rebuilt on the feed: unread accent + click-to-read, dismiss X,
+  type filter, mark-all-read, server pagination, honest empty states. Verified:
+  9 unit tests + live-Mongo E2E (32 checks).
+- **Read path — D1 endgame started. ✅ Phase 5 shipped (backend).** The
+  normalized read endpoints (`architecture.md §6`) are built and live-Mongo
+  verified: `GET /api/stores` (meta-only summaries — the worker-only
+  `Store.scheduledCrawl.params.proxyUrl` is never exposed), `GET
+  /api/stores/:key` (profile + latest snapshot), `GET
+  /api/stores/:key/products` (keyset-cursor pagination on `{key,
+  lastSeenAt: -1}` + `q=` escaped name search + `$slice` sparkline
+  projection — never full docs), `GET /api/stores/:key/snapshots`
+  (metadata, `full: false` = shallow), `GET /api/stores/:key/events`
+  (`since=`/`type=` filters). Backed by `routes/stores.js` +
+  `controllers/storeController.js` + `utils/readPath.js` (unit-tested
+  cursor/key helpers) and frontend clients in `src/api/stores.ts` (query
+  keys under the `stores` prefix, invalidated with crawl data). Remaining
+  per D1: flip the pages (`/stores/$origin`, `/crawls`, `/sources`,
+  `/pricing`) onto these endpoints, then drop `CrawlResult`. `GET
+  /api/market/products` stays unexposed until `MarketProduct` is written at
+  ingest.
+
+~~**Known coordination point for Phase 3:** the `ProductMatch.method` enum
+says `'fuzzy'` but the matcher emits `'AI similarity'` — align one side when
+persisted matches are wired.~~ **Resolved ✅ — Phase 3 aligned the matcher to
+emit `'fuzzy'` (and the frontend `MatchedProduct.matchMethod` union now
+includes `'fuzzy'`); the enum values match end to end.**
 
 ## Decision rules / constraints
 
@@ -804,31 +948,30 @@ the TanStack app fetches data from the Express API and authenticates with JWT.
 - **`src/lib/http.ts`** — token-aware fetch client: prefixes `/api`, attaches
   `Authorization: Bearer <token>` from localStorage, throws `ApiError` with
   the backend's `message`, and redirects to `/auth/login` on 401.
-- **`src/lib/api.ts`** — REST getters for `GET /api/data/*` (workspace,
-  analytics bundle, competitors, matched products, pricing, catalogue,
-  insights, alerts, reports, crawl-results). Shapes match the backend
+- **`src/api/*`** — per-domain REST getters for `GET /api/data/*` (workspace,
+  analytics, competitors, matched products, pricing, catalogue, insights,
+  alerts, reports, crawl-results) + central `queryKeys`. `getCrawlResultsData`
+  supports `{ meta: true }` (`SavedCrawlMeta`): origin/platform/product-count
+  summaries that store pickers and competitor lists use so a full catalogue is
+  never downloaded just to render a list. Shapes match the backend
   `dataController`.
 - **`src/lib/auth.ts`** — `signIn` → `POST /api/auth/login`; JWT in
   `parity.token`, profile in `parity.session`; `getUser()`/guard unchanged.
-- **`src/lib/crawl.ts`** — `startCrawl` (POST → `{ jobId }`, runs the crawl
-  in the background) + `getCrawlProgress` (POST → job snapshot with live
-  `total`/`processed` counters). Node-only crawler, not proxied to Express.
-  SSRF guard on origin, sanitized stats/failures/first-100 products, errors
-  caught into the job's `error`. Writes per-origin SQLite checkpoints during
-  the run and posts the finished result to `POST /api/data/crawl-results`
-  on the Express backend (best-effort; `job.persisted` reflects success).
-  Crawl parameters (`delayMs`, `maxConcurrencyPerHost`, `maxPages`,
-  `respectRobotsTxt`, `productOnly`, `storeSnapshots`) flow from the Sources
-  page config through `CrawlRunInput` into `runCrawl` (clamped server-side);
-  `CrawlJob.params` snapshots what a job started with. The engine enforces
-  `maxPages` as a fetch-loop cap (discovery count is unchanged), only applies
-  the robots.txt gate/crawl-delay when `respectRobotsTxt` is true (the
-  adaptive throttle always runs), and filters sitemap entries to product
-  pages unless `productOnly` is false.
+- **`src/lib/crawl.ts`** — Phase 2: the server functions are **thin clients
+  of the Mongo queue API** (they no longer run the crawler). `startCrawl`
+  POSTs to `/api/crawl-jobs` and returns `{ jobId }`; `getCrawlProgress`
+  GETs `/api/crawl-jobs/:id` and returns the exact `CrawlJob` shape the UI
+  always used (queued/claimed/retrying → `running`, done → `done`, failed/dead
+  → `error`; ms timestamps; `result`/`persisted`; proxy **boolean only**).
+  Crawl parameters flow from the Sources page config through `CrawlRunInput`
+  into the job params (validated + clamped on the backend; light SSRF origin
+  guard stays client-side). The crawler itself runs in `backend/workers/`
+  processes — it is not in the SSR bundle anymore.
 - **Recurring crawls** — `scheduleCrawl`/`getCrawlSchedules`/
-  `cancelCrawlSchedule` register in-memory schedules (1h/6h/daily/weekly); a
-  lazy 30s interval started from a handler kicks off due crawls as normal
-  background jobs. Schedules reset on server restart (no persistence).
+  `cancelCrawlSchedule` now persist to the backend `Store` record
+  (`scheduledCrawl` config + `cadence.enabled`) via
+  `/api/crawl-jobs/schedules` CRUD. Schedules survive API restarts; the
+  standalone `scheduler.mjs` process turns them into jobs.
 - **Hooks** — `useWorkspace`/`useAnalytics` and `useData.ts` (thin
   `useApiQuery` wrapper, plus `useSavedCrawls` which polls every 30s) all
   return `{ data, isLoading, isError }`; every page guards
@@ -843,7 +986,15 @@ the TanStack app fetches data from the Express API and authenticates with JWT.
   (`crawlController.js`): snapshot history (cap 20/origin) when
   `storeSnapshots`, else replace-latest; `DELETE /api/data/crawl-results/:id`
   and `DELETE /api/data/crawl-results?origin=` remove one snapshot or a
-  store's whole history. **Competitors**: `Competitor` model +
+  store's whole history. **Scale dual-write (Phase 1):** `saveCrawlResult`
+  also mirrors every crawl into the normalized model —
+  `backend/services/crawlSync.js` bulk-upserts `Product` docs, diffs identity
+  keys into `ProductEvent` rows, writes a `Snapshot` (cap 10/origin), and
+  returns a `dualWrite` summary (failures surfaced, never fatal). The
+  by-origin DELETE clears the new collections too. Legacy `CrawlResult`
+  remains the read source until the new read endpoints flip the UI (D1);
+  the Phase-3 match read path (`GET /api/match`) already reads persisted
+  `ProductMatch` + `Product`. **Competitors**: `Competitor` model +
   `competitorController` (`POST/DELETE /api/data/competitors`), merged with
   crawled origins and the `MyStore` singleton row (`GET/PUT /api/data/my-store`)
   in `dataController.competitors`.

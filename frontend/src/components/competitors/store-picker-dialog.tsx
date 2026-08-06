@@ -12,14 +12,24 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import type { SavedCrawl } from "@/lib/api";
-import { formatCrawlDate, normalizeOrigin } from "@/utils/crawls";
+import { formatCrawlDate } from "@/utils/crawls";
 import { cn } from "@/lib/utils";
+
+/** A crawled website in the picker — lightweight metadata only (no products). */
+export interface StoreOption {
+  /** Normalized host key (used for slot selection / exclusions). */
+  key: string;
+  /** Full origin URL — what the crawler and "your website" setting use. */
+  origin: string;
+  productCount: number;
+  platform: string | null;
+  updatedAt: string;
+}
 
 /**
  * Searchable list of crawled websites. Used both to set "your website" and to
- * fill a competitor slot — every entry has real crawled data, so a selection
- * can be compared immediately.
+ * fill a competitor slot. Built from lightweight crawl summaries (`?meta=1`),
+ * so opening it never downloads the full product catalogues.
  */
 export function StorePickerDialog({
   open,
@@ -32,11 +42,11 @@ export function StorePickerDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Websites to choose from (each has saved crawl data). */
-  stores: Array<{ key: string; crawl: SavedCrawl }>;
+  /** Websites to choose from (each is a lightweight crawl summary). */
+  stores: StoreOption[];
   /** Keys that must not be selectable (your store, slots already filled). */
   excludeKeys: string[];
-  onSelect: (crawl: SavedCrawl) => void;
+  onSelect: (origin: string) => void;
   title?: string;
   description?: string;
 }) {
@@ -48,10 +58,9 @@ export function StorePickerDialog({
     return stores
       .filter((s) => !excluded.has(s.key))
       .filter(
-        (s) =>
-          !q || s.crawl.origin.toLowerCase().includes(q) || s.key.includes(q),
+        (s) => !q || s.origin.toLowerCase().includes(q) || s.key.includes(q),
       )
-      .sort((a, b) => b.crawl.products.length - a.crawl.products.length);
+      .sort((a, b) => b.productCount - a.productCount);
   }, [stores, excluded, query]);
 
   const close = () => {
@@ -91,7 +100,7 @@ export function StorePickerDialog({
                 key={s.key}
                 type="button"
                 onClick={() => {
-                  onSelect(s.crawl);
+                  onSelect(s.origin);
                   close();
                 }}
                 className={cn(
@@ -103,14 +112,13 @@ export function StorePickerDialog({
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{s.key}</span>
                   <span className="block truncate text-xs text-muted-foreground">
-                    {s.crawl.discovery?.platform?.platform ??
-                      "Unknown platform"}
+                    {s.platform ?? "Unknown platform"}
                     {" · "}
-                    Crawled {formatCrawlDate(s.crawl.updatedAt)}
+                    Crawled {formatCrawlDate(s.updatedAt)}
                   </span>
                 </span>
                 <Badge variant="secondary" className="shrink-0 font-normal">
-                  {s.crawl.products.length.toLocaleString()} products
+                  {s.productCount.toLocaleString()} products
                 </Badge>
               </button>
             ))

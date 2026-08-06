@@ -75,7 +75,7 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 | Pricing | `/pricing` | ✅ real market trend + price index + biggest movers from snapshot time-series |
 | Catalogue gaps | `/catalogue` | ⬜ empty state — matching layer is live; needs category/brand gap analysis on top of your catalogue |
 | AI insights | `/insights` | ⬜ empty state — needs the insight engine |
-| Alerts | `/alerts` | ⬜ empty state — needs the alert engine |
+| Alerts | `/alerts` | ✅ **real alerts feed** from `ProductEvent` (price drops/rises with % + amount, new/removed products, stock changes), type filters, server pagination, unread badge + mark-all-read, per-alert dismiss |
 | Reports | `/reports` | ⬜ empty state — needs the report generator |
 
 ### Auth & backend
@@ -133,10 +133,10 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 - [ ] Unlock Catalogue gaps page (categories we don't sell, brand coverage,
       price-positioning charts).
 
-### 4. Alert engine
-- [ ] Compute alerts from per-snapshot diffs we already produce: price drops
+### 4. Alert engine — done
+- [x] Compute alerts from per-snapshot diffs we already produce: price drops
       (with % + amount), stock changes, new / removed products.
-- [ ] Alerts page (`/alerts`): live feed, unread badge, dismiss.
+- [x] Alerts page (`/alerts`): live feed, unread badge, dismiss.
 - [ ] Optional: email/webhook delivery later.
 
 ### 5. Engineering hygiene
@@ -203,3 +203,198 @@ are done, so only Tier 4 (commercial platform) remains.**
 - [ ] Reverse proxy in front of the backend for prod (`/api` proxy is dev-only).
 - [ ] Deployment via Nitro (`dist/server`), host config, CI pipeline.
 - [ ] Error/loading instrumentation + skeleton states audit.
+
+### 9. Scale — 100+ stores · 10k+ products per store (design)
+
+> **Full implementation reference: [`architecture.md`](architecture.md)** —
+> concrete schemas, indexes, job-queue design, capacity math, and the
+> phased migration. This section is the condensed summary.
+
+**Target:** ~100 e-commerce stores, each with 1k–50k products (~1M product rows
+total), crawled on a daily/weekly cadence, compared against your store, with
+per-product price history and change detection.
+
+**The bottleneck today (why this is needed):**
+
+- `CrawlResult` embeds the **full product array in every snapshot doc** — 10k
+  products ≈ 5–10 MB per document, ×20 snapshots ≈ 100–200 MB per store,
+  ×100 stores ≈ 10–20 GB; any read that loads products drags MBs over the wire.
+- The matcher's fuzzy pass is O(n·m) and is **already self-limited** above 50k
+  pairs (`FUZZY_PAIR_LIMIT` in `backend/utils/matcher.js`). At 10k × 10k it
+  would be minutes of sync CPU — it must never run on the request path.
+- The crawler lives in the **SSR process** with in-memory jobs/schedules — fine
+  for one-off runs, not for 100 staggered sites.
+- (Already shipped toward this: `GET /crawl-results?meta=1` returns
+  product-count-only summaries, and the client comparison runs chunked/async.)
+
+#### 9.1 Storage — normalize: one row per product, snapshots become metadata
+
+Replace the "one doc per snapshot containing everything" model with a
+normalized schema. **Heavy work happens at ingest time** (when a crawl
+finishes); reads are cheap indexed lookups:
+
+| Collection | What it stores | Size at scale |
+|---|---|---|
+| `Store` | One doc per origin: platform/profile, crawl config, cadence, last-crawl stats | 100 × ~1 KB |
+| `Product` | **Current state** — one doc per (origin, identity key): indexed `gtin`/`sku`/`slug`, name, brand, category, price, available, url, `firstSeenAt`/`lastSeenAt`/`updatedAt`, capped price-history array | 1M × ~300 B ≈ 300–400 MB (WiredTiger-compressed far less) |
+| `Snapshot` | Crawl metadata only — origin, timestamps, stats, product count, **added/removed/changed summary** (no product arrays) | 100 × 10 × ~1 KB ≈ 1 MB |
+| `ProductEvent` | Change log rows: added, removed, price change (old→new, %), stock change | ~10–20% of products change/day ≈ 200k rows/day at peak |
+| `ProductMatch` | Persisted match pairs (yourProduct ↔ competitorProduct, method, confidence, updatedAt) | one row per matched pair per competitor |
+
+Key moves:
+
+- **Products are stored once, never once per snapshot.** History = `Snapshot`
+  metadata + `ProductEvent` rows + the capped price array on each `Product`.
+  No duplicated catalogues anywhere.
+- **Removed products are soft-deleted** (`lastSeenAt` updated; an index on
+  `{origin, lastSeenAt}` makes "currently active" a trivial query) so they stay
+  for history but drop out of live views instantly.
+- **Price history as a capped array** (~last 90 points, appended only on
+  change) gives per-product time series without a billion-row `PricePoint`
+  table — ~90 × ~20 B per product even for daily movers.
+- Indexes: unique `{origin, identityKey}`; sparse `gtin`/`sku`/`slug` (match
+  lookups); `{origin, lastSeenAt}` (active set); `{identityKey, updatedAt}`
+  (market aggregation). Single replica set is fine to ~5–10M products;
+  shard on `origin` beyond that.
+
+#### 9.2 Fetching — incremental, API-first (least compute)
+
+- **Move the crawler into worker processes.** A DB-backed job queue (one job
+  per store per run) fed by the scheduler; a small worker pool (2–6 processes)
+  pulls jobs under a global politeness budget. The SSR process only submits
+  jobs and reports status.
+- **API-first extraction (already built — make it the default):** a public
+  platform API (Shopify `products.json` 250/page, WooCommerce `wc/v3` 100/page,
+  BigCommerce storefront) returns a whole catalogue in **40–100 requests**
+  instead of 10k page fetches (~300 MB → ~5 MB transfer). Sitemap + JSON-LD
+  next; HTML crawl / Playwright only for stores whose `Store` profile requires
+  it.
+- **Incremental by default:** per-store crawl state (etag/lastmod) lives in
+  MongoDB `Product.httpState` (✅ Phase B shipped — engine `resumeState` +
+  `httpStateByUrl`, worker `loadResumeState`, persisted by the ingest
+  pipeline), so **any worker — any machine — resumes where another stopped**;
+  unchanged products skip via sitemap-lastmod and are counted in
+  `skippedUnchanged`. SQLite stays as the checkpoint fallback + per-run
+  scratch. Re-crawling an unchanged 10k-product store costs a handful of
+  requests.
+- **Two cadences per store:** a cheap **sitemap-only check** (1 request) to
+  detect *new products* between deep crawls, and a daily/weekly **price
+  re-crawl**. New products found by the shallow check are fetched
+  individually — no full re-crawl needed to stay current.
+  ✅ **Shallow mode is live** (`CrawlConfig.mode: 'shallow'` + `knownUrls`
+  from the Product collection): the engine does sitemap-only discovery, skips
+  platform/homepage/collection/API-probe/HTML-BFS work, and fetches ONLY new
+  product pages via the HTML extractor (≈1 request + new pages; zero new = 1
+  request). The scheduler's shallow cadence now uses it; `fullCrawl: false`
+  keeps the removal diff safe.
+
+#### 9.3 Comparing — indexed exact tiers + persisted matches
+
+- **Exact tiers become index lookups.** Identity keys are stored + indexed at
+  ingest; matching your catalogue against a competitor is a set of key
+  lookups (O(n) total, not O(n·m)). The GTIN > SKU > slug priority is
+  unchanged.
+- **Fuzzy gets an inverted index.** Normalized names/tokens are indexed per
+  store; candidates for a name must share a token, so only a handful of
+  similarities are computed instead of the full cross product. This lets us
+  retire the `FUZZY_PAIR_LIMIT` skip.
+- **Matches are persisted, not recomputed.** `ProductMatch` is maintained
+  incrementally: only products touched by a `ProductEvent` (new, changed name,
+  price/stock change, removed) re-match, on a background task — never on the
+  request path. The UI reads paginated matches + latest prices; the client-side
+  `compareStoresAsync` stays only as an offline fallback for tiny sets.
+- **Market analytics aggregate at ingest:** per-identity `MarketProduct` docs
+  (which stores sell it, price range, min/max, store count) update when a
+  crawl finishes, so pricing/dashboard queries are one indexed read.
+
+#### 9.4 Change detection — identity diff at ingest
+
+- Every finished crawl diffs its identity set against the previous snapshot's
+  (hash-set diff, O(n log n) at ingest) → `added`, `removed`, `priceChanged`
+  (old/new), `stockChanged`, written as `ProductEvent` rows and summarized on
+  the `Snapshot`.
+- The UI's "what's new since last crawl" diffs, per-product sparklines,
+  biggest movers, and the future alert engine all **read `ProductEvent`** —
+  nothing is recomputed on page load.
+
+#### 9.5 Migration path (from today's `CrawlResult`)
+
+**Phase 1 — DONE ✅** (models + dual-write + backfill shipped, live-Mongo
+verified). **Phase 2 — DONE ✅** (worker pool + queue + scheduler shipped,
+live-Mongo verified). **Phase 3 — DONE ✅** (indexed matching + persisted
+`ProductMatch` shipped, live-Mongo verified). **Phase 4 — DONE ✅** (events
+→ alerts shipped, live-Mongo verified). **Next: Phase 5 (productionize).**
+
+- [x] **Backfill:** `backend/scripts/backfill.js` (`npm run backfill`)
+      replays legacy `CrawlResult` docs into `Product` + `Snapshot` + events
+      through the same `syncNewModel` pipeline the dual-write uses (identity
+      keys via `backend/utils/identity.js`; `''` gtin/sku stripped to
+      undefined; original `createdAt` timestamps preserved).
+- [x] **Dual-read:** `saveCrawlResult` dual-writes legacy `CrawlResult` +
+      the normalized model (`backend/services/crawlSync.js`) — reads still
+      come from `CrawlResult` until the new read endpoints flip the UI (D1).
+- [x] **Worker pool:** `CrawlJob` queue (claim/heartbeat/retry/timeout in
+      `services/jobQueue.js`), standalone `backend/workers/worker.mjs`
+      (runs the existing crawler engine via Node 24 type-stripping),
+      `backend/workers/scheduler.mjs` (separate process, D4 — Store-cadence
+      ticks with jitter + per-store min-interval guard), `services/saveCrawl.js`
+      shared by the worker + controller, `POST/GET /api/crawl-jobs(/:id)` +
+      schedules CRUD, and `src/lib/crawl.ts` rewired to the queue API (UI
+      unchanged). Dev auto-spawn via `spawn.js` (`PARITY_INFRA=0` to disable;
+      prod runs `npm run worker`/`npm run scheduler` per process manager).
+      Verified live-Mongo: atomic claim, stale-release, retry→dead, job
+      timeout, proxy scrubbing, worker E2E (deep → removal → shallow-safety →
+      idempotent), scheduler no-double-fire + per-type anchors.
+- [x] **Indexed matching:** `Product.tokens` (multikey inverted index, written
+      at ingest) + `backend/services/matchService.js` — exact tiers (GTIN >
+      SKU > slug) hit the sparse indexes via `$in`; fuzzy candidates come
+      from `tokens: { $in: myTokens }`; lazy token backfill for legacy docs;
+      `reconcilePair` full-replace persists `ProductMatch` after every
+      finished crawl (worker + controller share `saveFinishedCrawl`);
+      `GET /api/match?origin=&page=&limit=` reads paginated matches + latest
+      prices + `onlyTheirs` — no recomputation on page load. Matcher emits
+      `'fuzzy'` (ProductMatch enum aligned). One-off backfill:
+      `backend/scripts/reconcile-matches.js` (`npm run reconcile-matches`).
+      Verified live-Mongo: all four tiers, token-candidate fuzzy (incl.
+      backfilled legacy docs), inactive exclusion, stale-row replacement,
+      pagination + endpoint validation.
+- [x] **Events → alerts:** `backend/services/alertsService.js` maps
+      `ProductEvent` rows (computed once at ingest) to alerts — `added` →
+      new_product (low), `removed` → removed (high), `price_changed` →
+      price_drop/price_rise with signed % + amount and severity tiers (≥15%
+      high, ≥5% medium), `stock_changed` → stock (restock low / out medium).
+      `GET /api/data/alerts?type=&page=&limit=` (auth-protected) paginates
+      the feed, excludes dismissed events, and reports `unreadCount` +
+      `hasAnyEvents`; `POST /api/data/alerts/{read,read-all,dismiss}` persist
+      per-user state in `AlertState` (unique userId+eventId, TTL 95d —
+      outlives its event). Alerts page rebuilt: unread accent + click-to-read,
+      dismiss, type filter, mark-all-read, server pagination, honest empty
+      states. Verified: 9 unit tests + live-Mongo E2E (32 checks).
+- [x] **Store read path (D1 freeze unlocked):** `backend/routes/stores.js` +
+      `controllers/storeController.js` + `utils/readPath.js` (unit-tested
+      helpers: keyset cursor, regex escape, key validation) —
+      `GET /api/stores` (meta-only summaries; the worker-only
+      `Store.scheduledCrawl.params.proxyUrl` is never exposed), `GET
+      /api/stores/:key` (store profile + latest snapshot), `GET
+      /api/stores/:key/products` (keyset-cursor pagination on `{key,
+      lastSeenAt: -1}`, `q=` escaped name search, `$slice` sparkline
+      projection — never full docs), `GET /api/stores/:key/snapshots`
+      (metadata, `full: false` = shallow check), `GET /api/stores/:key/events`
+      (`since=`/`type=` filters, keyset on `at`). Frontend: `api/stores.ts`
+      clients + `stores` query keys (invalidated with crawl data). Verified:
+      8 unit tests + live-Mongo E2E (28 checks). Remaining per D1: flip the
+      pages to these endpoints, then drop `CrawlResult`.
+
+Order of work (each step keeps the app green: `tsc` → `lint` → `build`):
+storage refactor → incremental crawl state → indexed matching →
+events/alerts → store read path. *(Phases 1–4 shipped; the `CrawlResult`
+dual-write still feeds reads until the pages are flipped to the new
+`/api/stores*` read path, per D1 — the endpoints are built and live-Mongo
+verified.)*
+
+**Resolved decisions (architecture.md §11 — Phase 1 can start):**
+`CrawlResult` is dual-written through the migration, frozen when the new read
+path goes live, then dropped one release later; `MarketProduct` ships in
+Phase 1 (minimal aggregate, no text index yet); the new `Snapshot` history
+caps at **10 per origin**; the scheduler is a **separate tiny process**
+(`backend/workers/scheduler.js`), not a role inside a crawl worker.

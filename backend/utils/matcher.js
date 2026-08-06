@@ -26,6 +26,15 @@ const FUZZY_THRESHOLD = 0.8;
 /** Rough length budget for edit-distance candidates (bounds the scan). */
 const FUZZY_LEN_BUDGET = 15;
 
+/**
+ * Worst-case pair count for the fuzzy pass (onlyMine × unmatched theirs).
+ * Above it the pass is skipped: with large catalogues the scan would take
+ * minutes of synchronous CPU and block the whole Express event loop (every
+ * route, including /health, freezes). Exact tiers (GTIN/SKU/slug) still
+ * match, so a bounded fuzzy tier is a fair trade-off for staying responsive.
+ */
+const FUZZY_PAIR_LIMIT = 50_000;
+
 /** Digits-only GTIN/EAN/UPC normalization. */
 function normalizeGtin(value) {
   const digits = String(value || '').replace(/[^0-9]/g, '');
@@ -58,6 +67,15 @@ function fuzzyName(name) {
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Normalized name tokens (the inverted-index vocabulary, architecture §4.2).
+ * Stored per Product at ingest so fuzzy candidates can be fetched with a
+ * `tokens: { $in: […] }` multikey-index lookup instead of a full scan.
+ */
+function nameTokens(name) {
+  return fuzzyName(name).split(' ').filter(Boolean);
 }
 
 /** Token overlap (Jaccard index) of two normalized names. */
@@ -124,7 +142,8 @@ function identityKeys(product) {
 /**
  * Matches the user's catalogue (`mine`) against one competitor's (`theirs`).
  * Returns matched pairs (with `method` and `confidence`), plus the
- * unmatched tails of both sides. `method` ∈ GTIN | SKU | URL slug | AI similarity.
+ * unmatched tails of both sides. `method` ∈ GTIN | SKU | URL slug | fuzzy
+ * (aligned with the ProductMatch model enum — Phase 3).
  */
 function matchCatalogues(mine, theirs, options = {}) {
   const threshold =
@@ -189,9 +208,15 @@ function matchCatalogues(mine, theirs, options = {}) {
 
   // Pass 4: fuzzy name similarity for whatever exact matching left over.
   // Candidates are bucketed by name length so each A only scans B names
-  // within the length budget (bounds the worst-case O(n·m) scan).
-  if (onlyMine.length > 0) {
-    const freeTheirs = theirs.filter((p) => !used.has(p));
+  // within the length budget. Worst case is still O(onlyMine × in-band
+  // candidates) × Levenshtein, so when catalogues are huge the pass is
+  // skipped entirely (FUZZY_PAIR_LIMIT) — exact tiers still match and the
+  // server can never be wedged by a multi-minute synchronous scan.
+  const freeTheirs = theirs.filter((p) => !used.has(p));
+  if (
+    onlyMine.length > 0 &&
+    onlyMine.length * freeTheirs.length <= FUZZY_PAIR_LIMIT
+  ) {
     const bucket = new Map();
     for (const p of freeTheirs) {
       const name = fuzzyName(p.name);
@@ -224,7 +249,7 @@ function matchCatalogues(mine, theirs, options = {}) {
         matched.push({
           mine,
           theirs: best.p,
-          method: 'AI similarity',
+          method: 'fuzzy',
           confidence: Math.round(bestScore * 100),
         });
       }
@@ -246,5 +271,6 @@ module.exports = {
   normalizeSku,
   slugFromUrl,
   nameSimilarity,
+  nameTokens,
   FUZZY_THRESHOLD,
 };

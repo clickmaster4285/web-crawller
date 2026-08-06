@@ -10,6 +10,10 @@ const errorHandler = require('./middleware/errorHandler');
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const dataRoutes = require('./routes/data');
+const jobRoutes = require('./routes/jobs');
+const matchRoutes = require('./routes/match');
+const storeRoutes = require('./routes/stores');
+const { spawnCrawlInfra } = require('./workers/spawn');
 const { ensureDemoUser } = require('./seed');
 
 const app = express();
@@ -47,6 +51,10 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/data', dataRoutes);
+app.use('/api/crawl-jobs', jobRoutes);
+app.use('/api/match', matchRoutes);
+// Phase 5 read path — normalized Store/Product/Snapshot/Event reads (D1).
+app.use('/api/stores', storeRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
@@ -79,6 +87,11 @@ async function startServer() {
       console.log(`🚀 Server is running on port ${PORT}`);
       console.log(`📊 Health check available at http://localhost:${PORT}/health`);
       console.log(`📦 Demo data available at http://localhost:${PORT}/api/data/workspace`);
+      // Phase 2: crawl workers + scheduler run as separate processes. In dev
+      // they're spawned alongside the API (disable with PARITY_INFRA=0); in
+      // production run them independently via `npm run worker` / `npm run
+      // scheduler` (or the deployment's process manager).
+      spawnCrawlInfra();
     });
   } catch (error) {
     console.error('Failed to start server:', error);
