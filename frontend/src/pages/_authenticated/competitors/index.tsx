@@ -1,15 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
-import {
-  GitCompareArrows,
-  Loader2,
-  Play,
-  Plus,
-  Store,
-  UserPlus,
-  X,
-} from "lucide-react";
+import { useMemo, useState } from "react";
+import { GitCompareArrows, Play, Plus, Store, UserPlus, X } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { AddCompetitorDialog } from "@/components/competitors/add-competitor-dialog";
@@ -23,17 +15,14 @@ import {
 } from "@/components/competitors/store-picker-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { useSavedCrawlMetas } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import {
-  getCrawlResultsData,
   getMyStoreData,
   invalidateMatchingData,
   queryKeys,
   setMyStoreData,
-  type SavedCrawl,
 } from "@/api";
 import {
   formatCrawlDate,
@@ -116,68 +105,11 @@ function CompetitorsPage() {
     return out;
   }, [slots, stores]);
 
-  // Fuzzy matching + similarity floor — one toggle applies to every
-  // competitor's comparison at once. On by default so similar product names
-  // pair up without the manual toggle; a saved choice is still respected.
-  const [fuzzy, setFuzzy] = useLocalStorageState(
-    "parity.competitors.fuzzy",
-    true,
-  );
-  const [rawThreshold, setThreshold] = useLocalStorageState(
-    "parity.competitors.fuzzyThreshold",
-    0.8,
-  );
-  const threshold = Number.isFinite(rawThreshold)
-    ? Math.min(0.95, Math.max(0.5, rawThreshold))
-    : 0.8;
-
-  // Full catalogues (with products) for the selected stores. Fetched lazily
-  // and cached; refreshed only when a store's meta says it was re-crawled
-  // (updatedAt changed), so the 30s poll never re-downloads unchanged data.
-  const [fullCrawls, setFullCrawls] = useState<Record<string, SavedCrawl>>({});
-  const [materializedAt, setMaterializedAt] = useState<Record<string, string>>(
-    {},
-  );
-  const [loadFailed, setLoadFailed] = useState<Record<string, boolean>>({});
-  const [retryNonce, setRetryNonce] = useState(0);
-  const neededStores = useMemo(() => {
-    const keys = new Set<string>();
-    if (myStoreKey) keys.add(myStoreKey);
-    for (const k of validSlots) if (k) keys.add(k);
-    return stores.filter((s) => keys.has(s.key));
-  }, [stores, myStoreKey, validSlots]);
-
-  useEffect(() => {
-    let cancelled = false;
-    for (const s of neededStores) {
-      if (materializedAt[s.key] === s.updatedAt) continue; // already fresh
-      getCrawlResultsData({ origin: s.origin })
-        .then((res) => {
-          const latest = res.data?.[0]; // newest snapshot for this origin
-          if (!latest || cancelled) return;
-          setFullCrawls((prev) => ({ ...prev, [s.key]: latest }));
-          setMaterializedAt((prev) => ({ ...prev, [s.key]: s.updatedAt }));
-          setLoadFailed((prev) =>
-            prev[s.key] ? { ...prev, [s.key]: false } : prev,
-          );
-        })
-        .catch(() => {
-          if (!cancelled) {
-            // Keep whatever we have — the cards still render from meta, and
-            // the Retry button (or the next poll) re-attempts the fetch.
-            setLoadFailed((prev) => ({ ...prev, [s.key]: true }));
-          }
-        });
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [neededStores, materializedAt, retryNonce]);
-
-  const retryLoad = () => {
-    setLoadFailed({});
-    setRetryNonce((n) => n + 1);
-  };
+  // Matching runs server-side: the post-crawl pipeline persists ProductMatch
+  // rows (GTIN > SKU > URL slug > name similarity), and every comparison
+  // below reads them paginated from GET /api/match — the browser never
+  // downloads the full catalogues (which is why there is no per-browser
+  // fuzzy toggle anymore: the server owns matching now).
 
   // Which picker is open: "mine" for your website, a number for a slot index.
   const [pickerFor, setPickerFor] = useState<"mine" | number | null>(null);
@@ -234,7 +166,6 @@ function CompetitorsPage() {
   const myStoreMeta = myStoreKey
     ? stores.find((s) => s.key === myStoreKey)
     : undefined;
-  const myCrawl = myStoreKey ? fullCrawls[myStoreKey] : undefined;
   const filledSlots = useMemo(() => {
     const out: Array<{ index: number; key: string; store: StoreOption }> = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
@@ -451,51 +382,10 @@ function CompetitorsPage() {
                 <GitCompareArrows className="size-4 text-muted-foreground" />
                 <h2 className="font-display text-xl">Comparisons</h2>
               </div>
-              {myStoreMeta && filledSlots.length > 0 ? (
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                  <label
-                    htmlFor="compare-fuzzy"
-                    className="flex cursor-pointer items-center gap-2"
-                  >
-                    <Switch
-                      id="compare-fuzzy"
-                      checked={fuzzy}
-                      onCheckedChange={setFuzzy}
-                    />
-                    <span className="text-xs font-medium">Fuzzy matching</span>
-                  </label>
-                  <label
-                    htmlFor="fuzzy-threshold"
-                    className="flex items-center gap-2"
-                    aria-disabled={!fuzzy}
-                  >
-                    <span
-                      className={`text-xs text-muted-foreground${fuzzy ? "" : " opacity-50"}`}
-                    >
-                      Similarity
-                    </span>
-                    <input
-                      id="fuzzy-threshold"
-                      type="range"
-                      min={50}
-                      max={95}
-                      step={5}
-                      value={Math.round(threshold * 100)}
-                      onChange={(e) =>
-                        setThreshold(Number(e.target.value) / 100)
-                      }
-                      disabled={!fuzzy}
-                      aria-label="Similarity threshold for fuzzy name matching"
-                      className="w-32 accent-primary disabled:cursor-not-allowed disabled:opacity-50"
-                    />
-                    <span
-                      className={`numeric w-9 text-right text-xs${fuzzy ? "" : " opacity-50"}`}
-                    >
-                      {Math.round(threshold * 100)}%
-                    </span>
-                  </label>
-                </div>
-              ) : null}
+              <p className="text-xs text-muted-foreground">
+                Matches are computed server-side and refreshed after every
+                crawl.
+              </p>
             </div>
 
             {!myStoreKey ? (
@@ -509,55 +399,25 @@ function CompetitorsPage() {
             ) : filledSlots.length === 0 ? (
               <EmptyStateCard message="Select a competitor card above to see the comparison." />
             ) : (
-              filledSlots.map((slot) => {
-                const slotCrawl = fullCrawls[slot.key];
-                const failed =
-                  loadFailed[slot.key] ||
-                  (myStoreKey ? !!loadFailed[myStoreKey] : false);
-                return (
-                  <section
-                    key={slot.key}
-                    className="border border-border bg-card"
-                  >
-                    <div className="border-b border-border px-5 py-3.5">
-                      <CompareSectionHeading
+              filledSlots.map((slot) => (
+                <section
+                  key={slot.key}
+                  className="border border-border bg-card"
+                >
+                  <div className="border-b border-border px-5 py-3.5">
+                    <CompareSectionHeading labelA={myLabel} labelB={slot.key} />
+                  </div>
+                  <div className="p-5">
+                    {myStore ? (
+                      <ComparePanel
+                        competitorOrigin={slot.store.origin}
                         labelA={myLabel}
                         labelB={slot.key}
                       />
-                    </div>
-                    <div className="p-5">
-                      {myCrawl && slotCrawl ? (
-                        <ComparePanel
-                          storeA={myCrawl}
-                          storeB={slotCrawl}
-                          labelA={myLabel}
-                          labelB={slot.key}
-                          fuzzy={fuzzy}
-                          threshold={threshold}
-                        />
-                      ) : failed ? (
-                        <div className="flex flex-wrap items-center justify-between gap-3 border border-dashed border-destructive/40 bg-destructive/5 p-6 text-sm text-muted-foreground">
-                          <p>
-                            Couldn't load {slot.key}'s catalogue for comparison.
-                          </p>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={retryLoad}
-                          >
-                            Retry
-                          </Button>
-                        </div>
-                      ) : (
-                        <p className="flex items-center gap-3 border border-dashed border-border bg-muted/30 p-8 text-sm text-muted-foreground">
-                          <Loader2 className="size-4 shrink-0 animate-spin" />
-                          Loading {slot.key}'s catalogue…
-                        </p>
-                      )}
-                    </div>
-                  </section>
-                );
-              })
+                    ) : null}
+                  </div>
+                </section>
+              ))
             )}
           </div>
         </>

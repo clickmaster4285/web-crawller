@@ -69,6 +69,11 @@ const productSchema = new mongoose.Schema(
     // A multikey index makes `tokens: { $in: myTokens }` the candidate query;
     // only those candidates are similarity-scored. Written at ingest.
     tokens: { type: [String], default: [] },
+    // Character trigrams of the name — the fuzzy RECALL tier (recovers
+    // near-duplicate names that share no tokens, e.g. "Nike Air" vs
+    // "NikeAri"). Multikey-indexed per origin like tokens; the candidate
+    // query is bounded by a rare-gram frequency cap (see matchService).
+    trigrams: { type: [String], default: [] },
     firstSeenAt: { type: Date, default: Date.now },
     lastSeenAt: { type: Date, default: Date.now },
     priceUpdatedAt: Date,
@@ -97,6 +102,8 @@ productSchema.index({ key: 1, name: 1 });
 productSchema.index({ key: 1, lastSeenAt: -1 });
 // Fuzzy inverted index — token → products within an origin.
 productSchema.index({ origin: 1, tokens: 1 });
+// Trigram recall tier — gram → products within an origin.
+productSchema.index({ origin: 1, trigrams: 1 });
 
 const Product = mongoose.model('Product', productSchema);
 Product.PRICE_HISTORY_LIMIT = PRICE_HISTORY_LIMIT;

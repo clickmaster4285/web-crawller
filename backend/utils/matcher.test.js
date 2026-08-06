@@ -74,6 +74,23 @@ test('nameTokens splits normalized tokens', () => {
   expect(nameTokens('  Blue T-Shirt  ')).toEqual(['blue', 't', 'shirt']);
 });
 
+test('nameTrigrams builds the recall vocabulary', () => {
+  const { nameTrigrams } = require('./matcher');
+  // Space-padded character trigrams of the normalized name.
+  const grams = nameTrigrams('Nike Air');
+  expect(grams).toContain('nik');
+  expect(grams).toContain('air');
+  expect(grams.length).toBeGreaterThan(0);
+  // Unique (a Set-backed dedupe).
+  expect(new Set(grams).size).toBe(grams.length);
+  // Two names that share NO tokens still share trigrams — the recall gap
+  // the trigram tier exists to bridge ("Wireless Headphones" vs
+  // "Wirelessheadphones").
+  const a = nameTrigrams('Wireless Headphones');
+  const b = nameTrigrams('Wirelessheadphones');
+  expect(a.some((g) => b.includes(g))).toBe(true);
+});
+
 test('matchCatalogues fixture — all 11 checks', () => {
   console.log(`\n${failures === 0 ? 'ALL PASS ✅' : `${failures} FAILURES ❌`}`);
   expect(failures).toBe(0);

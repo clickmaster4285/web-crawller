@@ -78,6 +78,25 @@ function nameTokens(name) {
   return fuzzyName(name).split(' ').filter(Boolean);
 }
 
+/**
+ * Unique character trigrams of a space-padded normalized name — the recall
+ * tier for fuzzy matching (architecture §4.2 follow-up). Near-duplicate names
+ * that share NO tokens ("Nike Air" vs "NikeAri") never surface in the token
+ * candidate query; their trigrams still overlap ("nike air" → grams across
+ * n,i,k,e,a,i,r and "nikeari" → n,i,k,e,a,r,i share "nik" and "ike"), so a
+ * trigram inverted index recovers them. Padding keeps the ends of short names
+ * inside the vocabulary.
+ */
+function nameTrigrams(name) {
+  const s = ` ${fuzzyName(name)} `;
+  const out = [];
+  for (let i = 0; i + 3 <= s.length; i++) {
+    const g = s.slice(i, i + 3);
+    if (!out.includes(g)) out.push(g);
+  }
+  return out;
+}
+
 /** Token overlap (Jaccard index) of two normalized names. */
 function jaccard(a, b) {
   const tokensA = new Set(a.split(' '));
@@ -272,5 +291,7 @@ module.exports = {
   slugFromUrl,
   nameSimilarity,
   nameTokens,
+  nameTrigrams,
+  fuzzyName,
   FUZZY_THRESHOLD,
 };

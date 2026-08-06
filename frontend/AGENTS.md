@@ -111,7 +111,6 @@ src/
 │   ├── formatCurrency.ts
 │   ├── crawls.ts             # origin/URL helpers, prefill-crawler, crawl diff, robots text
 │   ├── format.ts             # formatPrice, formatDuration (shared number/formatting helpers)
-│   ├── compare.ts            # cross-store comparison (exact + fuzzy name matching, threshold)
 │   └── index.ts              # barrel re-export (gbp)
 ├── styles.css
 ├── router.tsx                # getRouter() factory (routeTree + QueryClient) — REQUIRED by Start
@@ -203,7 +202,7 @@ no page imports local mock data. There are no placeholder shells left:
 | Page             | Route            | What it shows today                                                                                |
 | ---------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
 | Overview         | `/`            | Stat cards + competitor snapshot via`useAnalytics()`; `NoRealDataState` when no crawls exist yet  |
-| Competitors      | `/competitors` | **Empty-by-default slot flow**: a "Your website" picker (persisted via `GET/PUT /api/data/my-store`, used as store A everywhere) + **4 competitor slot cards** (selections persisted under `parity.competitors.slots`), each opening a searchable `StorePickerDialog` of crawled stores that excludes already-used ones. Every filled slot renders its own **ComparePanel** (your website vs that competitor): in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with a **Cheapest** column, all **paginated** (25/page). One **Fuzzy matching** toggle + **Similarity threshold** slider applies to every comparison (both persisted under `parity.competitors.*`); fuzzy matching is **on by default**. A manual **Add competitor** dialog still exists |
+| Competitors      | `/competitors` | **Empty-by-default slot flow**: a "Your website" picker (persisted via `GET/PUT /api/data/my-store`, used as store A everywhere) + **4 competitor slot cards** (selections persisted under `parity.competitors.slots`), each opening a searchable `StorePickerDialog` of crawled stores that excludes already-used ones. Every filled slot renders its own **ComparePanel** reading the **server-side matcher** (`GET /api/match` — persisted `ProductMatch` rows + paginated only-A / only-B lists, so the browser never downloads the full catalogues): in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with method badges (GTIN/SKU/URL slug/fuzzy + confidence) and a **Cheapest** column, all **paginated** server-side (25/page, per-tab page state). No per-browser fuzzy toggle anymore — matching is server-owned (GTIN > SKU > URL slug > token fuzzy > trigram recall) and refreshed after every crawl (query keys under `queryKeys.competitorMatches`, invalidated with crawl/matching data). A manual **Add competitor** dialog still exists |
 | Saved crawls     | `/crawls`      | Snapshot history per store via`useSavedCrawls()`: history **hidden by default** with a per-store **Show history / Hide history** toggle, a **type filter toggle** (All / Shallow checks / Deep crawls — persisted under `parity.crawls.typeFilter`, filters snapshots *before* grouping so stat cards + stores reflect the subset, per-type counts shown even while filtered, missing `type` reads as deep), "+N new / removed · price changed / no change / first snapshot" badges, **shallow check / deep crawl** badges per snapshot (`CrawlResult.type`, persisted from the job; old snapshots read as deep), expandable rows (stats, changes vs previous, discovery, first-8 products, failures), a **View all N products** link to the full **Store catalogue** page, **Re-crawl** (prefills the crawler via `prefillCrawlerOrigin`), **Delete snapshot** / **Clear history** (`DELETE /api/data/crawl-results/:id` / `/crawl-results?origin=`) |
 | Store catalogue  | `/stores/$origin` | Full-page product list for one store via the **D1 read path** (`getStore`/`getStoreSnapshots`/`useStoreCatalogue` → `GET /api/stores/:key{,/snapshots,/products}`, dynamic route keyed by **normalized origin**): a **snapshot picker** drives the crawl **stats row** + **Store profile** card + **Discovery log** (the specific per-candidate reasons behind a crawl result); the catalogue table always shows the **current state** — server-paginated (debounced `q=` search applied on the backend, keyset-cursor **Load more** accumulation guarded by a search-generation token so a stale page can't append onto a newer search), per-product **price sparkline** (from the `$slice` priceHistory projection) + point count + range. Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler), **Delete store** (cascade `DELETE /api/stores/:key` — normalized collections + legacy CrawlResult) and a **Saved crawls** back link; dynamic `document.title` |
 | Matched products | `/products`    | **Real matching engine**: `useMatchedProducts()` pulls rows from the backend matcher (`backend/utils/matcher.js` — GTIN > SKU > URL slug > fuzzy name). Your crawled catalogue is matched against each competitor with method + confidence, a your-price / price-gap column, and competitor products you don't carry listed as **Unmatched**; searchable / filterable / paginated. Honestly empty until you set your store on `/competitors` and crawl it + competitors |
@@ -230,8 +229,9 @@ competitor feature components (`components/crawls/`,
 `components/competitors/`), and the shadcn set in `components/ui/`. Shared
 helpers live in `utils/crawls.ts` (origin/URL utils, `computeCrawlDiff`,
 `robotsText`), `utils/format.ts` (`formatPrice`, `formatDuration`) and
-`utils/compare.ts` (`compareStores` — exact + fuzzy name matching with a
-tunable threshold).
+`utils/crawl-controls.ts` (pause/resume/cancel toast confirmations). The old
+client-side `utils/compare.ts` was **deleted** — cross-store comparison now
+runs server-side via the persisted `ProductMatch` pipeline (see Layer 6).
 
 ## What's next (the plan)
 
@@ -485,24 +485,42 @@ green. Target architecture, with status:
   the ingest pipeline onto `Product.httpState`. ANY worker (any machine)
   resumes where another stopped. SQLite stays only for `npm run crawl` — the worker never opens a
   checkpoint anymore, and the per-run `.crawler` scratch (`crawl-<host>.db`
-  files) was deleted. Documented gap: etag is
-  persisted but not yet a skip signal — a sitemap without lastmod refetches
-  every run (same as before).
-- **Compare — efficient. ✅ Phase 3 shipped.** `Product.tokens` (normalized
-  name tokens, written at ingest + on rename) with a `{origin, tokens}`
-  multikey index; `backend/services/matchService.js` matches via index
-  lookups: exact tiers (GTIN > SKU > slug) are `$in` queries on the sparse
-  indexes, fuzzy candidates come from `tokens: { $in: myTokens }` (only
-  those are similarity-scored — the full cross product is never enumerated).
-  `reconcilePair` persists `ProductMatch` rows (full-pair replace) after
-  every finished crawl through the shared `saveFinishedCrawl` (worker +
-  controller); `reconcile-matches.js` backfills legacy products (lazy
-  per-origin token backfill included). Read path: `GET /api/match?origin=&page=&limit=`
-  returns paginated matches + latest prices + `onlyTheirs` — zero
-  recomputation on page load. Trade-off (recorded in architecture.md §9):
-  fuzzy candidates must share a token, so near-duplicate names with disjoint
-  tokens (e.g. "Nike Air" vs "NikeAri") are missed — accepted recall cost of
-  the inverted index.
+  files) was deleted. **Etag/conditional revalidation — shipped.** The engine
+  now sends the stored validators as `If-None-Match` / `If-Modified-Since`
+  (`HttpOptions.conditional`) whenever the sitemap-lastmod fast-path doesn't
+  fire; an unchanged page answers `304` and the stored product is reused
+  (cheap revalidation, counted in `skippedUnchanged`). The lastmod fast-path
+  itself now requires a REAL lastmod (`lastmodNum != null`) — previously
+  `null === null` skipped no-signal stores forever without revalidation;
+  now they revalidate via the conditional headers (stores with neither
+  lastmod nor etag refetch — the correct, previously-documented behavior).
+  Verified: live-server engine E2E (run 2 sends If-None-Match on both
+  products, gets 304s, fetches 0, reuses both).
+- **Compare — efficient. ✅ Phase 3 shipped + recall tier.** `Product.tokens`
+  (normalized name tokens, written at ingest + on rename) with a
+  `{origin, tokens}` multikey index; `backend/services/matchService.js`
+  matches via index lookups: exact tiers (GTIN > SKU > slug) are `$in`
+  queries on the sparse indexes, fuzzy candidates come from `tokens: {
+  $in: myTokens }` (only those are similarity-scored — the full cross
+  product is never enumerated). **Trigram recall tier — shipped:**
+  `Product.trigrams` (space-padded char trigrams, `{origin, trigrams}`
+  multikey index) + `matchByTrigrams` — a rare-gram frequency aggregation
+  (n ≤ 200, top 8000 grams), chunked `$in` candidates over the FULL active
+  competitor catalogue minus round-1 matches (the recall gap is products
+  that share NO token with yours — invisible to round 1 by construction),
+  shared-gram ≥ 2 + trigram-Jaccard ≥ 0.3 pre-filter, then best-Jaccard
+  candidate gated by the same `nameSimilarity ≥ threshold` as the token
+  tier. Recovers near-duplicates like "Wireless Headphones" vs
+  "Wirelessheadphones" (verified live-Mongo). **No-op reconcile skip —
+  shipped:** `saveFinishedCrawl` re-runs `reconcileForOrigin` only when the
+  crawl's diff changed something (added/removed/price/stock/rename — the
+  new `renamedCount`), so a zero-change shallow quick-check no longer
+  re-loads both catalogues and full-replaces every `ProductMatch` row.
+  `reconcilePair` persists `ProductMatch` rows (full-pair replace);
+  `reconcile-matches.js` backfills legacy products (lazy per-origin
+  token+trigram backfill included). Read path: `GET /api/match?origin=&page=&limit=`
+  returns paginated matches + latest prices + `onlyMine`/`onlyTheirs`
+  paginated lists + `priceDifferCount` — zero recomputation on page load.
 - **Change detection — at ingest. ✅ Phase 1 shipped.** Identity-set diff per
   crawl → `ProductEvent` rows (added/removed/price_changed/stock_changed)
   power "what's new" diffs, sparklines, biggest movers, and the Layer 4 alert

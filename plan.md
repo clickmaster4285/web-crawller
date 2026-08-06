@@ -274,7 +274,11 @@ Key moves:
   MongoDB `Product.httpState` (✅ Phase B shipped — engine `resumeState` +
   `httpStateByUrl`, worker `loadResumeState`, persisted by the ingest
   pipeline), so **any worker — any machine — resumes where another stopped**;
-  unchanged products skip via sitemap-lastmod and are counted in
+  unchanged products skip via sitemap-lastmod **or a 304 conditional
+  revalidation** (✅ shipped: the engine sends `If-None-Match` /
+  `If-Modified-Since` from stored `httpState`; a `304` reuses the stored
+  product instead of fetching + parsing the page — this also fixed a latent
+  bug where null-lastmod stores were never refetched) and are counted in
   `skippedUnchanged`. SQLite stays as the checkpoint fallback + per-run
   scratch. Re-crawling an unchanged 10k-product store costs a handful of
   requests.
@@ -297,13 +301,25 @@ Key moves:
   unchanged.
 - **Fuzzy gets an inverted index.** Normalized names/tokens are indexed per
   store; candidates for a name must share a token, so only a handful of
-  similarities are computed instead of the full cross product. This lets us
-  retire the `FUZZY_PAIR_LIMIT` skip.
+  similarities are computed instead of the full cross product. **✅ Trigram
+  tier shipped:** `Product.trigrams` (unique char trigrams of the padded
+  normalized name, multikey `{origin, trigrams}` index) recovers the token
+  tier's recall gap — near-duplicates sharing no tokens ("Nike Air" vs
+  "NikeAri") surface via shared rare grams (frequency ≤ 200, capped, chunked
+  `$in`), pre-filtered by shared ≥ 2 + trigram Jaccard ≥ 0.3, and accepted
+  only when the best candidate's `nameSimilarity ≥ threshold`. It searches
+  the full active competitor catalogue minus round-1 matched ids. This lets
+  us retire the `FUZZY_PAIR_LIMIT` skip.
 - **Matches are persisted, not recomputed.** `ProductMatch` is maintained
   incrementally: only products touched by a `ProductEvent` (new, changed name,
   price/stock change, removed) re-match, on a background task — never on the
-  request path. The UI reads paginated matches + latest prices; the client-side
-  `compareStoresAsync` stays only as an offline fallback for tiny sets.
+  request path. **✅ No-op reconcile gate:** a finished crawl only re-runs
+  `reconcileForOrigin` when its diff changed something (added/removed/price/
+  stock/rename — `renamedCount` added to `crawlSync` so renames still
+  re-match); an unchanged crawl skips matching entirely. **✅ ComparePanel is
+  server-driven:** the Competitors page reads paginated `GET /api/match`
+  (`onlyMine` added to the endpoint) instead of materialising two full
+  catalogues in the browser — the client-side `compare.ts` is deleted.
 - **Market analytics aggregate at ingest:** per-identity `MarketProduct` docs
   (which stores sell it, price range, min/max, store count) update when a
   crawl finishes, so pricing/dashboard queries are one indexed read.
@@ -369,16 +385,22 @@ live-Mongo verified). **Phase 3 — DONE ✅** (indexed matching + persisted
 - [x] **Indexed matching:** `Product.tokens` (multikey inverted index, written
       at ingest) + `backend/services/matchService.js` — exact tiers (GTIN >
       SKU > slug) hit the sparse indexes via `$in`; fuzzy candidates come
-      from `tokens: { $in: myTokens }`; lazy token backfill for legacy docs;
+      from `tokens: { $in: myTokens }` **plus a trigram tier**
+      (`Product.trigrams` — rare-gram prefilter recovers the token tier's
+      recall gap, gated by Jaccard ≥ 0.3 then `nameSimilarity` ≥ threshold);
+      lazy token/trigram backfill for legacy docs (`ensureVocabForOrigin`);
       `reconcilePair` full-replace persists `ProductMatch` after every
-      finished crawl (worker + controller share `saveFinishedCrawl`);
-      `GET /api/match?origin=&page=&limit=` reads paginated matches + latest
-      prices + `onlyTheirs` — no recomputation on page load. Matcher emits
-      `'fuzzy'` (ProductMatch enum aligned). One-off backfill:
+      finished crawl (worker + controller share `saveFinishedCrawl`), **but a
+      no-op crawl (nothing added/removed/price/stock/renamed) skips matching
+      entirely**; `GET /api/match?origin=&page=&limit=` reads paginated
+      matches + latest prices + `onlyTheirs`/`onlyMine` — no recomputation on
+      page load, and the **Competitors ComparePanel is flipped onto it**
+      (server-driven; client `compare.ts` deleted). Matcher emits `'fuzzy'`
+      (ProductMatch enum aligned). One-off backfill:
       `backend/scripts/reconcile-matches.js` (`npm run reconcile-matches`).
-      Verified live-Mongo: all four tiers, token-candidate fuzzy (incl.
-      backfilled legacy docs), inactive exclusion, stale-row replacement,
-      pagination + endpoint validation.
+      Verified live-Mongo: all four tiers + trigram recall gap, token-candidate
+      fuzzy (incl. backfilled legacy docs), inactive exclusion, stale-row
+      replacement, pagination + endpoint validation.
 - [x] **Events → alerts:** `backend/services/alertsService.js` maps
       `ProductEvent` rows (computed once at ingest) to alerts — `added` →
       new_product (low), `removed` → removed (high), `price_changed` →

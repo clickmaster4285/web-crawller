@@ -38,6 +38,39 @@ two levels up, so it never regresses).
 
 ---
 
+## ⚡ Optimization batch this session
+
+Five efficiency wins shipped (all five from the improvement menu), verified
+with live-Mongo E2Es:
+
+1. **No-op reconciles are skipped.** A finished crawl only re-runs matching
+   when its diff changed something (added/removed/price/stock/rename —
+   `renamedCount` added so renames still re-match). Unchanged stores now cost
+   zero matcher CPU instead of a full re-match every run.
+2. **Backfill ran against the live `crawler` DB** — 18,434 products, 18
+   snapshots and 21,767 events written from the 20 legacy `CrawlResult` docs
+   (dry-run first). `products` went from 1 doc to ~18k; the normalized model
+   is now the real data source (the legacy collection can be dropped in
+   Phase 5).
+3. **Etag skip in the engine.** The crawler sends `If-None-Match` /
+   `If-Modified-Since` from stored `Product.httpState`; a `304` reuses the
+   stored product instead of fetching + parsing the page. This also fixed a
+   latent bug: stores whose sitemap has no `lastmod` were *never* refetched
+   (null === null skipped them) — they now revalidate conditionally.
+4. **Trigram fuzzy tier.** `Product.trigrams` (multikey index) recovers
+   near-duplicates the token index misses ("Nike Air" vs "NikeAri") via
+   shared rare grams + a Jaccard pre-filter, with the `nameSimilarity`
+   acceptance gate. Verified by a live-Mongo E2E reproducing the recall gap.
+5. **ComparePanel is server-driven.** The Competitors page reads paginated
+   `GET /api/match` (with `onlyMine`) instead of materialising two full
+   catalogues in the browser; the dead client-side `compare.ts` is deleted.
+
+Everything validated: backend jest (30/30), frontend tsc/eslint/build clean,
+plus live-Mongo E2Es for the trigram tier, the no-op gate and the etag 304
+flow.
+
+---
+
 ## 📍 Where we are in the plan
 
 Per `plan.md` §9 and `architecture.md`: everything through **indexed matching
@@ -189,9 +222,12 @@ This maps to the five questions `architecture.md` was written to answer.
   scan on every poll — minutes of UI freeze at scale (mitigated only with a
   pair limit and async chunking).
 - **Now:** matching is **indexed and server-side**: exact tiers are sparse-index
-  lookups, fuzzy candidates come from a token inverted index (the full cross
-  product is never enumerated), and results are **persisted in `ProductMatch`**
-  — `GET /api/match` reads with zero recomputation on page load.
+  lookups, fuzzy candidates come from a token inverted index **plus a trigram
+  tier for near-duplicate names** (the full cross product is never enumerated),
+  results are **persisted in `ProductMatch`**, unchanged crawls **skip
+  matching entirely** (no-op gate), and the Competitors ComparePanel reads
+  **paginated `GET /api/match`** — zero recomputation on page load, no browser
+  catalogue download.
 
 ### 4. New/removed products — change detection
 

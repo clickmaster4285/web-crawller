@@ -27,6 +27,13 @@ const Competitor = require('../models/Competitor');
 const { matchCatalogues, FUZZY_THRESHOLD } = require('../utils/matcher');
 const { normalizeHost } = require('../utils/identity');
 
+/** Trigram recall tier bounds (matchByTrigrams). */
+const TRIGRAM_RARE_CAP = 200; // max competitor docs sharing a "rare" gram
+const TRIGRAM_MAX_GRAMS = 8000; // global gram budget for the $in set
+const TRIGRAM_MIN_SHARED = 2; // min shared grams to be scored
+const TRIGRAM_JACCARD_MIN = 0.3; // min trigram Jaccard to be scored
+const TRIGRAM_MAX_CANDIDATES = 50_000; // abort tier if candidates explode
+
 /** The user's own store doc, or null when unset. */
 async function getMyStore() {
   return MyStore.findById(MyStore.MY_STORE_ID);
@@ -62,27 +69,189 @@ async function countActiveProducts(origin) {
 }
 
 /**
- * Lazy token backfill: legacy Product docs (written before Phase 3) have no
- * tokens, so they'd be invisible to the fuzzy candidate query. Compute them
- * from the name and persist — idempotent, one pass per origin, cheap.
+ * Lazy fuzzy-vocabulary backfill: legacy Product docs (written before the
+ * fuzzy tiers shipped) have no tokens/trigrams, so they'd be invisible to the
+ * candidate queries. Compute both from the name and persist — idempotent, one
+ * pass per origin, cheap.
  */
-async function ensureTokensForOrigin(origin) {
+async function ensureVocabForOrigin(origin) {
   const missing = await Product.find({
     origin,
-    $or: [{ tokens: { $exists: false } }, { tokens: { $size: 0 } }]
+    $or: [
+      { tokens: { $exists: false } },
+      { tokens: { $size: 0 } },
+      { trigrams: { $exists: false } },
+      { trigrams: { $size: 0 } }
+    ]
   })
     .select('_id name')
     .lean();
   if (!missing.length) return 0;
-  const { nameTokens } = require('../utils/matcher');
+  const { nameTokens, nameTrigrams } = require('../utils/matcher');
   const ops = missing.map((p) => ({
     updateOne: {
       filter: { _id: p._id },
-      update: { $set: { tokens: nameTokens(p.name) } }
+      update: {
+        $set: {
+          tokens: nameTokens(p.name),
+          trigrams: nameTrigrams(p.name)
+        }
+      }
     }
   }));
   await Product.bulkWrite(ops, { ordered: false });
   return missing.length;
+}
+
+/**
+ * Trigram recall tier — recovers near-duplicate names that share NO tokens
+ * ("Nike Air" vs "NikeAri"), which the token inverted index structurally
+ * misses (architecture §4.2 follow-up). Bounded by:
+ *
+ *   - a rare-gram frequency cap (a gram shared by half the store is
+ *     worthless signal) with a global gram budget for the $in set;
+ *   - a hard candidate ceiling — the tier is skipped entirely if the
+ *     candidate fetch explodes;
+ *   - a shared-gram count + trigram-Jaccard pre-filter so the similarity
+ *     scoring stays cheap (only plausible near-duplicates are scored).
+ *
+ * `mine` is the round-1 unmatched mine products (with `trigrams` loaded);
+ * `roundOneMatchedTheirsIds` are the competitor docs already paired in round
+ * 1 — the candidate query searches the ENTIRE active competitor catalogue
+ * (minus those), which is the whole point: recall-gap products share no
+ * token with mine, so they were never in the round-1 candidate set. Pairs
+ * come out as `fuzzy` rows with the same nameSimilarity confidence as the
+ * token tier.
+ */
+async function matchByTrigrams(
+  mine,
+  roundOneMatchedTheirsIds,
+  theirsOrigin,
+  boundary,
+  threshold
+) {
+  if (!mine.length) return [];
+  const { nameTrigrams, nameSimilarity, fuzzyName } = require('../utils/matcher');
+  const alreadyMatched =
+    roundOneMatchedTheirsIds.length > 0
+      ? { _id: { $nin: roundOneMatchedTheirsIds } }
+      : {};
+
+  // 1. Rare-gram frequency map for the competitor's ACTIVE catalogue.
+  const freqRows = await Product.aggregate([
+    {
+      $match: {
+        origin: theirsOrigin,
+        lastSeenAt: { $gte: boundary },
+        trigrams: { $exists: true, $ne: [] }
+      }
+    },
+    { $unwind: '$trigrams' },
+    { $group: { _id: '$trigrams', n: { $sum: 1 } } },
+    { $match: { n: { $lte: TRIGRAM_RARE_CAP } } },
+    { $sort: { n: 1 } },
+    { $limit: TRIGRAM_MAX_GRAMS }
+  ]);
+  const rareGrams = new Set(freqRows.map((r) => r._id));
+  if (!rareGrams.size) return [];
+
+  // 2. My still-unmatched products, reduced to their rare grams.
+  const mineEntries = [];
+  const mineGramSet = new Set();
+  for (const m of mine) {
+    const grams = nameTrigrams(m.name).filter((g) => rareGrams.has(g));
+    if (!grams.length) continue;
+    mineEntries.push({ mine: m, grams });
+    for (const g of grams) mineGramSet.add(g);
+  }
+  if (!mineGramSet.size) return [];
+  const gramList = [...mineGramSet];
+
+  // 3. Candidates: ACTIVE competitor products (the full catalogue minus the
+  //    round-1 matches) sharing any of my rare grams. Chunked $in; deduped
+  //    by _id. This is where the recall gap is bridged — a product that
+  //    shares no token with mine was invisible to round 1, but a shared
+  //    trigram surfaces it here.
+  const cands = new Map();
+  for (let i = 0; i < gramList.length; i += 2000) {
+    const chunk = gramList.slice(i, i + 2000);
+    const docs = await Product.find({
+      origin: theirsOrigin,
+      lastSeenAt: { $gte: boundary },
+      ...alreadyMatched,
+      trigrams: { $in: chunk }
+    })
+      .select('_id name url price available trigrams')
+      .lean();
+    for (const d of docs) {
+      if (cands.has(String(d._id))) continue;
+      // Bail EARLY — per chunk, not after the whole fetch — so a noisy
+      // catalogue can't make us pull hundreds of thousands of docs.
+      if (cands.size + 1 > TRIGRAM_MAX_CANDIDATES) return [];
+      cands.set(String(d._id), d);
+    }
+  }
+  if (!cands.size) return [];
+
+  // 4. Gram → docs index for scoring.
+  const byGram = new Map();
+  for (const d of cands.values()) {
+    for (const g of d.trigrams ?? []) {
+      if (!mineGramSet.has(g)) continue;
+      const list = byGram.get(g) ?? [];
+      list.push(d);
+      byGram.set(g, list);
+    }
+  }
+
+  // 5. Greedy best-match per mine product: shared-gram count + trigram
+  //    Jaccard floor first, then the highest-Jaccard free candidate.
+  const usedTheirs = new Set();
+  const pairs = [];
+  for (const { mine: m, grams } of mineEntries) {
+    const na = fuzzyName(m.name);
+    if (!na) continue;
+    const mineGramCount = grams.length;
+    const candSet = new Map();
+    for (const g of grams) {
+      for (const d of byGram.get(g) ?? []) {
+        const id = String(d._id);
+        if (usedTheirs.has(id)) continue;
+        const entry = candSet.get(id);
+        if (entry) entry.shared++;
+        else candSet.set(id, { doc: d, shared: 1 });
+      }
+    }
+    let best = null;
+    let bestJ = 0;
+    for (const { doc, shared } of candSet.values()) {
+      if (shared < TRIGRAM_MIN_SHARED) continue;
+      const theirGrams = new Set(doc.trigrams ?? []);
+      // Note: mineGramCount is the rare-only subset while theirGrams is the
+      // full set, so this pre-filter Jaccard is mildly inflated on the mine
+      // side — acceptable, since the real gate is nameSimilarity below.
+      const j = shared / (mineGramCount + theirGrams.size - shared);
+      if (j < TRIGRAM_JACCARD_MIN) continue;
+      if (j > bestJ) {
+        bestJ = j;
+        best = doc;
+      }
+    }
+    if (best) {
+      const sim = nameSimilarity(na, fuzzyName(best.name));
+      // Same acceptance gate as the token fuzzy tier: the trigram Jaccard
+      // only bounded the candidates — the real similarity threshold decides.
+      if (sim < threshold) continue;
+      usedTheirs.add(String(best._id));
+      pairs.push({
+        mine: m,
+        theirs: best,
+        method: 'fuzzy',
+        confidence: Math.round(sim * 100)
+      });
+    }
+  }
+  return pairs;
 }
 
 /**
@@ -161,15 +330,16 @@ async function reconcilePair(mineOrigin, theirsOrigin, { threshold = FUZZY_THRES
     await ProductMatch.deleteMany({ mineOrigin, competitorKey });
     return { matched: 0, methods: {}, cleared: true };
   }
-  // Tokens MUST be backfilled BEFORE loadTheirsCandidates: the candidate
-  // query relies on the token multikey index, so legacy docs without tokens
-  // would be invisible to the fuzzy tier (and my own docs need theirs for
-  // the candidate token set). Idempotent — one pass per origin, then a no-op.
-  await ensureTokensForOrigin(mineOrigin);
-  await ensureTokensForOrigin(theirsOrigin);
+  // Fuzzy vocab MUST be backfilled BEFORE loadTheirsCandidates: the candidate
+  // queries rely on the token + trigram multikey indexes, so legacy docs
+  // without them would be invisible to the fuzzy tiers (and my own docs need
+  // theirs for the candidate token/gram sets). Idempotent — one pass per
+  // origin, then a no-op.
+  await ensureVocabForOrigin(mineOrigin);
+  await ensureVocabForOrigin(theirsOrigin);
   const mine = await loadActiveProducts(
     mineOrigin,
-    '_id name sku gtin url price available tokens'
+    '_id name sku gtin url price available tokens trigrams'
   );
   if (mine.length === 0) {
     await ProductMatch.deleteMany({ mineOrigin, competitorKey });
@@ -181,11 +351,23 @@ async function reconcilePair(mineOrigin, theirsOrigin, { threshold = FUZZY_THRES
 
   // Reuse the legacy pairing semantics over the candidate set (identity
   // keys are already normalized at ingest; re-normalization is idempotent).
-  const { matched } = matchCatalogues(mine, theirs, {
+  const { matched, onlyMine, onlyTheirs } = matchCatalogues(mine, theirs, {
     fuzzyThreshold: threshold
   });
 
-  const rows = matched.map((pair) => ({
+  // Trigram recall tier — near-duplicates with disjoint tokens never surface
+  // in the token candidate query; recover them via rare-gram candidates over
+  // the FULL competitor catalogue (minus round-1 matches). Persisted as
+  // 'fuzzy' rows like the token tier.
+  const trigramPairs = await matchByTrigrams(
+    onlyMine,
+    matched.map((pair) => pair.theirs._id),
+    theirsOrigin,
+    boundary,
+    threshold
+  );
+
+  const rows = [...matched, ...trigramPairs].map((pair) => ({
     mineProductId: pair.mine._id,
     mineOrigin,
     competitorKey,
@@ -296,14 +478,92 @@ async function matchesForCompetitor(
     });
   }
 
-  // Competitor products you don't carry (active, no persisted match).
+  // Only-A / only-B lists (active, no persisted match, paginated) + the
+  // count of matches whose prices are both known and differ. These feed the
+  // /competitors ComparePanel tabs and the "price differs" tile — all
+  // computed server-side, so the browser never downloads full catalogues.
+  const matchedMineIds = await ProductMatch.distinct('mineProductId', scope);
   const matchedTheirsIds = await ProductMatch.distinct('competitorProductId', scope);
-  const boundary = await activeBoundary(theirsOrigin);
-  const onlyTheirs = await Product.countDocuments({
-    origin: theirsOrigin,
-    lastSeenAt: { $gte: boundary },
-    ...(matchedTheirsIds.length ? { _id: { $nin: matchedTheirsIds } } : {})
+  const mineBoundary = await activeBoundary(mineOrigin);
+  const theirsBoundary = await activeBoundary(theirsOrigin);
+  const mineExclude =
+    matchedMineIds.length > 0 ? { _id: { $nin: matchedMineIds } } : {};
+  const theirsExclude =
+    matchedTheirsIds.length > 0 ? { _id: { $nin: matchedTheirsIds } } : {};
+  const toSideRow = (d) => ({
+    productId: String(d._id),
+    name: d.name,
+    price: d.price ?? null,
+    available: d.available,
+    url: d.url
   });
+
+  const [onlyMineTotal, onlyMineDocs, onlyTheirsTotal, onlyTheirsDocs, priceDiff] =
+    await Promise.all([
+      Product.countDocuments({
+        origin: mineOrigin,
+        lastSeenAt: { $gte: mineBoundary },
+        ...mineExclude
+      }),
+      Product.find({
+        origin: mineOrigin,
+        lastSeenAt: { $gte: mineBoundary },
+        ...mineExclude
+      })
+        .sort({ lastSeenAt: -1 })
+        .skip(skip)
+        .limit(cap)
+        .select('_id name price available url')
+        .lean(),
+      Product.countDocuments({
+        origin: theirsOrigin,
+        lastSeenAt: { $gte: theirsBoundary },
+        ...theirsExclude
+      }),
+      Product.find({
+        origin: theirsOrigin,
+        lastSeenAt: { $gte: theirsBoundary },
+        ...theirsExclude
+      })
+        .sort({ lastSeenAt: -1 })
+        .skip(skip)
+        .limit(cap)
+        .select('_id name price available url')
+        .lean(),
+      ProductMatch.aggregate([
+        { $match: scope },
+        {
+          $lookup: {
+            from: 'products',
+            localField: 'mineProductId',
+            foreignField: '_id',
+            as: 'm'
+          }
+        },
+        {
+          $lookup: {
+            from: 'products',
+            localField: 'competitorProductId',
+            foreignField: '_id',
+            as: 't'
+          }
+        },
+        { $unwind: '$m' },
+        { $unwind: '$t' },
+        {
+          $match: {
+            $expr: {
+              $and: [
+                { $gt: ['$m.price', 0] },
+                { $gt: ['$t.price', 0] },
+                { $ne: ['$m.price', '$t.price'] }
+              ]
+            }
+          }
+        },
+        { $count: 'n' }
+      ])
+    ]);
 
   return {
     competitorKey,
@@ -312,7 +572,9 @@ async function matchesForCompetitor(
     page,
     limit: cap,
     rows: out,
-    onlyTheirs
+    onlyMine: { total: onlyMineTotal, rows: onlyMineDocs.map(toSideRow) },
+    onlyTheirs: { total: onlyTheirsTotal, rows: onlyTheirsDocs.map(toSideRow) },
+    priceDifferCount: priceDiff[0]?.n ?? 0
   };
 }
 
@@ -321,9 +583,10 @@ module.exports = {
   activeBoundary,
   loadActiveProducts,
   countActiveProducts,
-  ensureTokensForOrigin,
+  ensureVocabForOrigin,
   competitorOrigins,
   loadTheirsCandidates,
+  matchByTrigrams,
   reconcilePair,
   reconcileForOrigin,
   matchesForCompetitor

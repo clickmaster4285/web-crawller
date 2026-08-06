@@ -32,7 +32,11 @@
  */
 
 import { discoverProducts } from "./discover/index.ts";
-import { fetchWithRetry, httpOptions } from "./core/http.ts";
+import {
+  fetchWithRetry,
+  httpOptions,
+  type ConditionalRequest,
+} from "./core/http.ts";
 import { closeBrowser, renderWithBrowser } from "./core/browser.ts";
 import { fetchBigCommerceProductById } from "./adapters/bigcommerce.ts";
 import { parseShopifyProduct, type RawProduct } from "./adapters/shopify.ts";
@@ -230,7 +234,11 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       // refetching. The reused product IS part of the result, so the ingest
       // diff still sees the full catalogue (no false removals).
       const prev = config.resumeState?.get(url);
-      if (prev && lastmodNum === prev.lastmod) {
+      // Only a REAL lastmod signal can skip without a request: when both the
+      // sitemap and the stored state have no lastmod (null === null), the
+      // product MUST be revalidated — skipping would never refresh the store
+      // (the conditional-request path below turns that into a cheap 304).
+      if (prev && lastmodNum != null && lastmodNum === prev.lastmod) {
         products.push(prev.product);
         skippedUnchanged++;
         // Carry the stored etag forward — the product didn't change, so its
@@ -259,6 +267,16 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
         // Row exists but carries no product JSON — fall through and refetch.
       }
 
+      // Conditional revalidation: when we have stored validators (etag /
+      // lastmod) but the sitemap-lastmod fast-path above didn't trigger, ask
+      // the server "is this still the same?" — a 304 answers with no body, so
+      // unchanged pages cost one tiny request instead of a full fetch + parse.
+      // No validators → plain fetch (nothing to revalidate against).
+      const conditional: ConditionalRequest | undefined =
+        prev && (prev.etag || prev.lastmod != null)
+          ? { etag: prev.etag, lastmod: prev.lastmod }
+          : undefined;
+
       // Robots.txt was already enforced during discovery (disallowed URLs were
       // dropped from `discovered.urls`), so no extra gate is needed here.
       const host = hostOf(url);
@@ -275,6 +293,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             wooApiAvailable,
             bcId,
             shallow,
+            conditional,
           );
           if (product) {
             // Persist before mutating run state so a storage failure can't
@@ -283,7 +302,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
               origin: config.origin,
               url,
               // Etag is persisted for future conditional-request revalidation;
-              // the v1 skip signal is the sitemap lastmod (see `shouldFetch`).
+              // the sitemap lastmod is the first skip signal, etag the second.
               etag,
               lastmod: lastmod ?? null,
               statusCode,
@@ -294,6 +313,27 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             httpStateByUrl.set(url, { etag, lastmod: lastmodNum });
             products.push(product);
             fetchedCount++;
+          } else if (statusCode === 304 && prev?.product) {
+            // 304 Not Modified — the stored validators are still current, so
+            // the stored product is reused (cheap revalidation). Counted as a
+            // skip and INCLUDED in the result so the ingest diff still sees
+            // the full catalogue (no false removals).
+            store?.recordFetch({
+              origin: config.origin,
+              url,
+              etag: prev.etag ?? etag,
+              lastmod: lastmod ?? null,
+              statusCode: 304,
+              status: "fetched",
+              productJson: JSON.stringify(prev.product),
+              lastFetchedAt: new Date().toISOString(),
+            });
+            httpStateByUrl.set(prev.product.url, {
+              etag: prev.etag ?? etag,
+              lastmod: lastmodNum,
+            });
+            products.push(prev.product);
+            skippedUnchanged++;
           } else {
             failures.push({ url, error: "No product data found" });
             store?.recordFailure(config.origin, url);
@@ -361,6 +401,7 @@ async function fetchOneProduct(
   useWooApi = false,
   bcId: number | null = null,
   shallow = false,
+  conditional?: ConditionalRequest,
 ): Promise<FetchedProduct> {
   // The Shopify handle is needed by the HTML path too (it seeds the
   // extractor), so it's computed here, outside the shallow guard.
@@ -400,7 +441,19 @@ async function fetchOneProduct(
     if (handle) {
       try {
         const jsonUrl = `${origin}/products/${handle}.json`;
-        const response = await fetchWithRetry(jsonUrl, opts);
+        const response = await fetchWithRetry(jsonUrl, {
+          ...opts,
+          conditional,
+        });
+        // 304 = the JSON product is unchanged — bail out so the engine reuses
+        // the stored product instead of also fetching the HTML page.
+        if (response.status === 304) {
+          return {
+            product: null,
+            etag: response.headers.get("etag"),
+            statusCode: 304,
+          };
+        }
         const envelope = (await response.json()) as ShopifyProductEnvelope;
         if (envelope?.product) {
           return {
@@ -416,7 +469,15 @@ async function fetchOneProduct(
   }
 
   // Tier 2: HTML extractor chain (JSON-LD / OG / microdata / heuristics).
-  const response = await fetchWithRetry(url, opts);
+  const response = await fetchWithRetry(url, { ...opts, conditional });
+  // 304 = page unchanged — the engine reuses the stored product.
+  if (response.status === 304) {
+    return {
+      product: null,
+      etag: response.headers.get("etag"),
+      statusCode: 304,
+    };
+  }
   const html = await response.text();
   const htmlHandle = handle ?? slugFromUrl(url);
   return {

@@ -1,8 +1,9 @@
 /**
  * saveCrawl — the shared post-crawl persistence pipeline (Phase 2).
  *
- * Used by BOTH the Express controller (`saveCrawlResult`, HTTP back-compat)
- * and the standalone crawl worker (which saves directly, no HTTP round-trip):
+ * Called by the standalone crawl worker (which saves directly, no HTTP
+ * round-trip — the old `POST /api/data/crawl-results` entry point was
+ * removed):
  *
  *   1. Legacy `CrawlResult` doc (snapshot history, capped — D1 compat layer)
  *   2. Normalized model via `syncNewModel` (Product / Snapshot / ProductEvent)
@@ -142,12 +143,32 @@ async function saveFinishedCrawl({
   // 4. Phase 3: persist ProductMatch rows for everything this crawl affected
   //    (my-store crawl → re-match vs every competitor; competitor crawl →
   //    re-match vs the my-store). Best-effort — never fatal to the crawl.
+  //
+  //    Re-matching is SKIPPED when this crawl changed nothing on the origin
+  //    (added/removed/price/stock/rename all zero — e.g. a shallow quick-check
+  //    that found no new products). Re-running it would re-load both
+  //    catalogues and full-replace every ProductMatch row for zero benefit:
+  //    prices are read live from Product at read time, so untouched rows stay
+  //    correct. A failed dual-write falls back to reconciling — never skip on
+  //    unknown state.
   let matching;
-  try {
-    matching = await reconcileForOrigin(origin);
-  } catch (error) {
-    console.error(`⚠️ Match reconcile failed for ${origin}:`, error);
-    matching = { ok: false, error: error.message };
+  const changed =
+    !dualWrite?.ok ||
+    (dualWrite?.addedCount ?? 0) +
+      (dualWrite?.removedCount ?? 0) +
+      (dualWrite?.priceChangedCount ?? 0) +
+      (dualWrite?.stockChangedCount ?? 0) +
+      (dualWrite?.renamedCount ?? 0) >
+      0;
+  if (changed) {
+    try {
+      matching = await reconcileForOrigin(origin);
+    } catch (error) {
+      console.error(`⚠️ Match reconcile failed for ${origin}:`, error);
+      matching = { ok: false, error: error.message };
+    }
+  } else {
+    matching = { ok: true, skipped: true, reason: 'no-changes' };
   }
 
   return { doc, dualWrite, store, matching };

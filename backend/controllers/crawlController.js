@@ -1,16 +1,13 @@
 /**
- * CrawlResult controller — persist and read saved crawls.
- *
- * `POST /api/data/crawl-results` stores a finished crawl. With
- * `storeSnapshots: true` (default) each run appends a snapshot and history is
- * capped at `SNAPSHOT_LIMIT` per origin; with `storeSnapshots: false` the
- * latest run replaces the previous one (one doc per origin).
+ * CrawlResult controller — read and delete saved crawls (legacy dual-write
+ * path until the D1 endgame flips the UI onto `/api/stores`).
  *
  * `GET /api/data/crawl-results?origin=` lists saved snapshots, newest first,
- * optionally filtered by origin.
+ * optionally filtered by origin (or `?meta=1` for lightweight summaries).
  *
- * Since Phase 2 the heavy lifting lives in `services/saveCrawl.js` (shared
- * with the standalone crawl worker); this controller is the HTTP entry point.
+ * Crawl persistence itself lives in `services/saveCrawl.js` — the worker
+ * saves directly, so the old HTTP `POST /api/data/crawl-results` entry point
+ * was removed.
  */
 
 const mongoose = require('mongoose');
@@ -20,58 +17,6 @@ const Snapshot = require('../models/Snapshot');
 const ProductEvent = require('../models/ProductEvent');
 const CrawlJob = require('../models/CrawlJob');
 const Store = require('../models/Store');
-const { saveFinishedCrawl } = require('../services/saveCrawl');
-
-const saveCrawlResult = async (req, res) => {
-  try {
-    const {
-      origin,
-      collections,
-      stats,
-      products,
-      failures,
-      discovery,
-      storeSnapshots,
-      fullCrawl
-    } = req.body || {};
-    if (!origin) {
-      return res.status(400).json({
-        success: false,
-        message: 'origin is required'
-      });
-    }
-    // Forward the job type (validated) so the back-compat HTTP dual-write
-    // records the right legacy-doc type AND the right Store cadence anchor
-    // (lastShallowAt vs lastDeepAt) — a shallow post must never look deep.
-    const type = req.body?.type === 'shallow' ? 'shallow' : 'deep';
-    const { doc, dualWrite } = await saveFinishedCrawl({
-      origin,
-      collections,
-      stats,
-      products,
-      failures,
-      discovery,
-      storeSnapshots,
-      fullCrawl,
-      type
-    });
-    console.log(
-      `💾 Saved crawl result for ${origin}: ${doc.products.length} products` +
-        (storeSnapshots === false ? ' (replace mode)' : ' (snapshot mode)')
-    );
-    res.json({
-      success: true,
-      data: doc,
-      dualWrite
-    });
-  } catch (error) {
-    console.error('Save crawl result error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-};
 
 const getCrawlResults = async (req, res) => {
   try {
@@ -195,7 +140,6 @@ const deleteCrawlResultsByOrigin = async (req, res) => {
 };
 
 module.exports = {
-  saveCrawlResult,
   getCrawlResults,
   deleteCrawlResult,
   deleteCrawlResultsByOrigin

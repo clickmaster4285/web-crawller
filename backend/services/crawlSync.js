@@ -22,7 +22,8 @@ const {
   normalizeGtin,
   normalizeSku,
   slugFromUrl,
-  nameTokens
+  nameTokens,
+  nameTrigrams
 } = require('../utils/matcher');
 
 /** Mongo bulkWrite/insertMany batch size (architecture §10 — never one giant
@@ -113,9 +114,13 @@ async function syncNewModel({
       gtin: gtin || undefined,
       sku: sku || undefined,
       slug: slug || undefined,
-      // Fuzzy inverted index vocabulary (architecture §4.2) — refreshed with
-      // the name so a rename re-indexes the product.
+      // Fuzzy inverted-index vocabulary (architecture §4.2) — refreshed with
+      // the name so a rename re-indexes the product. `tokens` is the token
+      // inverted index; `trigrams` is the character-trigram recall tier that
+      // catches near-duplicate names sharing no tokens ("Nike Air" vs
+      // "NikeAri").
       tokens: nameTokens(name),
+      trigrams: nameTrigrams(name),
     };
   });
 
@@ -124,6 +129,7 @@ async function syncNewModel({
   const keyByOpIndex = new Map(); // bulkWrite op index -> identityKey
   const eventSeeds = []; // {type, identityKey, name, url, old, new, existing?}
   const seenKeys = new Set();
+  let renamedCount = 0;
 
   for (const c of crawled) {
     seenKeys.add(c.identityKey);
@@ -154,6 +160,7 @@ async function syncNewModel({
               ...(c.sku ? { sku: c.sku } : {}),
               ...(c.slug ? { slug: c.slug } : {}),
               tokens: c.tokens,
+              trigrams: c.trigrams,
               firstSeenAt: now,
               priceHistory: point ? [point] : [],
               // Phase B resume state from the run that first saw this product.
@@ -195,6 +202,8 @@ async function syncNewModel({
     if (nameChanged) {
       set.name = c.name;
       set.tokens = c.tokens; // rename → re-index the fuzzy vocabulary
+      set.trigrams = c.trigrams; // …and the trigram recall vocabulary
+      renamedCount++;
     }
     if (brandChanged) set.brand = c.brand;
     // Phase B: refresh the durable resume state whenever this run touched the
@@ -378,6 +387,7 @@ async function syncNewModel({
     removedCount: removedKeys.length,
     priceChangedCount,
     stockChangedCount,
+    renamedCount,
     snapshotId: snapshot._id,
   };
 }

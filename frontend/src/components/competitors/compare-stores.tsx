@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { BadgePercent, GitCompareArrows, Loader2 } from "lucide-react";
 
 import { PaginationBar } from "@/components/common/pagination";
-import { usePagination } from "@/hooks/usePagination";
-
-import { CrawlDiffTile } from "@/components/cards/crawl-diff-tile";
 import { PriceDelta } from "@/components/common/price-delta";
 import { ProductCell } from "@/components/common/product-cell";
+import { CrawlDiffTile } from "@/components/cards/crawl-diff-tile";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -17,9 +17,21 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { SavedCrawl, SavedCrawlProduct } from "@/api";
-import { compareStoresAsync, type StoreComparison } from "@/utils/compare";
+import { queryKeys } from "@/api";
+import {
+  getMatchesForCompetitor,
+  type CompetitorMatches,
+  type MatchSideList,
+} from "@/api/matching";
+import { normalizeOrigin } from "@/utils/crawls";
 import { formatPrice } from "@/utils/format";
+
+const PAGE_SIZE = 25;
+
+/** Formats a price that may be missing (server rows can carry `null`). */
+function formatMaybePrice(price: number | null): string {
+  return price != null && price > 0 ? formatPrice(price) : "—";
+}
 
 /** Which store sells a matched product cheaper — or "same price". */
 function CheapestBadge({
@@ -28,12 +40,12 @@ function CheapestBadge({
   labelA,
   labelB,
 }: {
-  a: number;
-  b: number;
+  a: number | null;
+  b: number | null;
   labelA: string;
   labelB: string;
 }) {
-  const comparable = a > 0 && b > 0;
+  const comparable = a != null && b != null && a > 0 && b > 0;
   if (comparable && a !== b) {
     const cheaper = a < b ? labelA : labelB;
     return (
@@ -61,17 +73,42 @@ function EmptyTab({ label }: { label: string }) {
   );
 }
 
-/** Product + price table used by the "Only A" / "Only B" tabs. */
+/** The match tier a row was paired by, with its confidence as a tooltip. */
+function MethodBadge({
+  method,
+  confidence,
+}: {
+  method: string;
+  confidence: number;
+}) {
+  const fuzzy = method === "fuzzy";
+  return (
+    <span
+      className="mt-1 inline-flex items-center rounded-md border border-border bg-muted/60 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground"
+      title={
+        fuzzy
+          ? `Matched by name similarity (${confidence}%)`
+          : `Matched by ${method} (${confidence}%)`
+      }
+    >
+      {fuzzy ? "≈ fuzzy" : method}
+    </span>
+  );
+}
+
+/** Server-paginated "Only A" / "Only B" tab. */
 function ProductsTab({
-  products,
+  list,
+  page,
+  onPageChange,
   emptyLabel,
 }: {
-  products: SavedCrawlProduct[];
+  list: MatchSideList;
+  page: number;
+  onPageChange: (page: number) => void;
   emptyLabel: string;
 }) {
-  const { page, setPage, pageSize, setPageSize, totalPages, total, pageItems } =
-    usePagination(products, 25);
-  if (products.length === 0) {
+  if (list.total === 0) {
     return <EmptyTab label={emptyLabel} />;
   }
   return (
@@ -84,13 +121,13 @@ function ProductsTab({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {pageItems.map((p) => (
-            <TableRow key={p.url}>
+          {list.rows.map((p) => (
+            <TableRow key={p.productId}>
               <TableCell className="max-w-0 w-full">
                 <ProductCell name={p.name} url={p.url} />
               </TableCell>
               <TableCell className="numeric text-right">
-                {formatPrice(p.price)}
+                {formatMaybePrice(p.price)}
               </TableCell>
             </TableRow>
           ))}
@@ -98,166 +135,142 @@ function ProductsTab({
       </Table>
       <PaginationBar
         page={page}
-        totalPages={totalPages}
-        total={total}
-        pageSize={pageSize}
-        onPageChange={setPage}
-        onPageSizeChange={setPageSize}
+        totalPages={Math.max(1, Math.ceil(list.total / PAGE_SIZE))}
+        total={list.total}
+        pageSize={PAGE_SIZE}
+        onPageChange={onPageChange}
       />
     </>
   );
 }
 
+type CompareTab = "matches" | "onlyA" | "onlyB";
+
 /**
- * Catalogue comparison between a fixed pair of crawled stores — "your website"
- * as store A and one selected competitor as store B. Matching products (by
- * normalized name / URL slug) are shown side by side with price differences,
- * plus products found in only one of the two stores.
- *
- * Fuzzy matching and its similarity floor are controlled by the parent so a
- * single toggle applies to every competitor at once.
+ * Catalogue comparison between your website and one competitor — served by
+ * the indexed matcher (`GET /api/match`), so the browser NEVER downloads the
+ * two full catalogues: matched rows and the only-A / only-B lists are
+ * paginated server-side (~25 rows per page). Matches are persisted by the
+ * post-crawl pipeline (GTIN > SKU > URL slug > name similarity) and read
+ * with zero recomputation.
  */
 export function ComparePanel({
-  storeA,
-  storeB,
+  competitorOrigin,
   labelA,
   labelB,
-  fuzzy,
-  threshold,
 }: {
-  storeA: SavedCrawl;
-  storeB: SavedCrawl;
+  competitorOrigin: string;
   labelA: string;
   labelB: string;
-  fuzzy: boolean;
-  threshold: number;
 }) {
-  // Cheap fingerprint of everything that affects the result. The page's 30s
-  // refetch hands back fresh object identities with *identical* data, so the
-  // effect keys on this fingerprint instead of the objects — otherwise the
-  // whole comparison (tens of thousands of products) would recompute on every
-  // poll for data that didn't change.
-  const fingerprint = useMemo(
-    () =>
-      [
-        storeA.updatedAt,
-        storeA.products.length,
-        storeB.updatedAt,
-        storeB.products.length,
-        fuzzy,
-        threshold,
-      ].join("|"),
-    [storeA, storeB, fuzzy, threshold],
-  );
-  const fingerprintRef = useRef<string | null>(null);
-  const [comparison, setComparison] = useState<StoreComparison | null>(null);
-  const [computing, setComputing] = useState(true);
+  const competitorKey = normalizeOrigin(competitorOrigin);
+  // Each tab keeps its own page, so paging through Matches and switching to
+  // Only-A doesn't lose your place.
+  const [tab, setTab] = useState<CompareTab>("matches");
+  const [pages, setPages] = useState<Record<CompareTab, number>>({
+    matches: 1,
+    onlyA: 1,
+    onlyB: 1,
+  });
+  const page = pages[tab];
+  const setPage = (next: number) =>
+    setPages((prev) => ({ ...prev, [tab]: Math.max(1, next) }));
 
-  useEffect(() => {
-    // Same snapshots as last time (e.g. the 30s refetch found nothing new) —
-    // keep the existing result instead of recomputing the comparison. The
-    // fingerprint is only recorded *after* a run completes, so a cancelled
-    // invocation (e.g. a double-mount) is always retried by the next one
-    // instead of being skipped.
-    if (fingerprintRef.current === fingerprint) return;
-    let cancelled = false;
-    setComparison(null);
-    setComputing(true);
-    // Async + chunked: the fuzzy pass yields to the event loop between
-    // slices, so large catalogues never block the main thread (no "Page
-    // Unresponsive" while this runs).
-    void compareStoresAsync(storeA.products, storeB.products, {
-      fuzzy,
-      fuzzyThreshold: threshold,
-    })
-      .then((result) => {
-        if (cancelled) return;
-        setComparison(result);
-        fingerprintRef.current = fingerprint;
-      })
-      .finally(() => {
-        if (!cancelled) setComputing(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [fingerprint, storeA, storeB, fuzzy, threshold]);
+  const query = useQuery({
+    queryKey: [...queryKeys.competitorMatches, competitorKey, tab, page],
+    queryFn: () =>
+      getMatchesForCompetitor(competitorOrigin, { page, limit: PAGE_SIZE }),
+    // Matches are recomputed by the post-crawl pipeline; invalidateCrawlData /
+    // invalidateMatchingData (query-keys.ts) refresh them after a crawl or a
+    // "your website" change, so a long-lived page doesn't show stale rows.
+    staleTime: 60_000,
+  });
+  const data: CompetitorMatches | null = query.data?.data ?? null;
 
-  // Hooks must be unconditional — derive paginated rows from a memoised list
-  // so the computing guard below can early-return safely.
-  const matched = useMemo(
-    () =>
-      comparison
-        ? [...comparison.matched].sort(
-            (x, y) => Math.abs(y.priceDiff) - Math.abs(x.priceDiff),
-          )
-        : [],
-    [comparison],
-  );
-  const matchedPager = usePagination(matched, 25);
-
-  if (computing || !comparison) {
+  if (query.isError && !data) {
     return (
-      <div className="flex items-center gap-3 border border-dashed border-border bg-muted/30 p-8 text-sm text-muted-foreground">
-        <Loader2 className="size-4 shrink-0 animate-spin" />
-        Comparing {storeA.products.length.toLocaleString()} vs{" "}
-        {storeB.products.length.toLocaleString()} products…
+      <div className="flex flex-wrap items-center justify-between gap-3 border border-dashed border-destructive/40 bg-destructive/5 p-6 text-sm text-muted-foreground">
+        <p>Couldn't load the comparison for {labelB}.</p>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void query.refetch()}
+        >
+          Retry
+        </Button>
       </div>
     );
   }
+  if (query.isLoading && !data) {
+    return (
+      <div className="flex items-center gap-3 border border-dashed border-border bg-muted/30 p-8 text-sm text-muted-foreground">
+        <Loader2 className="size-4 shrink-0 animate-spin" />
+        Loading the comparison…
+      </div>
+    );
+  }
+  if (!data) {
+    return (
+      <EmptyTab label="No matching data for this pair yet — crawl both stores and the matcher will pair them after each crawl." />
+    );
+  }
 
-  const onlyA = comparison.onlyA;
-  const onlyB = comparison.onlyB;
-  const fuzzyCount = matched.filter((m) => m.fuzzy).length;
+  const matched = data.rows;
+  const activeList =
+    tab === "matches"
+      ? null
+      : tab === "onlyA"
+        ? data.onlyMine
+        : data.onlyTheirs;
+  const fuzzyCount = matched.filter((m) => m.method === "fuzzy").length;
 
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <CrawlDiffTile
           tone="neutral"
-          value={String(comparison.matched.length)}
+          value={String(data.total)}
           label="in both stores"
         />
         <CrawlDiffTile
           tone="success"
-          value={String(onlyA.length)}
+          value={String(data.onlyMine.total)}
           label={`only in ${labelA}`}
         />
         <CrawlDiffTile
           tone="destructive"
-          value={String(onlyB.length)}
+          value={String(data.onlyTheirs.total)}
           label={`only in ${labelB}`}
         />
         <CrawlDiffTile
           tone="warning"
-          value={String(comparison.priceChangedCount)}
+          value={String(data.priceDifferCount)}
           label="price differs"
         />
       </div>
 
-      {comparison.fuzzySkipped ? (
-        <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
-          Fuzzy matching was stopped partway — the catalogues are too large to
-          compare in the browser. Exact matches (identical name / URL slug) and
-          the fuzzy matches found so far are shown.
-        </p>
-      ) : null}
-
-      {fuzzy && fuzzyCount > 0 ? (
+      {fuzzyCount > 0 ? (
         <p className="text-xs text-muted-foreground">
-          ≈ {fuzzyCount} of the matches are fuzzy — similar names, not
-          identical. Hover the “≈ fuzzy” tag to see the similarity score.
+          ≈ {fuzzyCount} of the matches on this page are fuzzy — similar names,
+          not identical. Hover the “≈ fuzzy” tag to see the similarity score.
         </p>
-      ) : null}
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Matches are computed server-side (GTIN &gt; SKU &gt; URL slug &gt;
+          name similarity) and refreshed after every crawl.
+        </p>
+      )}
 
-      <Tabs defaultValue="matches">
+      <Tabs value={tab} onValueChange={(v) => setTab(v as CompareTab)}>
         <TabsList className="h-auto flex-wrap">
-          <TabsTrigger value="matches">Matches ({matched.length})</TabsTrigger>
+          <TabsTrigger value="matches">
+            Matches ({data.total.toLocaleString()})
+          </TabsTrigger>
           <TabsTrigger value="onlyA">
-            Only {labelA} ({onlyA.length})
+            Only {labelA} ({data.onlyMine.total.toLocaleString()})
           </TabsTrigger>
           <TabsTrigger value="onlyB">
-            Only {labelB} ({onlyB.length})
+            Only {labelB} ({data.onlyTheirs.total.toLocaleString()})
           </TabsTrigger>
         </TabsList>
 
@@ -265,9 +278,9 @@ export function ComparePanel({
           {matched.length === 0 ? (
             <EmptyTab
               label={
-                fuzzy
-                  ? "No products matched between these stores. Try lowering the similarity threshold."
-                  : "No products matched between these stores (matching is by exact name or URL slug). Try enabling fuzzy matching."
+                data.total === 0
+                  ? "No products matched between these stores yet — crawl both stores so the matcher can pair them."
+                  : "No more matches to show — you're past the last page."
               }
             />
           ) : (
@@ -283,30 +296,25 @@ export function ComparePanel({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {matchedPager.pageItems.map((m) => {
-                    const comparable = m.a.price > 0 && m.b.price > 0;
-                    const aCheaper = comparable && m.a.price < m.b.price;
-                    const bCheaper = comparable && m.b.price < m.a.price;
+                  {" "}
+                  {matched.map((m) => {
+                    const aPrice = m.mine.price ?? 0;
+                    const bPrice = m.theirs.price ?? 0;
+                    const comparable = aPrice > 0 && bPrice > 0;
+                    const aCheaper = comparable && aPrice < bPrice;
+                    const bCheaper = comparable && bPrice < aPrice;
                     return (
-                      <TableRow key={m.key}>
+                      <TableRow key={m.id}>
                         <TableCell className="max-w-0 w-full">
-                          <ProductCell name={m.a.name} url={m.a.url} />
-                          {m.fuzzy ? (
-                            <>
-                              <span
-                                className="mt-1 inline-flex items-center rounded-md border border-border bg-muted/60 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground"
-                                title={
-                                  m.similarity != null
-                                    ? `Matched by name similarity (${Math.round(m.similarity * 100)}%)`
-                                    : "Matched approximately"
-                                }
-                              >
-                                ≈ fuzzy
-                              </span>
-                              <span className="mt-1 block truncate text-xs text-muted-foreground">
-                                ≈ {m.b.name}
-                              </span>
-                            </>
+                          <ProductCell name={m.mine.name} url={m.mine.url} />
+                          <MethodBadge
+                            method={m.method}
+                            confidence={m.confidence}
+                          />
+                          {m.mine.name !== m.theirs.name ? (
+                            <span className="mt-1 block truncate text-xs text-muted-foreground">
+                              ≈ {m.theirs.name}
+                            </span>
                           ) : null}
                         </TableCell>
                         <TableCell className="numeric text-right">
@@ -317,7 +325,7 @@ export function ComparePanel({
                                 : "text-muted-foreground"
                             }
                           >
-                            {formatPrice(m.a.price)}
+                            {formatMaybePrice(aPrice)}
                           </span>
                         </TableCell>
                         <TableCell className="numeric text-right">
@@ -328,17 +336,17 @@ export function ComparePanel({
                                 : "text-muted-foreground"
                             }
                           >
-                            {formatPrice(m.b.price)}
+                            {formatMaybePrice(bPrice)}
                           </span>
                         </TableCell>
                         <TableCell className="text-right">
-                          <PriceDelta before={m.a.price} after={m.b.price} />
+                          <PriceDelta before={aPrice} after={bPrice} />
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end">
                             <CheapestBadge
-                              a={m.a.price}
-                              b={m.b.price}
+                              a={m.mine.price}
+                              b={m.theirs.price}
                               labelA={labelA}
                               labelB={labelB}
                             />
@@ -350,29 +358,36 @@ export function ComparePanel({
                 </TableBody>
               </Table>
               <PaginationBar
-                page={matchedPager.page}
-                totalPages={matchedPager.totalPages}
-                total={matchedPager.total}
-                pageSize={matchedPager.pageSize}
-                onPageChange={matchedPager.setPage}
-                onPageSizeChange={matchedPager.setPageSize}
+                page={page}
+                totalPages={Math.max(1, Math.ceil(data.total / PAGE_SIZE))}
+                total={data.total}
+                pageSize={PAGE_SIZE}
+                onPageChange={setPage}
               />
             </>
           )}
         </TabsContent>
 
         <TabsContent value="onlyA">
-          <ProductsTab
-            products={onlyA}
-            emptyLabel={`No products that only ${labelA} sells.`}
-          />
+          {activeList ? (
+            <ProductsTab
+              list={activeList}
+              page={page}
+              onPageChange={setPage}
+              emptyLabel={`No products that only ${labelA} sells.`}
+            />
+          ) : null}
         </TabsContent>
 
         <TabsContent value="onlyB">
-          <ProductsTab
-            products={onlyB}
-            emptyLabel={`No products that only ${labelB} sells.`}
-          />
+          {activeList ? (
+            <ProductsTab
+              list={activeList}
+              page={page}
+              onPageChange={setPage}
+              emptyLabel={`No products that only ${labelB} sells.`}
+            />
+          ) : null}
         </TabsContent>
       </Tabs>
     </div>

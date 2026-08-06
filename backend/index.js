@@ -8,7 +8,6 @@ const mongoose = require('mongoose');
 const { connectDatabase } = require('./config/database');
 const errorHandler = require('./middleware/errorHandler');
 const authRoutes = require('./routes/auth');
-const userRoutes = require('./routes/users');
 const dataRoutes = require('./routes/data');
 const jobRoutes = require('./routes/jobs');
 const matchRoutes = require('./routes/match');
@@ -49,7 +48,6 @@ app.get('/health', (req, res) => {
 
 // API Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/users', userRoutes);
 app.use('/api/data', dataRoutes);
 app.use('/api/crawl-jobs', jobRoutes);
 app.use('/api/match', matchRoutes);

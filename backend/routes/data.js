@@ -27,8 +27,7 @@ router.post("/alerts/read", auth, alertsController.markRead);
 router.post("/alerts/read-all", auth, alertsController.markAllRead);
 router.post("/alerts/dismiss", auth, alertsController.dismiss);
 
-// Saved crawl results (persisted from the TanStack server after a crawl).
-router.post("/crawl-results", crawlController.saveCrawlResult);
+// Saved crawl results (persisted by the worker's dual-write after a crawl).
 router.get("/crawl-results", crawlController.getCrawlResults);
 router.delete("/crawl-results", crawlController.deleteCrawlResultsByOrigin);
 router.delete("/crawl-results/:id", crawlController.deleteCrawlResult);

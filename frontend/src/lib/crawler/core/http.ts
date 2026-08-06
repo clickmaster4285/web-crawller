@@ -47,12 +47,30 @@ export interface RequestThrottle {
   reportRateLimited(retryAfterMs?: number): void;
 }
 
+/**
+ * Stored HTTP validators from the last successful fetch (Product.httpState) —
+ * sent as conditional headers so an unchanged page answers `304 Not Modified`
+ * instead of a full 200 + body (cheap revalidation, architecture §3.1).
+ */
+export interface ConditionalRequest {
+  /** ETag from the last fetch — sent as `If-None-Match`. */
+  etag?: string | null;
+  /** Last-Modified ms (from the sitemap or the last response) — sent as `If-Modified-Since`. */
+  lastmod?: number | null;
+}
+
 export interface HttpOptions {
   delayMs?: number;
   maxRetries?: number;
   /** Per-request timeout (ms). Default 30s — a stalled connection can't hang the crawl. */
   timeoutMs?: number;
   userAgent?: string;
+  /**
+   * Stored validators for a conditional revalidation: when set, the request
+   * carries `If-None-Match` / `If-Modified-Since` and an unchanged resource
+   * answers `304` (returned as-is — the caller decides what to do with it).
+   */
+  conditional?: ConditionalRequest;
   /**
    * Adaptive per-host throttle (step 5). When set, replaces the static
    * `delayMs` sleep before each request and receives 429/success reports.
@@ -108,6 +126,16 @@ export async function fetchWithRetry(
   const maxRetries = options.maxRetries ?? 3;
   const timeoutMs = options.timeoutMs ?? 30_000;
   const headers = makeHeaders(options.userAgent);
+  // Conditional revalidation: an unchanged resource answers 304 (no body) —
+  // the cheapest possible "still the same" signal for resume state.
+  if (options.conditional?.etag) {
+    headers["if-none-match"] = options.conditional.etag;
+  }
+  if (options.conditional?.lastmod) {
+    headers["if-modified-since"] = new Date(
+      options.conditional.lastmod,
+    ).toUTCString();
+  }
 
   for (let attempt = 0; ; attempt++) {
     if (options.throttle) {

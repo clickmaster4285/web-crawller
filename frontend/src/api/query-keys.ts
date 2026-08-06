@@ -17,6 +17,10 @@ export const queryKeys = {
   myStore: ["my-store"] as const,
   savedCrawls: ["saved-crawls"] as const,
   savedCrawlMetas: ["saved-crawls-meta"] as const,
+  // Server-side persisted matches read by the /competitors ComparePanel
+  // (GET /api/match). Keyed queries nest under this prefix so invalidating
+  // it refreshes every competitor's comparison at once.
+  competitorMatches: ["competitor-matches"] as const,
   // Phase 5 store read path (Store/Product/Snapshot/Event). Keyed queries
   // nest under the "stores" prefix so invalidating it refreshes them all.
   stores: ["stores"] as const,
@@ -47,6 +51,9 @@ const crawlDataKeys = [
   // The Phase 5 store read path is derived from the same crawled data
   // (prefix match invalidates every /stores/:key query).
   queryKeys.stores,
+  // The /competitors comparisons read persisted ProductMatch rows written
+  // at ingest — a crawl may have added/removed/renamed products.
+  queryKeys.competitorMatches,
 ] as const;
 
 /** Queries derived from the matching layer (competitors / your store) only. */
@@ -56,6 +63,8 @@ const matchingDataKeys = [
   queryKeys.analytics,
   queryKeys.pricing,
   queryKeys.catalogue,
+  // Persisted match rows depend on "your website" — re-scope them on change.
+  queryKeys.competitorMatches,
 ] as const;
 
 /**
