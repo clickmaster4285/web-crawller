@@ -5,6 +5,8 @@ export interface SavedCrawlProduct {
   name: string;
   brand: string;
   price: number;
+  /** Native currency when the extractor detected one (null = unknown). */
+  currency?: string | null;
   available: boolean;
   url: string;
   /** Manufacturer SKU / product code (identity tier for matching). */

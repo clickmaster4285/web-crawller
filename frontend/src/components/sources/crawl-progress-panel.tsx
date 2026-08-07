@@ -294,6 +294,15 @@ export function CrawlProgressPanel({
         <Badge variant="secondary" className="font-normal">
           {job.params.proxy ? "residential proxy" : "direct"}
         </Badge>
+        {job.params.productUrlPattern ? (
+          <Badge
+            variant="secondary"
+            className="max-w-56 truncate font-mono font-normal"
+            title={`Product URL pattern: ${job.params.productUrlPattern}`}
+          >
+            pattern: {job.params.productUrlPattern}
+          </Badge>
+        ) : null}
       </div>
 
       {!paramsMatch ? (

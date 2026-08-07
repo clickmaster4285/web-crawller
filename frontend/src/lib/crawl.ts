@@ -66,6 +66,14 @@ export interface CrawlRunInput {
    * job responses only record the boolean for the UI badge.
    */
   proxy?: string;
+  /**
+   * Optional product-URL filter: a regex tested against every discovered URL;
+   * only matching URLs are crawled. For stores whose sitemap mixes real
+   * product URLs with blog/brand/category pages under the same path tree
+   * (e.g. activefitnessstore.com — product URLs end in an EAN/SKU, blog posts
+   * don't). Empty = crawl every discovered URL.
+   */
+  productUrlPattern?: string;
 }
 
 export interface CrawlRunResult {
@@ -83,6 +91,8 @@ export interface CrawlRunResult {
     name: string;
     brand: string;
     price: number;
+    /** Native currency when the extractor detected one (null = unknown). */
+    currency?: string | null;
     available: boolean;
     url: string;
     /** Manufacturer SKU / product code from the parse (for matching). */
@@ -193,6 +203,11 @@ export interface CrawlJobParams {
   useBrowser: boolean;
   /** True when the crawl was routed through a residential proxy. */
   proxy: boolean;
+  /**
+   * Product-URL filter regex (null = every discovered URL crawled). Shown on
+   * the live progress panel so you can verify which filter a run used.
+   */
+  productUrlPattern: string | null;
 }
 
 export type CrawlFrequency = "1h" | "6h" | "daily" | "weekly";
@@ -236,6 +251,8 @@ export interface ScheduleCrawlInput {
   useBrowser?: boolean;
   /** Tier 2 — residential proxy gateway URL (server-side only). */
   proxy?: string;
+  /** Optional product-URL filter regex (see CrawlRunInput.productUrlPattern). */
+  productUrlPattern?: string;
 }
 
 /** Live snapshot of a crawl job, returned by `getCrawlProgress`. */
@@ -329,6 +346,12 @@ function normalizeProxy(proxy: string | undefined): string | undefined {
   return trimmed;
 }
 
+/** Trims + caps the optional product-URL pattern (empty → undefined). */
+function normalizeUrlPattern(pattern: string | undefined): string | undefined {
+  const trimmed = pattern?.trim() || undefined;
+  return trimmed?.slice(0, 200) || undefined;
+}
+
 /** Light client-side validation (the backend clamps + re-validates). */
 function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
   const origin = input.origin.trim();
@@ -340,6 +363,7 @@ function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
     origin,
     type: input.type === "shallow" ? "shallow" : "deep",
     proxy: normalizeProxy(input.proxy),
+    productUrlPattern: normalizeUrlPattern(input.productUrlPattern),
   };
 }
 
@@ -388,7 +412,12 @@ function validateScheduleInput(input: ScheduleCrawlInput): ScheduleCrawlInput {
   if (!FREQUENCY_MS[input.frequency]) {
     throw new Error(`Unsupported frequency: ${String(input.frequency)}`);
   }
-  return { ...input, origin, proxy: normalizeProxy(input.proxy) };
+  return {
+    ...input,
+    origin,
+    proxy: normalizeProxy(input.proxy),
+    productUrlPattern: normalizeUrlPattern(input.productUrlPattern),
+  };
 }
 
 /**

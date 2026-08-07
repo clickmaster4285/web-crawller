@@ -121,9 +121,9 @@ collections. Heavy work happens at **ingest time**; reads are indexed lookups.
   identityKey: "gtin:0012345678905" | "sku:xyz-123" | "slug:blue-tshirt" | "url:<sha1>",
     // stable per-product key: first non-empty of gtin > sku > slug, else URL hash.
     // Used for BOTH change detection (same product over time) and matching.
-  name: "Blue T-Shirt", brand: "Example", category: "Apparel",
-  price: 19.99, compareAtPrice: 24.99, currency: "USD",
-  available: true, url: "https://…/blue-tshirt", image: "https://…",
+  name: "Blue T-Shirt", brand: "Example", category: "Apparel",    price: 19.99, compareAtPrice: 24.99, currency: "AED", // null = unknown
+    priceUsd: 5.44,  // converted at ingest (fxService) for cross-currency
+    available: true, url: "https://…/blue-tshirt", image: "https://…",
   gtin: "0012345678905", sku: "xyz-123", slug: "blue-tshirt",   // raw, for tiers
   firstSeenAt: ISODate, lastSeenAt: ISODate, updatedAt: ISODate, priceUpdatedAt: ISODate,
   priceHistory: [ { t: ISODate, price: 19.99, available: true }, … ],  // capped ~90
@@ -242,6 +242,26 @@ Index: `unique { identityKey: 1 }` + text index on `name` for market search.
 New URLs found by a shallow check are fetched immediately (only those pages),
 so the catalogue stays current without re-crawling everything.
 
+**2026-08 hardening:**
+
+- **Product-URL pattern filter** (`CrawlConfig.productUrlPattern`) — an
+  optional per-crawl regex applied to every discovered URL. For stores whose
+  sitemap mixes real products with blog/brand/category pages under the SAME
+  path tree (the leaf heuristic can't tell them apart), it keeps only
+  matching URLs (activefitnessstore: `/\d{4,}$/` keeps EAN/SKU-terminated
+  product URLs, cutting 10,456 → ~500). Invalid regex → warning finding, crawl
+  proceeds unfiltered.
+- **Auto browser-rendering re-crawl** — a deep crawl that ran with rendering
+  OFF, fetched ≥ 10 pages and extracted zero prices auto-enqueues one re-run
+  with `useBrowser: true` (plus a finding on the result). Guarded against
+  loops (the follow-up itself runs with rendering ON).
+- **Cross-currency via `priceUsd`** — the mapper carries the extracted
+  `priceCurrency` through to ingestion; `Product.currency` defaults to `null`
+  (unknown) instead of a silent "USD"; `fxService` fetches daily USD-base
+  rates (no key, cached in Mongo) and the ingest pipeline stores
+  `Product.priceUsd`. Matcher price gaps compare USD first, native only when
+  both sides share a currency.
+
 ### 3.3 Job queue & workers (the "multiple users crawling at once" problem)
 
 `CrawlJob` collection — a DB-backed queue, **no Redis needed at this scale**:
@@ -270,6 +290,13 @@ Index: `{ status: 1, scheduledAt: 1 }`.
 - **Live progress UI:** workers update `CrawlJob.progress`; the Sources page
   polls it (replacing today's in-memory `CrawlJob` server functions with a
   `GET /api/crawl-jobs/:id` read of the same counters — UI unchanged).
+- **Worker memory is bounded (2026-08).** A 20–25 min deep crawl churns GBs of
+  HTML through V8, which grows to its high-water mark and never returns memory
+  to the OS — 3 workers × 6 concurrent requests drove the dev machine to 97%
+  RAM and swapping. Workers now spawn with `--expose-gc --max-old-space-size`
+  (`PARITY_WORKER_MAX_OLD_SPACE_MB`, default 3072, in `.env`) and force a GC
+  every 1000 products + after each job, so RSS comes back down instead of
+  ratcheting up. `npm run worker` carries the same flags.
 
 ### 3.4 Where SQLite goes
 
@@ -326,6 +353,12 @@ For the residual unmatched set:
   client-side `compareStoresAsync` remains only as a fallback for tiny sets.
 - One match per (your product, competitor store): a product sold by 5
   competitors appears in 5 `ProductMatch` rows.
+- **Cross-currency (2026-08):** price gaps are computed in `priceUsd` when
+  both sides have it (rates normalized at ingest); native prices are used only
+  when both stores share a currency, and cross-currency rows without a
+  conversion read as "different currencies" — raw AED vs PKR numbers are
+  never compared as if equal. `MarketProduct` aggregates should be computed
+  in the same USD basis.
 
 ### 4.4 Market analytics aggregate at ingest
 
@@ -402,7 +435,11 @@ When a crawl finishes, the post-crawl pipeline runs in this order:
   exposed yet — `MarketProduct` aggregates aren't written at ingest, so it
   would return empty data; build the aggregate first, then add the read.
 - The existing `?meta=1` crawl-results summaries already proved the pattern:
-  product-count-only responses (~10 KB instead of 10 MB).
+  product-count-only responses (~10 KB instead of 10 MB). They now also carry
+  `type`/`collections`/`discovery` (sitemap candidate URL lists stripped —
+  they were the catalogue again) plus a `?limit=` param; the Sources page runs
+  entirely on these + one targeted prev-snapshot fetch instead of polling full
+  product arrays every 30s.
 - TanStack Query `staleTime` per endpoint; `MATCHER_STALE_TIME` for
   matcher-backed endpoints (already in `src/api/`).
 - List endpoints use cursor pagination; aggregations are precomputed at ingest
@@ -528,7 +565,12 @@ preserved because the read endpoints keep their shapes.
   unmatched rates per store.
 - **Sitemap-less / bot-protected stores:** stay on the expensive tiers; budget
   the first 100 stores toward API/sitemap-friendly targets, and use proxies +
-  Playwright only where required.
+  Playwright only where required. **UA lesson (2026-08):** a browser-like
+  Chrome UA got HTTP 200s on stores that 429'd `ParityBot/1.0` on every request
+  (curl-verified); the change was fully implemented and then **reverted by
+  decision** — ParityBot stays, so 429-blocked stores (prosportsae, athletix)
+  rely on the Tier 2 proxy + slowed concurrency, and blocked runs stack empty
+  snapshots worth clearing.
 - **Long snapshot history:** products keep a capped `priceHistory` (~90
   points); anything older is only recoverable from `ProductEvent` (TTL 90
   days) — if long-range trends are a product requirement, add a daily rollup

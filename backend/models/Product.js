@@ -55,7 +55,15 @@ const productSchema = new mongoose.Schema(
     category: { type: String, trim: true, default: '' },
     price: Number,
     compareAtPrice: Number,
-    currency: { type: String, trim: true, uppercase: true, default: 'USD' },
+    // Native currency when the extractor detected one (JSON-LD offer
+    // currency, OG price:currency, symbol guess). null = genuinely unknown —
+    // never a silent 'USD' default (that was the Aug 2026 finding on
+    // GCC stores).
+    currency: { type: String, trim: true, uppercase: true, default: null },
+    // Price converted to USD at ingest (fxService) for cross-currency
+    // comparison — null when the currency/rate is unknown (native price still
+    // stored + displayed).
+    priceUsd: Number,
     available: { type: Boolean, default: true },
     url: { type: String, trim: true, default: '' },
     image: { type: String, trim: true, default: '' },

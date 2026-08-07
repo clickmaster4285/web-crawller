@@ -24,6 +24,9 @@ const productSchema = new mongoose.Schema(
     name: String,
     brand: String,
     price: Number,
+    // Native currency captured by the extractor (null = unknown — never a
+    // silent 'USD' default; the normalized Product model does the same).
+    currency: { type: String, default: null },
     available: Boolean,
     url: String,
     // Identity fields captured by the crawler — the matching layer matches

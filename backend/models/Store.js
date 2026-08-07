@@ -51,7 +51,11 @@ const crawlParamsSchema = new mongoose.Schema(
     // are rendered per-page (core/http.ts needsBrowserRender). false = http-only.
     useBrowser: { type: Boolean, default: true },
     proxy: { type: Boolean, default: false },
-    proxyUrl: { type: String, default: null }
+    proxyUrl: { type: String, default: null },
+    // Optional product-URL filter regex — MUST live in the schema or Mongoose
+    // strict mode silently drops it from scheduled-crawl params (the UA
+    // lesson from Aug 2026: same trap, same fix).
+    productUrlPattern: { type: String, default: null }
   },
   { _id: false }
 );

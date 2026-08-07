@@ -71,6 +71,110 @@ flow.
 
 ---
 
+## 🔧 Latest session — crawl performance, memory & the DB (Aug 2026)
+
+### Worker memory fix (the 97% RAM / lag)
+- A deep crawl runs 20–25 min fetching + parsing 100 KB–2 MB pages; V8's heap
+  grows to its high-water mark and **never returns memory to the OS** — 3
+  workers × 6 concurrent requests pushed the machine to 97% RAM and swapping
+  (Task Manager showed one Node process at 6.5 GB).
+- Fix: workers spawn with `--expose-gc --max-old-space-size` (knob
+  `PARITY_WORKER_MAX_OLD_SPACE_MB` in `.env`, default 3072) and force a full GC
+  **every 1000 products** and **after every job**. `npm run worker` and
+  `.env.example` carry the same flags. ⚠️ Restart the backend to apply — only
+  newly spawned workers get the cap.
+
+### Sources page stopped downloading catalogues
+- The page you watch while crawling polled the *full* crawl-results endpoint
+  (every store's complete product arrays) every 30 s. It now polls lightweight
+  `?meta=1` summaries — the backend projection gained
+  `type`/`collections`/`discovery` with the sitemap candidates' **URL lists
+  stripped** (they were the catalogue again), plus a `?limit=` param for the
+  one targeted prev-snapshot fetch when a crawl finishes. `/crawls` +
+  `/pricing` still poll full catalogues — migrate them next if they lag.
+
+### UA experiment → reverted (decision recorded)
+- A browser-like Chrome UA got HTTP 200s where `ParityBot/1.0` got 429s on
+  prosportsae.com / athletix.ae (curl-verified). It was implemented end-to-end
+  (engine → queue → schedule → UI field) and then **fully reverted by
+  decision** — ParityBot stays, and blocked stores rely on the Tier 2
+  residential proxy + slower concurrency instead. Don't re-do this without a
+  fresh decision.
+
+### Live DB state (crawler-new, Aug 2026)
+
+| Collection | Docs | Storage | Notes |
+|---|---|---|---|
+| `products` | 16,778 | 8.10 MB (+ 29.9 MB indexes) | The normalized catalogue — source of truth; ~470 B/product |
+| `productevents` | 16,851 | 2.60 MB | All `added` so far (first-crawl effect) |
+| `crawljobs` | 6 | 3.00 MB (957 kB avg!) | Finished jobs embed full product arrays — duplicated data |
+| `crawlresults` | 4 | 1.98 MB (1.03 MB avg) | Legacy full-catalogue snapshots — D1 compat layer |
+| `snapshots` | 4 | 94 kB | New-model history |
+| `stores` | 4 | 33 kB | Scheduler input |
+| `users` | 1 | 37 kB | Demo user |
+| `mystores` / `competitors` / `productmatches` / `alertstates` | 0 | — | **Pipeline idle — set "your website"** |
+
+- Two stores (prosportsae, athletix) are **HTTP 429-blocked** by their WAF
+  (ParityBot UA) — that's the "0 products · 9 requests" runs, not a crawler
+  bug. Miraclefitness's "1 / 1,461 products" was **JS-rendered pages with
+  browser rendering off** ("http only" runs) — re-run with rendering on.
+- Nothing needs clearing for size (~16 MB data + ~32 MB indexes for 17k
+  products; 100 stores ≈ ~500 MB).
+
+---
+
+## 💱 Cross-currency + JS-rendered stores hardening (Aug 2026)
+
+**The diagnosis (activefitnessstore.com, verified live):**
+
+- Its product pages are **client-rendered Next.js** — the HTML shell (32 KB)
+  has the title + og tags but **no price, no JSON-LD, no OG price, no
+  `__NEXT_DATA__`** (the og:type is even `"website"`, not `"product"`). The
+  price is fetched by JS at runtime. Crawling it "http only" stored **all
+  10,456 products with price 0 / `available: false`** — same disease as
+  miraclefitnessuae.
+- Worse, only **504 of the 10,456 stored rows** are real products (URL ends in
+  an EAN/SKU); the other ~9,950 are **blog posts, brand pages and category
+  pages** that the sitemap-leaf heuristic accepted as products.
+- And the currency was being **silently defaulted to "USD"** by the
+  extractor fallbacks even for GCC stores (AED/OMR) — the mapper even
+  discarded the real `priceCurrency` the extractors captured.
+
+**The fixes shipped:**
+
+1. **Product URL pattern filter** — `productUrlPattern` on a crawl (Sources →
+   Configuration field): a regex tested against every discovered URL; only
+   matches are crawled. For activefitnessstore: `/\d{4,}$/` keeps the
+   EAN/SKU-terminated product URLs and drops the blog/brand/category pages
+   (verified against 8 real URLs). Plumbed end-to-end: `CrawlConfig` →
+   `CrawlRunInput` → job params → worker → engine, **including scheduled
+   crawls** (Store schema got the field — the Mongoose-strict-mode lesson
+   from the UA revert).
+2. **Auto browser-rendering re-crawl** — when a deep crawl ran with rendering
+   OFF, fetched ≥ 10 pages and extracted **zero prices**, the worker now
+   appends a finding ("looks JS-rendered") and **auto-enqueues one re-crawl
+   with rendering ON** (useBrowser:true → can't loop).
+3. **Honest currencies + USD normalization (`priceUsd`)** — the mapper now
+   carries the extracted `priceCurrency` through to ingestion;
+   `Product.currency` no longer defaults to "USD" (null = unknown); a new
+   **`fxService`** fetches daily USD-base rates (open.er-api.com, no key,
+   cached in Mongo + in-process, graceful fallback to stale) and the ingest
+   pipeline stores **`Product.priceUsd`** for cross-currency comparison.
+4. **Currency-aware comparison** — `GET /api/match` rows now carry
+   `currency` + `priceUsd`; the ComparePanel compares **USD when available,
+   native only when both stores share a currency, else "different
+   currencies"**; the "price differs" tile uses the same rule (AED 100 vs
+   PKR 100 no longer reads as equal). Prices display with their native
+   currency code (e.g. `440.45 AED`).
+
+**To re-crawl activefitnessstore correctly:** restart the backend (the running
+workers are on the old code), then on Sources paste `\d{4,}$` into the new
+**Product URL pattern** field (keep **Auto-detect JS-rendered pages** ON) and
+crawl. Expect ~500 real product URLs with real AED prices instead of 10,456
+zeros.
+
+---
+
 ## 📍 Where we are in the plan
 
 Per `plan.md` §9 and `architecture.md`: everything through **indexed matching
@@ -179,12 +283,25 @@ code") — the granular version of the phase table above.
      a daily rollup collection if that becomes a product requirement (§10).
    - Identity collisions / sitemap-less stores / queue correctness — listed
      risks, mostly handled in code.
+5. **Set "your website"** (`/competitors`) — `mystores`, `competitors`,
+   `productmatches` and `alertstates` are all **empty** in the live DB; the
+   whole compare/match/alerts pipeline is idle until a my-store origin is
+   chosen and crawled. Highest-value next step.
+6. **Prune terminal `crawljobs`** — finished jobs embed the full product array
+   in `result` (957 kB avg doc; urbanfitness alone holds 5,082 products) — the
+   same data lives in `products`/`crawlresults`. A small cleanup script that
+   strips `result` from terminal jobs (keeping the last hour) is cosmetic at
+   current size but frees the biggest single duplicated chunk.
+7. **Clear the 0-product snapshots** stacked by the blocked stores
+   (prosportsae · 2, athletix · 2) via "Clear history" on `/crawls` — they
+   were HTTP-429'd by the stores' WAF (ParityBot UA), not crawl bugs.
 
 **In short:** the entire data plane (save → fetch → match → change detection
 → alerts) is shipped and verified. What remains is the **production/cutover
 layer**: auth on the data API, the new read endpoints + flipping the UI off
 `CrawlResult`, observability, containerized workers, CI, and finally dropping
-the legacy collection — i.e. Phase 5 + the D1 endgame.
+the legacy collection — i.e. Phase 5 + the D1 endgame — plus unblocking the
+comparison pipeline by setting "your website" on `/competitors`.
 
 ---
 

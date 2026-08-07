@@ -58,6 +58,7 @@ async function enqueueJob({ origin, type = 'deep', params = {}, scheduledAt = ne
       proxy: false,
       proxyUrl: null,
       fullCrawl: type === 'deep',
+      productUrlPattern: null,
       ...params
     }
   });
@@ -323,7 +324,8 @@ function publicJob(job, options = {}) {
       storeSnapshots: p.storeSnapshots !== false,
       useBrowser: !!p.useBrowser,
       // proxy URL never leaves the server — boolean only.
-      proxy: !!p.proxy
+      proxy: !!p.proxy,
+      productUrlPattern: p.productUrlPattern ?? null
     },
     total: pr.total ?? 0,
     processed: pr.processed ?? 0,

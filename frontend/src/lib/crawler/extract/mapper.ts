@@ -58,6 +58,10 @@ export function toCrawledProduct(
     tags: [],
     image: extracted.image ?? null,
     price: extracted.price,
+    // The extractor chain captures the real currency (JSON-LD offer
+    // currency, OG price:currency, or a symbol guess) — carry it through so
+    // the ingest pipeline can stop silently defaulting products to USD.
+    priceCurrency: extracted.priceCurrency,
     compareAtPrice: extracted.compareAtPrice ?? null,
     available: extracted.availability === "in_stock",
     variants: [variant],

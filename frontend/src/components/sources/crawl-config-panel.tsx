@@ -35,6 +35,8 @@ export function CrawlConfigPanel({
   onUseBrowserChange,
   proxy,
   onProxyChange,
+  productUrlPattern,
+  onProductUrlPatternChange,
 }: {
   maxPagesMode: MaxPagesMode;
   onMaxPagesModeChange: (mode: MaxPagesMode) => void;
@@ -54,6 +56,9 @@ export function CrawlConfigPanel({
   onUseBrowserChange: (value: boolean) => void;
   proxy: string;
   onProxyChange: (value: string) => void;
+  /** Optional product-URL filter regex (empty = every discovered URL). */
+  productUrlPattern: string;
+  onProductUrlPatternChange: (value: string) => void;
 }) {
   return (
     <section>
@@ -259,6 +264,26 @@ export function CrawlConfigPanel({
             (Oxylabs / Bright Data / Smartproxy) to fix IP blocks on stores that
             403 this machine. Credentials stay in your browser; the server never
             stores or logs them.
+          </p>
+        </div>
+
+        <div className="lg:col-span-2">
+          <Label htmlFor="url-pattern">Product URL pattern (optional)</Label>
+          <Input
+            id="url-pattern"
+            value={productUrlPattern}
+            onChange={(e) => onProductUrlPatternChange(e.target.value)}
+            placeholder={"/\\d{4,}$/"}
+            className="mt-1.5 font-mono text-xs"
+            spellCheck={false}
+          />
+          <p className="mt-1 text-xs text-muted-foreground">
+            A regex tested against every discovered URL — only matching URLs are
+            crawled. Use it when a store's sitemap mixes real products with blog
+            or category pages under the same path: e.g. activefitnessstore.com
+            product URLs end in an EAN/SKU <code>…-bs-4067898979432</code>, so{" "}
+            <code>{"/\\d{4,}$/"}</code> keeps only products. Leave empty to
+            crawl every discovered URL.
           </p>
         </div>
       </div>

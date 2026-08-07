@@ -64,6 +64,12 @@ function normalizeCrawlInput(body = {}) {
   if (maxPages != null && !Number.isFinite(maxPages)) {
     throw httpError(400, 'maxPages must be a positive number');
   }
+  // Optional product-URL filter regex (trimmed, capped — the engine ignores
+  // invalid patterns with a warning finding, so no validation error here).
+  const productUrlPattern =
+    body.productUrlPattern != null && String(body.productUrlPattern).trim()
+      ? String(body.productUrlPattern).trim().slice(0, 200)
+      : null;
   // Job type: 'shallow' (sitemap-only check) or 'deep' (full crawl) — anything
   // that isn't explicitly shallow is a deep crawl (matches CrawlJob's default).
   const type = body.type === 'shallow' ? 'shallow' : 'deep';
@@ -84,6 +90,7 @@ function normalizeCrawlInput(body = {}) {
     useBrowser: body.useBrowser !== false,
     proxy: proxy.length > 0,
     proxyUrl: proxy || null,
+    productUrlPattern,
     // A shallow check fetches ONLY new products — a partial catalogue must
     // never count as authoritative, or the ingest removal diff would wipe the
     // rest of the store (the worker's removal guard reads this flag).
@@ -144,7 +151,8 @@ function publicSchedule(store) {
       productOnly: p.productOnly !== false,
       storeSnapshots: p.storeSnapshots !== false,
       useBrowser: !!p.useBrowser,
-      proxy: !!p.proxy
+      proxy: !!p.proxy,
+      productUrlPattern: p.productUrlPattern ?? null
     },
     lastRunAt,
     nextRunAt: freqMs ? (lastRunAt ?? now) + freqMs : null,
@@ -196,7 +204,12 @@ const upsertSchedule = async (req, res) => {
               // Auto-detect JS rendering (default) — see normalizeCrawlInput.
               useBrowser: req.body.useBrowser !== false,
               proxy: proxy.length > 0,
-              proxyUrl: proxy || null
+              proxyUrl: proxy || null,
+              productUrlPattern:
+                req.body.productUrlPattern != null &&
+                String(req.body.productUrlPattern).trim()
+                  ? String(req.body.productUrlPattern).trim().slice(0, 200)
+                  : null
             }
           }
         },

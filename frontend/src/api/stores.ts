@@ -43,7 +43,10 @@ export interface StoreProduct {
   category: string;
   price: number | null;
   compareAtPrice: number | null;
-  currency: string;
+  /** ISO 4217 native currency (null = not detected — no silent USD). */
+  currency: string | null;
+  /** Price converted to USD at ingest; null when the rate/currency was unknown. */
+  priceUsd?: number | null;
   available: boolean;
   url: string;
   image: string;

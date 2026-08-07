@@ -112,6 +112,18 @@ export interface CrawlConfig {
    */
   useBrowser?: boolean;
   /**
+   * Optional per-crawl product-URL filter: a regex tested against every
+   * discovered URL. When set, only matching URLs are kept — the escape hatch
+   * for stores whose sitemap mixes real product URLs with blog/brand/
+   * category pages under the SAME path tree (the flat-taxonomy heuristic
+   * can't tell a blog post from a product there). Example —
+   * activefitnessstore.com product URLs end in an EAN/SKU
+   * (`…-bs-4067898979432`, `…-tf-1575`) while blog posts end in a word
+   * (`…/10-ramadan-health-and-fitness-tips`): use `/\d{4,}$/`. An invalid
+   * regex is ignored with a warning finding (crawl proceeds unfiltered).
+   */
+  productUrlPattern?: string;
+  /**
    * Tier 2 — rotating residential proxy (opt-in per crawl). A single HTTP(S)
    * proxy gateway URL (e.g. Oxylabs
    * `http://user-USER:pass@pr.oxylabs.io:7777`, Bright Data
@@ -189,6 +201,10 @@ export interface CrawledProduct {
   image: string | null;
   /** Lowest variant price; 0 when no priced variants exist. */
   price: number;
+  /** ISO 4217 currency of `price` (e.g. "AED"), when the extractor found
+   * one (JSON-LD offer currency, OG price:currency, or a symbol guess).
+   * Absent for adapters that never see a currency token. */
+  priceCurrency?: string;
   compareAtPrice: number | null;
   available: boolean;
   variants: CrawledVariant[];

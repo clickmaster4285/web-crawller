@@ -15,32 +15,31 @@ export interface MatchRow {
   method: string;
   confidence: number;
   updatedAt: number | null;
-  mine: {
-    productId: string;
-    name: string;
-    price: number | null;
-    available: boolean;
-    url: string;
-  };
-  theirs: {
-    productId: string;
-    name: string;
-    price: number | null;
-    available: boolean;
-    url: string;
-  };
+  mine: MatchSideProduct;
+  theirs: MatchSideProduct;
+}
+
+/** One side of a match (or an unmatched-product row). */
+export interface MatchSideProduct {
+  productId: string;
+  name: string;
+  /** Native price in `currency` (null = not extracted). */
+  price: number | null;
+  /** ISO 4217 native currency, when known (null = unknown). */
+  currency: string | null;
+  /**
+   * Price converted to USD at ingest (fxService) — the value cross-currency
+   * comparisons should use. Null when the currency/rate was unknown.
+   */
+  priceUsd: number | null;
+  available: boolean;
+  url: string;
 }
 
 /** One side's unmatched products (`onlyMine` / `onlyTheirs` list). */
 export interface MatchSideList {
   total: number;
-  rows: Array<{
-    productId: string;
-    name: string;
-    price: number | null;
-    available: boolean;
-    url: string;
-  }>;
+  rows: MatchSideProduct[];
 }
 
 /** Response of `GET /api/match?origin=…` for one competitor. */

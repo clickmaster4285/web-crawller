@@ -41,7 +41,13 @@ const crawlParamsSchema = new mongoose.Schema(
      * pipeline may detect removals. Deep crawls set true; shallow checks set
      * false (a partial list must never soft-delete the rest of the store).
      */
-    fullCrawl: { type: Boolean, default: true }
+    fullCrawl: { type: Boolean, default: true },
+    /**
+     * Optional product-URL filter regex (engine discoverProducts): only
+     * discovered URLs matching it are crawled. Kept on the job so the live
+     * progress panel can show which filter a run used.
+     */
+    productUrlPattern: { type: String, default: null }
   },
   { _id: false }
 );

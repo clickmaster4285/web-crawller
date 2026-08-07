@@ -181,6 +181,13 @@ function SourcesPage() {
   // stay in the user's own localStorage; only the boolean is ever sent to
   // the server's job params.
   const [proxy, setProxy] = useLocalStorageState("parity.sources.proxy", "");
+  // Optional product-URL filter regex — only discovered URLs matching it are
+  // crawled (for stores whose sitemap mixes products with blog/category
+  // pages under the same path, e.g. activefitnessstore.com).
+  const [productUrlPattern, setProductUrlPattern] = useLocalStorageState(
+    "parity.sources.productUrlPattern",
+    "",
+  );
   const [frequency, setFrequency] = useLocalStorageState<CrawlFrequency>(
     "parity.sources.frequency",
     "6h",
@@ -380,7 +387,8 @@ function SourcesPage() {
       job.params.productOnly === productOnly &&
       job.params.storeSnapshots === storeSnapshots &&
       job.params.useBrowser === useBrowser &&
-      job.params.proxy === proxy.trim().length > 0);
+      job.params.proxy === proxy.trim().length > 0 &&
+      job.params.productUrlPattern === (productUrlPattern.trim() || null));
 
   // The previous saved snapshot for the origin being crawled — everything
   // saved *after* this run started (including this run's own persistence)
@@ -492,6 +500,7 @@ function SourcesPage() {
     storeSnapshots,
     useBrowser,
     proxy: proxy.trim() || undefined,
+    productUrlPattern: productUrlPattern.trim() || undefined,
     type,
   });
   const runCrawl = () => {
@@ -521,6 +530,7 @@ function SourcesPage() {
       storeSnapshots,
       useBrowser,
       proxy: proxy.trim() || undefined,
+      productUrlPattern: productUrlPattern.trim() || undefined,
     });
 
   return (
@@ -701,6 +711,8 @@ function SourcesPage() {
           onUseBrowserChange={(value) => setUseBrowser(value)}
           proxy={proxy}
           onProxyChange={(value) => setProxy(value)}
+          productUrlPattern={productUrlPattern}
+          onProductUrlPatternChange={(value) => setProductUrlPattern(value)}
         />
 
         {/* ── 5. Active schedules ──────────────────────────────────────── */}

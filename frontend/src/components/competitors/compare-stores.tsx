@@ -28,9 +28,35 @@ import { formatPrice } from "@/utils/format";
 
 const PAGE_SIZE = 25;
 
-/** Formats a price that may be missing (server rows can carry `null`). */
-function formatMaybePrice(price: number | null): string {
-  return price != null && price > 0 ? formatPrice(price) : "—";
+/**
+ * Formats a price that may be missing (server rows can carry `null`);
+ * appends the native currency code when one was detected, so a GCC store's
+ * AED price never reads like a bare USD number.
+ */
+function formatMaybePrice(
+  price: number | null,
+  currency?: string | null,
+): string {
+  if (price != null && price > 0) {
+    const c = (currency ?? "").trim().toUpperCase();
+    return c ? `${formatPrice(price)} ${c}` : formatPrice(price);
+  }
+  return "—";
+}
+
+/**
+ * The comparison value for one side: the USD-normalized price when the rates
+ * table converted it (fxService at ingest); the native price only when both
+ * sides share a currency (null === null counts — legacy rows). Cross-currency
+ * rows without a conversion return null → not comparable.
+ */
+function effectivePrice(
+  usd: number | null | undefined,
+  native: number,
+  sameCurrency: boolean,
+): number | null {
+  if (usd != null && usd > 0) return usd;
+  return sameCurrency && native > 0 ? native : null;
 }
 
 /** Which store sells a matched product cheaper — or "same price". */
@@ -127,7 +153,7 @@ function ProductsTab({
                 <ProductCell name={p.name} url={p.url} />
               </TableCell>
               <TableCell className="numeric text-right">
-                {formatMaybePrice(p.price)}
+                {formatMaybePrice(p.price, p.currency)}
               </TableCell>
             </TableRow>
           ))}
@@ -300,9 +326,25 @@ export function ComparePanel({
                   {matched.map((m) => {
                     const aPrice = m.mine.price ?? 0;
                     const bPrice = m.theirs.price ?? 0;
-                    const comparable = aPrice > 0 && bPrice > 0;
-                    const aCheaper = comparable && aPrice < bPrice;
-                    const bCheaper = comparable && bPrice < aPrice;
+                    // Cross-currency safety: compare USD-normalized prices
+                    // when available, native only when both stores share a
+                    // currency — AED 100 vs PKR 100 must never read as equal.
+                    const sameCurrency = m.mine.currency === m.theirs.currency;
+                    const aEff = effectivePrice(
+                      m.mine.priceUsd,
+                      aPrice,
+                      sameCurrency,
+                    );
+                    const bEff = effectivePrice(
+                      m.theirs.priceUsd,
+                      bPrice,
+                      sameCurrency,
+                    );
+                    const comparable = aEff != null && bEff != null;
+                    const aCheaper =
+                      comparable && aEff != null && bEff != null && aEff < bEff;
+                    const bCheaper =
+                      comparable && aEff != null && bEff != null && bEff < aEff;
                     return (
                       <TableRow key={m.id}>
                         <TableCell className="max-w-0 w-full">
@@ -325,7 +367,7 @@ export function ComparePanel({
                                 : "text-muted-foreground"
                             }
                           >
-                            {formatMaybePrice(aPrice)}
+                            {formatMaybePrice(aPrice, m.mine.currency)}
                           </span>
                         </TableCell>
                         <TableCell className="numeric text-right">
@@ -336,17 +378,23 @@ export function ComparePanel({
                                 : "text-muted-foreground"
                             }
                           >
-                            {formatMaybePrice(bPrice)}
+                            {formatMaybePrice(bPrice, m.theirs.currency)}
                           </span>
                         </TableCell>
                         <TableCell className="text-right">
-                          <PriceDelta before={aPrice} after={bPrice} />
+                          {aEff != null && bEff != null ? (
+                            <PriceDelta before={aEff} after={bEff} />
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              different currencies
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end">
                             <CheapestBadge
-                              a={m.mine.price}
-                              b={m.theirs.price}
+                              a={aEff}
+                              b={bEff}
                               labelA={labelA}
                               labelB={labelB}
                             />

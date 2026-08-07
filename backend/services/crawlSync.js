@@ -17,6 +17,7 @@
 const Product = require('../models/Product');
 const Snapshot = require('../models/Snapshot');
 const ProductEvent = require('../models/ProductEvent');
+const { getRates, toUsd } = require('./fxService');
 const { productIdentityKey, normalizeHost } = require('../utils/identity');
 const {
   normalizeGtin,
@@ -72,6 +73,10 @@ async function syncNewModel({
   const now = at ?? new Date();
   const s = stats || {};
   const durationMs = Number.isFinite(s.durationMs) ? s.durationMs : 0;
+  // Cross-currency normalization (decision Aug 2026): the latest USD-base
+  // rate table, fetched once per crawl (cached in-process + in Mongo). Never
+  // throws — a rates outage degrades to {} and priceUsd stays null.
+  const fxRates = await getRates();
   // Phase B: URL → {etag, lastmod} captured this run. Applied to the upserts
   // below so Product.httpState stays current for cross-worker resume.
   const httpStateOf = (url) =>
@@ -104,11 +109,17 @@ async function syncNewModel({
     const sku = normalizeSku(p.sku);
     const slug = slugFromUrl(p.url);
     const name = String(p.name || '').trim();
+    // Real currency when the crawler captured one (null = genuinely unknown
+    // — no more silent USD). priceUsd converts it for cross-store comparison.
+    const currency = String(p.currency || '').trim().toUpperCase() || null;
+    const priceUsd = toUsd(price, currency, fxRates);
     return {
       identityKey: productIdentityKey(p),
       name,
       brand: String(p.brand || '').trim(),
       price,
+      currency,
+      priceUsd,
       available: p.available !== false,
       url: String(p.url || '').trim(),
       gtin: gtin || undefined,
@@ -154,6 +165,8 @@ async function syncNewModel({
               name: c.name,
               brand: c.brand,
               price: c.price,
+              currency: c.currency,
+              priceUsd: c.priceUsd,
               available: c.available,
               url: c.url,
               ...(c.gtin ? { gtin: c.gtin } : {}),
@@ -198,6 +211,10 @@ async function syncNewModel({
       set.price = c.price;
       set.available = c.available;
       set.priceUpdatedAt = now;
+      // Refresh the native currency + USD conversion whenever the price
+      // moves — a rate-table refresh or a currency capture lands here too.
+      if (c.currency) set.currency = c.currency;
+      if (c.priceUsd != null) set.priceUsd = c.priceUsd;
     }
     if (nameChanged) {
       set.name = c.name;

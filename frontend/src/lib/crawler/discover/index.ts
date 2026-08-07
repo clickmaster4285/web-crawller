@@ -549,6 +549,45 @@ export async function discoverProducts(
     );
   }
 
+  // ── 3.6 Product URL pattern filter ──────────────────────────────────
+  // Optional per-crawl regex (config.productUrlPattern): when set, only
+  // discovered URLs matching it are kept. This is the escape hatch for
+  // stores whose sitemap mixes real product URLs with blog/brand/category
+  // pages under the SAME path tree — the flat-taxonomy heuristic can't tell
+  // a blog post from a product there (activefitnessstore.com: product URLs
+  // end in an EAN/SKU `…-bs-4067898979432` / `…-tf-1575` while blog posts
+  // end in a word `…/10-ramadan-health-and-fitness-tips`). An invalid regex
+  // is ignored with a warning — the crawl proceeds unfiltered.
+  if (config.productUrlPattern) {
+    let pattern: RegExp | null = null;
+    try {
+      pattern = new RegExp(config.productUrlPattern, "i");
+    } catch {
+      findings.push({
+        level: "warning",
+        message: `Product URL pattern "${config.productUrlPattern}" is not a valid regex — crawled every discovered URL.`,
+      });
+      log.push(
+        `Product URL pattern ignored (invalid regex): ${config.productUrlPattern}`,
+      );
+    }
+    if (pattern) {
+      const before = urlSet.size;
+      for (const u of [...urlSet]) {
+        if (!pattern.test(u)) urlSet.delete(u);
+      }
+      log.push(
+        `Product URL pattern filter: ${before} URLs, kept ${urlSet.size} matching "${config.productUrlPattern}".`,
+      );
+      if (before - urlSet.size > 0) {
+        findings.push({
+          level: "info",
+          message: `Product URL pattern kept ${urlSet.size} of ${before} discovered URLs (${before - urlSet.size} filtered out).`,
+        });
+      }
+    }
+  }
+
   // ── Wrap-up ──────────────────────────────────────────────────────────
   if (urlSet.size === 0) {
     // Shallow: "no NEW products" is only a success when a sitemap actually

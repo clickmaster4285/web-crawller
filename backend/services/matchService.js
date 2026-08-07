@@ -292,22 +292,23 @@ async function loadTheirsCandidates(theirsOrigin, mineDocs, boundary) {
   const tokens = [...new Set(mineDocs.flatMap((m) => m.tokens ?? []))];
 
   const queries = [];
+  const CANDIDATE_SELECT = '_id name sku gtin url price currency priceUsd available';
   if (gtins.length) {
     queries.push(Product.find({ origin: theirsOrigin, ...active, gtin: { $in: gtins } })
-      .select('_id name sku gtin url price available').lean());
+      .select(CANDIDATE_SELECT).lean());
   }
   if (skus.length) {
     queries.push(Product.find({ origin: theirsOrigin, ...active, sku: { $in: skus } })
-      .select('_id name sku gtin url price available').lean());
+      .select(CANDIDATE_SELECT).lean());
   }
   if (slugs.length) {
     queries.push(Product.find({ origin: theirsOrigin, ...active, slug: { $in: slugs } })
-      .select('_id name sku gtin url price available').lean());
+      .select(CANDIDATE_SELECT).lean());
   }
   if (tokens.length) {
     // Fuzzy inverted index: candidates must share a token with a mine product.
     queries.push(Product.find({ origin: theirsOrigin, ...active, tokens: { $in: tokens } })
-      .select('_id name sku gtin url price available tokens').lean());
+      .select(`${CANDIDATE_SELECT} tokens`).lean());
   }
   const results = await Promise.all(queries);
   for (const docs of results) grab(docs);
@@ -442,10 +443,10 @@ async function matchesForCompetitor(
   const theirsIds = [...new Set(rows.map((r) => String(r.competitorProductId)))];
   const [mineDocs, theirsDocs] = await Promise.all([
     Product.find({ _id: { $in: mineIds } })
-      .select('_id name price available url')
+      .select('_id name price currency priceUsd available url')
       .lean(),
     Product.find({ _id: { $in: theirsIds } })
-      .select('_id name price available url')
+      .select('_id name price currency priceUsd available url')
       .lean()
   ]);
   const mineMap = new Map(mineDocs.map((d) => [String(d._id), d]));
@@ -465,6 +466,10 @@ async function matchesForCompetitor(
         productId: String(mine._id),
         name: mine.name,
         price: mine.price ?? null,
+        currency: mine.currency ?? null,
+        // USD-normalized price (fxService at ingest) — the value price
+        // comparisons should use across stores with different currencies.
+        priceUsd: mine.priceUsd ?? null,
         available: mine.available,
         url: mine.url
       },
@@ -472,6 +477,8 @@ async function matchesForCompetitor(
         productId: String(theirs._id),
         name: theirs.name,
         price: theirs.price ?? null,
+        currency: theirs.currency ?? null,
+        priceUsd: theirs.priceUsd ?? null,
         available: theirs.available,
         url: theirs.url
       }
@@ -494,6 +501,8 @@ async function matchesForCompetitor(
     productId: String(d._id),
     name: d.name,
     price: d.price ?? null,
+    currency: d.currency ?? null,
+    priceUsd: d.priceUsd ?? null,
     available: d.available,
     url: d.url
   });
@@ -513,7 +522,7 @@ async function matchesForCompetitor(
         .sort({ lastSeenAt: -1 })
         .skip(skip)
         .limit(cap)
-        .select('_id name price available url')
+        .select('_id name price currency priceUsd available url')
         .lean(),
       Product.countDocuments({
         origin: theirsOrigin,
@@ -528,7 +537,7 @@ async function matchesForCompetitor(
         .sort({ lastSeenAt: -1 })
         .skip(skip)
         .limit(cap)
-        .select('_id name price available url')
+        .select('_id name price currency priceUsd available url')
         .lean(),
       ProductMatch.aggregate([
         { $match: scope },
@@ -554,9 +563,17 @@ async function matchesForCompetitor(
           $match: {
             $expr: {
               $and: [
-                { $gt: ['$m.price', 0] },
-                { $gt: ['$t.price', 0] },
-                { $ne: ['$m.price', '$t.price'] }
+                // Price-difference is judged in USD (priceUsd when the rates
+                // normalized it; native otherwise) — never raw numbers across
+                // currencies (AED 100 vs PKR 100 must not read as "same").
+                { $gt: [{ $ifNull: ['$m.priceUsd', '$m.price'] }, 0] },
+                { $gt: [{ $ifNull: ['$t.priceUsd', '$t.price'] }, 0] },
+                {
+                  $ne: [
+                    { $ifNull: ['$m.priceUsd', '$m.price'] },
+                    { $ifNull: ['$t.priceUsd', '$t.price'] }
+                  ]
+                }
               ]
             }
           }

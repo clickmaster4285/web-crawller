@@ -26,6 +26,7 @@ const {
   completeJob,
   failJob,
   cancelJob,
+  enqueueJob,
   sleep
 } = require('../services/jobQueue.js');
 const CrawlJob = require('../models/CrawlJob.js');
@@ -152,6 +153,9 @@ function sanitizeResult(result) {
       name: p.name,
       brand: p.brand,
       price: p.price,
+      // Real currency captured by the extractor (JSON-LD/OG/symbol guess),
+      // when there was one — the ingest pipeline stops defaulting to USD.
+      currency: p.priceCurrency ?? null,
       available: p.available,
       url: p.url,
       sku: p.variants?.[0]?.sku ?? '',
@@ -230,6 +234,9 @@ async function processJob(job) {
       respectRobotsTxt: p.respectRobotsTxt !== false,
       productOnly: p.productOnly !== false,
       useBrowser: !!p.useBrowser,
+      // Optional product-URL filter (only discovered URLs matching the regex
+      // are crawled — blog/brand/category pages stay out of the catalogue).
+      productUrlPattern: p.productUrlPattern ?? undefined,
       proxy: p.proxyUrl ?? undefined,
       maxRetries: 1,
       onProgress: (processed, total) => {
@@ -254,6 +261,32 @@ async function processJob(job) {
     });
 
     const sanitized = sanitizeResult(result);
+
+    // Auto browser-rendering (decision Aug 2026): a deep crawl that ran with
+    // rendering OFF and fetched pages but extracted ZERO prices is a
+    // client-rendered store — the HTML-only extractors can't see JS-loaded
+    // prices (activefitnessstore.com, miraclefitnessuae.com). Instead of
+    // leaving a silently 0-priced catalogue, re-run it once with rendering
+    // ON. The follow-up itself runs with useBrowser:true, so the condition
+    // below never fires twice (no loop).
+    let autoBrowserFollowup = false;
+    if (type === 'deep' && !p.useBrowser) {
+      const fetched = sanitized.stats.fetched ?? 0;
+      const priced = sanitized.products.filter(
+        (x) => typeof x.price === 'number' && x.price > 0
+      ).length;
+      if (fetched >= 10 && priced === 0) {
+        autoBrowserFollowup = true;
+        sanitized.discovery.findings = [
+          ...(sanitized.discovery?.findings ?? []),
+          {
+            level: 'info',
+            message: `No prices extracted from ${fetched} fetched pages — this store looks JS-rendered. Auto-started a re-crawl with browser rendering ON.`
+          }
+        ];
+      }
+    }
+
     // Persist BEFORE flipping to done so the final poll sees persisted=true.
     await saveFinishedCrawl({
       origin,
@@ -281,6 +314,18 @@ async function processJob(job) {
         fetchStartedAt
       }
     });
+    if (autoBrowserFollowup) {
+      await enqueueJob({
+        origin,
+        type: 'deep',
+        // Clone the run's params with rendering forced on — the follow-up
+        // can't re-trigger the auto-render (useBrowser is true this time).
+        params: { ...p, useBrowser: true, fullCrawl: true }
+      });
+      console.log(
+        `🖥️ ${workerId} ${origin} looks JS-rendered (0 prices from ${sanitized.stats.fetched} pages) — auto re-crawling with browser rendering ON`
+      );
+    }
     console.log(
       `✅ ${workerId} finished ${origin}: ${result.products.length} products` +
         ` (${result.stats.fetched} fetched, ${result.stats.skippedUnchanged} cached, ` +

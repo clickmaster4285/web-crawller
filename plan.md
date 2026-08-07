@@ -62,6 +62,14 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 - [x] Recurring schedules (1h/6h/daily/weekly) with cancel (in-memory, reset on restart).
 - [x] Results persisted to MongoDB (`CrawlResult`), per-origin snapshot history
       (cap 20) with `DELETE` endpoints for one snapshot or a store's history.
+- [x] **Worker memory capped** — workers spawn with `--expose-gc
+      --max-old-space-size` (`PARITY_WORKER_MAX_OLD_SPACE_MB`, default 3072)
+      and force GC every 1000 products + after each job; a deep crawl can no
+      longer balloon a worker into multi-GB swap (was 6.5 GB → 97% RAM lag).
+- [x] **Heavy reads slimmed** — the Sources page polls `?meta=1` summaries
+      (`type`/`collections`/`discovery`, sitemap candidate URL lists stripped)
+      with a `?limit=` prev-snapshot fetch instead of full product arrays every
+      30s.
 
 ### Dashboard pages
 | Page | Route | Status |
@@ -106,6 +114,14 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 ---
 
 ## 🔜 What's next (priority order)
+
+> **Current focus (Aug 2026):** set **your website** on `/competitors` (the
+> compare/match/alerts pipeline is idle — `mystores`/`competitors`/
+> `productmatches`/`alertstates` are empty in the live DB), then the **D1
+> endgame**: flip `/crawls`, `/sources`, `/pricing` onto the `/api/stores/*`
+> read endpoints and freeze + drop `CrawlResult`. Also: prune terminal
+> `crawljobs` (finished jobs embed full product arrays ≈ 1 MB each) and clear
+> the 0-product snapshots stacked by the 429-blocked stores.
 
 ### 1. Price history & Pricing page — done
 - [x] Backend time-series — `computePriceHistory` flattens an origin's
@@ -164,6 +180,20 @@ are done, so only Tier 4 (commercial platform) remains.**
       per crawl via the Sources **Browser rendering** toggle
       (`useBrowser` → `CrawlRunInput` → job → schedule);
       `PLAYWRIGHT_BROWSERS_PATH` env supported. **Unlocks: techmen, JS stores.**
+      **2026-08: auto self-healing** — a deep crawl with rendering OFF that
+      fetched ≥ 10 pages with zero prices auto-enqueues one re-crawl with
+      rendering ON (finding on the result; loop-guarded).
+- [x] **Product URL pattern filter** — per-crawl `productUrlPattern` regex
+      (Sources → Configuration): only discovered URLs matching it are
+      crawled. For sitemaps that mix products with blog/brand/category pages
+      under the same path tree (activefitnessstore: `/\d{4,}$/` keeps
+      EAN/SKU-terminated product URLs, 10,456 → ~500). Plumbed through jobs
+      + scheduled crawls.
+- [x] **Cross-currency (`priceUsd`)** — mapper carries the extracted
+      `priceCurrency`; `Product.currency` defaults to null (no silent USD);
+      `fxService` (daily USD-base rates, no key, Mongo-cached) normalizes
+      every price to `Product.priceUsd` at ingest; matcher gaps compare USD
+      first, native only when currencies match; UI shows native codes.
 - [x] **Tier 3 — Per-site adapters**: **WooCommerce native (`/wp-json/wc/v3`)
       — done** (`adapters/woocommerce.ts`: one-request probe → a public API
       is auto-picked for discovery (paginated walk, `X-WP-Total`) + structured
@@ -188,6 +218,9 @@ are done, so only Tier 4 (commercial platform) remains.**
       fingerprinting/stealth is a separate concern — zara's Akamai challenges
       still need real-browser + residential combined.
       **Unlocks: dawlance, techmen, teslalaptops (IP blocks).**
+- [x] UA experiment recorded: a browser-like Chrome UA fixed the 429s on
+      prosportsae/athletix (HTTP 200 vs `ParityBot` 429, curl-verified) —
+      fully implemented, then **reverted by decision**; ParityBot stays.
 - [ ] **Tier 4 — Commercial scraping platform**: Apify (pre-built Nike/Zara/
       retail actors + proxy infrastructure) or retailer affiliate feeds for the
       hardest targets (zara, nike) where in-house effort isn't worth it.

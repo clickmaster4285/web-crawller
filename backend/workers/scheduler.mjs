@@ -57,6 +57,7 @@ function paramsFor(store, type) {
     // Worker-only: the gateway URL never leaves the server (scrubbed by
     // publicJob on every read).
     proxyUrl: p.proxyUrl ?? null,
+    productUrlPattern: p.productUrlPattern ?? null,
     fullCrawl: type === 'deep'
   };
 }
