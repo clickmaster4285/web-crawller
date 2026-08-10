@@ -35,7 +35,13 @@ function backoffFor(attempts) {
  * Inserts a crawl job. `params` = the crawl-config snapshot (see the
  * CrawlJob model's params schema — fullCrawl, proxyUrl etc.).
  */
-async function enqueueJob({ origin, type = 'deep', params = {}, scheduledAt = new Date() }) {
+async function enqueueJob({
+  origin,
+  type = 'deep',
+  params = {},
+  analysis = null,
+  scheduledAt = new Date()
+}) {
   const job = await CrawlJob.create({
     origin,
     key: normalizeHost(origin),
@@ -60,7 +66,8 @@ async function enqueueJob({ origin, type = 'deep', params = {}, scheduledAt = ne
       fullCrawl: type === 'deep',
       productUrlPattern: null,
       ...params
-    }
+    },
+    analysis
   });
   return job;
 }
@@ -334,6 +341,9 @@ function publicJob(job, options = {}) {
       pr.fetchStartedAt instanceof Date ? pr.fetchStartedAt.getTime() : pr.fetchStartedAt ?? null,
     discovery: pr.discovery ?? null,
     finishedAt: job.finishedAt ? job.finishedAt.getTime() : null,
+    // Pre-crawl analysis snapshot (P2 Phase 2) — the strategy the job was
+    // started with, already sanitized at enqueue (no proxy URL in it).
+    analysis: job.analysis ?? null,
     result: includeResult ? (job.result ?? undefined) : undefined,
     error: job.error ?? undefined,
     persisted: !!job.persisted

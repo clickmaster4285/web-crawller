@@ -41,8 +41,13 @@ export function extractOpenGraph(
     tags["product:price:currency"] ?? tags["og:price:currency"] ?? "USD";
   const availability = tags["product:availability"] ?? tags["og:availability"];
 
-  const price = priceStr ? Number(priceStr) : 0;
-  if (!Number.isFinite(price)) return null;
+  // Aug 2026 (activefitnessstore): og:title is NOT a price. Returning a
+  // product with price 0 here SHADOWS the HTML heuristics that could find
+  // the real JS-rendered price — only produce a product when an actual
+  // price tag exists (fall through to the lower tiers otherwise).
+  if (!priceStr) return null;
+  const price = Number(priceStr);
+  if (!Number.isFinite(price) || price <= 0) return null;
 
   return {
     name,

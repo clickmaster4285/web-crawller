@@ -22,7 +22,11 @@ import {
   discoverBigCommerceProducts,
   probeBigCommerceApi,
 } from "../adapters/bigcommerce.ts";
-import { discoverCollectionHandles } from "../adapters/shopify-discover.ts";
+import {
+  discoverCollectionHandles,
+  discoverShopifyProducts,
+  probeShopifyApi,
+} from "../adapters/shopify-discover.ts";
 import {
   discoverWooCommerceProducts,
   probeWooCommerceApi,
@@ -47,6 +51,13 @@ import type {
 } from "../core/types.ts";
 import type { HttpOptions } from "../core/http.ts";
 import { httpOptions } from "../core/http.ts";
+// The non-product URL classifier — shared single source of truth with the
+// backend ingest guard and the tools/ scripts (never duplicate this list).
+import {
+  PRODUCT_BASE_RE,
+  hasJunkSegment,
+  pathSegments,
+} from "./junk-segments.ts";
 
 const DISCOVERY_MAX_PAGES = 60;
 const DISCOVERY_MAX_DEPTH = 3;
@@ -60,18 +71,6 @@ const DISCOVERY_MAX_DEPTH = 3;
  */
 const NON_PRODUCT_SECTION_RE =
   /^(blog|news|about|about-us|contact|help|faq|faqs|help-center|support|policy|privacy|terms|terms-and-conditions|shipping|shipping-details|returns|return-policy|payment|payment-options|warranty|warranty-returns|careers|account|cart|wishlist|login|register|search|page|pages|tag|tags|category|categories|author|authors|archives|shop|product-category|collections|catalog|catalogue|brand|brands|manufacturer|vendor|articles|posts|guides|tutorials|reviews|resources|events|team|services|solutions|downloads|docs|documentation|knowledge-base)$/i;
-
-/** Lowercased path segments of a URL (`/computing/dell-x` → ["computing", "dell-x"]). */
-function pathSegments(url: string): string[] {
-  try {
-    return new URL(url).pathname
-      .split("/")
-      .filter(Boolean)
-      .map((s) => s.toLowerCase());
-  } catch {
-    return [];
-  }
-}
 
 export interface ProductDiscovery {
   /** Absolute product page URLs, deduped. */
@@ -275,6 +274,11 @@ export async function discoverProducts(
   let sitemapAdded = 0;
   let lastmodCount = 0;
   let sitemapError: string | undefined;
+  // Total URLs stripped by the junk-segment filter across all sitemap
+  // candidates — surfaced as a finding after the loop (the live log line is
+  // per-candidate and scrolls by; the finding is the persistent, prominent
+  // count shown in "What the crawler found" / the store profile).
+  let junkFilteredTotal = 0;
 
   for (const candidate of candidates) {
     await waitForControl(config.control);
@@ -300,10 +304,25 @@ export async function discoverProducts(
       // Math `product-sitemap.xml`) are trusted wholesale — their URLs are
       // products even when the URL pattern looks nothing like `/product/`
       // (e.g. WooCommerce `/shop/<cat>/<slug>/` permalinks).
+      //
+      // Every source — trusted or not — is first stripped of unambiguous
+      // junk segments at ANY path depth (blog/legal/collection pages). The
+      // first-segment-only blocklist below can't see them behind a locale
+      // prefix (`/uae-en/privacy-policy`, `/uae-en/blog/…`), and even a
+      // "product sitemap" can list such pages (urbanfitnesscart.com: 5,477
+      // of 5,508 sitemap URLs passed the old filter, including ~390 junk).
+      const cleaned = sitemapUrls.filter((u) => !hasJunkSegment(u.loc));
+      if (cleaned.length < sitemapUrls.length) {
+        const dropped = sitemapUrls.length - cleaned.length;
+        junkFilteredTotal += dropped;
+        log.push(
+          `Junk-segment filter: ${dropped} URLs dropped (blog/policy/collection pages) — ${cleaned.length} kept.`,
+        );
+      }
       const entries =
         config.productOnly === false || result.isProductSitemap
-          ? sitemapUrls
-          : filterProductSitemapEntries(sitemapUrls);
+          ? cleaned
+          : filterProductSitemapEntries(cleaned);
       result.productUrls = entries.length;
       for (const u of entries) {
         if (!urlSet.has(u.loc)) sitemapAdded++;
@@ -350,6 +369,16 @@ export async function discoverProducts(
       level: "warning",
       message:
         "No product URLs from sitemaps. If the sitemap redirected to the homepage, the crawler tried the robots.txt-declared and standard locations first.",
+    });
+  }
+  // Prominent junk-filter count (mirrors the productUrlPattern finding):
+  // how many blog/policy/collection pages the junk-segment filter stripped
+  // from the sitemap before crawling, so a run that discovered 5,117 of
+  // 5,508 URLs explains itself instead of quietly fetching fewer.
+  if (junkFilteredTotal > 0) {
+    findings.push({
+      level: "info",
+      message: `Junk-segment filter: ${junkFilteredTotal.toLocaleString()} blog/policy/collection pages filtered out of the sitemap — only product pages were crawled.`,
     });
   }
   tick("sitemap", "Sitemap discovery done.");
@@ -487,6 +516,81 @@ export async function discoverProducts(
       );
     }
     tick("sitemap", "BigCommerce API probe done.");
+  }
+
+  // ── 2.7 Shopify public products.json (Tier 3). ───────────────────────
+  // The per-product Shopify JSON probe (`/products/{handle}.json`) already
+  // lives in the fetch loop — this block gives discovery the URL SET it needs
+  // when the sitemap can't (blocked, missing, or junk-heavy). Any store that
+  // could be Shopify is probed with one polite request; a public catalogue is
+  // walked and its product URLs added to the set. This is the escape hatch
+  // for the WAF-blocked-sitemap class (athletix.ae: `/sitemap.xml` 429'd
+  // while `/products.json?limit=250` paged cleanly — the shop crawled to
+  // zero while its full catalogue sat behind a public API). Skipped in
+  // shallow mode (platform detection is skipped too, and probes cost
+  // requests a 1-request check must not make).
+  //
+  // Gating mirrors the analyzer's `looksShopify` rule: detection says
+  // Shopify, detection is unknown/plain (products.json is a cheap universal
+  // Shopify sniff), or the homepage carries cdn.shopify.com assets (the
+  // fingerprint that survives a robots-based misdetection — Shopify's
+  // default robots.txt lists bare /cart + /checkout, which the WooCommerce
+  // heuristic used to match first).
+  if (!shallow) {
+    const platformName = diagnostics.platform.platform.toLowerCase();
+    const looksShopify =
+      homepageHtml.includes("cdn.shopify.com") ||
+      platformName === "shopify" ||
+      platformName === "unknown" ||
+      platformName === "plain";
+    if (looksShopify) {
+      log.push("Shopify API: probing /products.json…");
+      const probe = await probeShopifyApi(config.origin, opts);
+      if (probe.status === "public") {
+        const shopify = await discoverShopifyProducts(
+          config.origin,
+          opts,
+          config.control,
+        );
+        let shopifyAdded = 0;
+        for (const u of shopify.urls) {
+          if (!urlSet.has(u)) shopifyAdded++;
+          urlSet.add(u);
+        }
+        diagnostics.shopifyApi = {
+          status: "public",
+          urls: shopifyAdded,
+        };
+        log.push(
+          `Shopify API: ${shopify.urls.length} products ` +
+            `(${shopify.truncated ? "capped" : "full catalogue"}) — ` +
+            `${shopifyAdded} new URLs`,
+        );
+        findings.push({
+          level: "success",
+          message: `Shopify products.json is public — ${shopify.urls.length} products found via /products.json.`,
+        });
+      } else if (probe.status === "auth-required") {
+        diagnostics.shopifyApi = {
+          status: "auth-required",
+          urls: 0,
+          message: probe.message,
+        };
+        log.push(
+          `Shopify API requires credentials (${probe.message}) — continuing with sitemap/HTML.`,
+        );
+      } else {
+        diagnostics.shopifyApi = {
+          status: "unavailable",
+          urls: 0,
+          message: probe.message,
+        };
+        log.push(
+          `Shopify API unavailable (${probe.message}) — continuing with sitemap/HTML.`,
+        );
+      }
+      tick("sitemap", "Shopify API probe done.");
+    }
   }
 
   // ── 3. HTML link-graph BFS from the site root. ───────────────────────
@@ -678,6 +782,7 @@ export function filterProductSitemapEntries(
   // `/apple-products/accessories/macbook/<slug>`, so `…/macbook` with
   // children must not be treated as a product itself).
   const prefixes = new Set<string>();
+  let productBaseCount = 0;
   for (const u of urls) {
     const seg = pathSegments(u.loc);
     segments.set(u.loc, seg);
@@ -685,7 +790,19 @@ export function filterProductSitemapEntries(
     for (let i = 1; i < seg.length; i++) {
       prefixes.add(`/${seg.slice(0, i).join("/")}`);
     }
+    if (PRODUCT_BASE_RE.test(u.loc)) productBaseCount++;
   }
+  // When a store keeps the bulk of its catalogue under an explicit
+  // `/product(s)/` base, the base IS the catalogue: blog/legal/collection
+  // pages that slipped into a mixed sitemap (locale-prefixed stores —
+  // urbanfitnesscart.com mixes 5,117 `/uae-en/product/` URLs with ~390 junk
+  // pages) must not ride along. Require a firm 60%+ majority so a store that
+  // ALSO sells real products at flat URLs (`/category/<product>`, verified
+  // landing-page-free) doesn't lose them — a 50/50 split must never drop
+  // half the catalogue. Known tradeoff (accepted for urbanfitness, 93%
+  // base): a base-dominant store's flat URLs are landing pages, not products.
+  const baseDominant =
+    productBaseCount > 0 && productBaseCount > urls.length * 0.6;
   return urls.filter((u) => {
     if (
       /\/products?\/[a-z0-9_-]+/i.test(u.loc) ||
@@ -697,6 +814,8 @@ export function filterProductSitemapEntries(
     ) {
       return true;
     }
+    // Non-base URL in a base-dominant sitemap = junk (blog/category page).
+    if (baseDominant) return false;
     const seg = segments.get(u.loc) ?? [];
     return (
       seg.length >= 2 &&

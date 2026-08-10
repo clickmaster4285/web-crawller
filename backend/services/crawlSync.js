@@ -27,6 +27,33 @@ const {
   nameTrigrams
 } = require('../utils/matcher');
 
+// The non-product URL classifier — SINGLE source of truth, shared with the
+// crawler (frontend/src/lib/crawler/discover/junk-segments.ts) and the
+// tools/ ops scripts (junk purge/check). Node 24 strips TS types on import,
+// so a CJS file
+// loads it the same way worker.mjs loads the crawler engine. Cached so each
+// process resolves it once (the worker + API already import the crawler this
+// way). The ingest-side guard is a second net: the crawler's discovery filter
+// strips these at the URL level, but pages that arrive another way (HTML
+// link-graph BFS, productOnly off, legacy flows) must not be written as
+// Products. A policy page that extracted a title-as-name would otherwise sit
+// in the catalogue with price 0 forever (the Aug 2026 urbanfitnesscart.com
+// pollution: /uae-en/blog/*, /uae-en/privacy-policy…). Matched at ANY path
+// depth so locale prefixes (/uae-en/, /om/) can't hide it.
+let junkFilterPromise = null;
+function getJunkFilter() {
+  junkFilterPromise ??= import(
+    '../../frontend/src/lib/crawler/discover/junk-segments.ts'
+  ).then((m) => m);
+  return junkFilterPromise;
+}
+
+/** True when any path segment of `url` is an unambiguous non-product segment. */
+async function hasJunkSegment(url) {
+  const { hasJunkSegment: check } = await getJunkFilter();
+  return check(url);
+}
+
 /** Mongo bulkWrite/insertMany batch size (architecture §10 — never one giant
  * batch; Mongo splits internally, but we cap our own slices too). */
 const BATCH_SIZE = 5000;
@@ -38,7 +65,10 @@ const BATCH_SIZE = 5000;
  * @param {Array}  params.products Crawled products ({name, brand, price,
  *                                 available, url, sku?, gtin?}).
  * @param {object} params.stats    Crawl stats ({discovered, fetched,
- *                                 skippedUnchanged, failed, durationMs}).
+ *                                 skippedUnchanged, failed, durationMs,
+ *                                 capped?}). `stats.capped` is true when
+ *                                 `maxPages` cut the run short of the full
+ *                                 catalogue.
  * @param {object|null} params.discovery Discovery diagnostics (reused as-is).
  * @param {Array}  params.failures  Per-URL failures (capped into the Snapshot).
  * @param {boolean} [params.fullCrawl] True when `products` is the COMPLETE
@@ -46,7 +76,8 @@ const BATCH_SIZE = 5000;
  *                 runs for full crawls — shallow checks (Phase 2, §3.2) fetch
  *                 only new pages, so a partial list must never soft-delete the
  *                 rest of the store. Defaults to inferring from stats, which
- *                 is correct for today's always-full-crawl results.
+ *                 is correct for today's always-full-crawl results. A run is
+ *                 additionally treated as partial when `stats.capped` is set.
  * @param {Date}   [params.at] Crawl completion time. Overrides the clock for
  *                 backfills: replays carry the ORIGINAL crawl timestamp so
  *                 snapshot finishedAt, event `at`, priceHistory points and
@@ -73,6 +104,11 @@ async function syncNewModel({
   const now = at ?? new Date();
   const s = stats || {};
   const durationMs = Number.isFinite(s.durationMs) ? s.durationMs : 0;
+  // True when `maxPages` cut this run short of the full catalogue (engine
+  // computes it as `discovered > maxPages`). A capped run is NOT the whole
+  // store — the URLs beyond the cap must never read as removals, and its
+  // snapshot must never become the removal anchor.
+  const capped = !!(s.capped);
   // Cross-currency normalization (decision Aug 2026): the latest USD-base
   // rate table, fetched once per crawl (cached in-process + in Mongo). Never
   // throws — a rates outage degrades to {} and priceUsd stays null.
@@ -98,6 +134,31 @@ async function syncNewModel({
     .select('identityKey name brand price available lastSeenAt url')
     .lean();
   const existing = new Map(existingDocs.map((p) => [p.identityKey, p]));
+
+  // 1.5 Ingest guard (Aug 2026): drop crawled rows whose URL is an unambiguous
+  //     non-product page (blog/policy/collection…). These are pages that slipped
+  //     past discovery and extracted a title-as-name with no price — they must
+  //     never become catalogue rows (they pollute comparisons and matches).
+  //     Products with a real identity (gtin/sku) are always kept — junk pages
+  //     never carry one, and a genuine product at an unusual URL must not be
+  //     dropped (reviewer note, Aug 2026). Bonus: if a crawl's rows were ALL
+  //     junk, products.length becomes 0 → isFull false → the removal guard
+  //     preserves the existing catalogue instead of mass-removing it.
+  //     (hasJunkSegment loads the shared TS classifier — resolved once.)
+  const junkChecks = await Promise.all(
+    products.map(async (p) => ({
+      keep: !(await hasJunkSegment(p.url)) || !!(p.gtin || p.sku),
+      p
+    }))
+  );
+  const keptProducts = junkChecks.filter((x) => x.keep).map((x) => x.p);
+  const junkFilteredCount = products.length - keptProducts.length;
+  if (junkFilteredCount > 0) {
+    console.warn(
+      `crawlSync: dropped ${junkFilteredCount}/${products.length} crawled rows for ${origin} — non-product URLs (blog/policy/collection).`
+    );
+  }
+  products = keptProducts;
 
   // 2. Normalize the crawled products once: identity key + the stored fields
   //    (normalized gtin/sku/slug so the sparse match-tier indexes stay lean
@@ -211,11 +272,18 @@ async function syncNewModel({
       set.price = c.price;
       set.available = c.available;
       set.priceUpdatedAt = now;
-      // Refresh the native currency + USD conversion whenever the price
-      // moves — a rate-table refresh or a currency capture lands here too.
-      if (c.currency) set.currency = c.currency;
-      if (c.priceUsd != null) set.priceUsd = c.priceUsd;
     }
+    // Refresh currency + priceUsd on EVERY touch, not only when the price
+    // moves (Aug 2026 fix): a re-crawl of a store crawled before the currency
+    // capture shipped would otherwise keep its legacy silent-'USD' label and
+    // null priceUsd forever — the exact cause of "different currencies" on
+    // matches where both sides have real prices (urbanfitness AED rows only
+    // gained priceUsd when their price changed). Captures are now correct
+    // (JSON-LD/OG/symbol), so an unchanged product just gets the right
+    // currency + conversion written back. Only set when actually captured:
+    // a null currency never overwrites a previously-good value.
+    if (c.currency) set.currency = c.currency;
+    if (c.priceUsd != null) set.priceUsd = c.priceUsd;
     if (nameChanged) {
       set.name = c.name;
       set.tokens = c.tokens; // rename → re-index the fuzzy vocabulary
@@ -266,12 +334,18 @@ async function syncNewModel({
   }
 
   // 4. Removed products = previously active keys not seen this crawl. Only
-  //    for full catalogues AND when the crawl actually looked — an empty or
-  //    failed run (0 discovered, 0 fetched) or a shallow/partial run
-  //    (fullCrawl === false) must not mass-remove the store.
-  const authoritative =
-    fullCrawl !== false &&
-    (products.length > 0 || s.discovered > 0 || s.fetched > 0);
+  //    for FULL catalogues: the run must have been asked for the whole store
+  //    (fullCrawl), not capped short by maxPages (a capped run deliberately
+  //    fetches only the first N URLs — the rest are not removals), and must
+  //    actually have parsed products (a run that fetched 0 pages — e.g. a
+  //    WAF-blocked or unrenderable store — must never mass-remove the
+  //    catalogue: Aug 2026, activefitnessstore.com's 10,522-discovered /
+  //    0-fetched run soft-deleted all 10,462 products this way).
+  //    `products.length` (not discovered/fetched) is the honest "we really
+  //    saw this store" signal; shallow/partial runs (fullCrawl === false)
+  //    are excluded regardless.
+  const isFull = fullCrawl !== false && !capped && products.length > 0;
+  const authoritative = isFull;
   const removedKeys = [];
   if (authoritative) {
     for (const [k, doc] of existing) {
@@ -345,12 +419,17 @@ async function syncNewModel({
   const priceChangedCount = eventSeeds.filter((e) => e.type === 'price_changed').length;
   const stockChangedCount = eventSeeds.filter((e) => e.type === 'stock_changed').length;
 
+  // `full` is the removal anchor for future runs: it must stay false unless
+  // this run was a GENUINE full catalogue (see `isFull` above). Marking a
+  // capped or 0-product run `full: true` would let the next crawl anchor on
+  // it — products untouched since then would become permanently ineligible
+  // for removal detection (the stale-catalogue trap).
   const snapshot = await Snapshot.create({
     origin,
     key,
     startedAt: durationMs ? new Date(now.getTime() - durationMs) : undefined,
     finishedAt: now,
-    full: fullCrawl !== false,
+    full: isFull,
     durationMs,
     stats: {
       discovered: s.discovered ?? 0,

@@ -12,6 +12,10 @@ const dataRoutes = require('./routes/data');
 const jobRoutes = require('./routes/jobs');
 const matchRoutes = require('./routes/match');
 const storeRoutes = require('./routes/stores');
+// P2 Website Intelligence Analyzer — pre-flight probes before a crawl.
+const analyzeRoutes = require('./routes/analyze');
+// Tier 2 — residential proxy gateway validation (P4).
+const proxyRoutes = require('./routes/proxy');
 const { spawnCrawlInfra } = require('./workers/spawn');
 const { ensureDemoUser } = require('./seed');
 
@@ -19,11 +23,22 @@ const app = express();
 const PORT = process.env.PORT;
 
 // Rate limiting — generous enough for a demo where every page fires several
-// /api/data calls plus a live crawl in one session.
+// /api/data calls plus a live crawl in one session. Aug 2026: the original
+// 500/15min cap got exhausted by one active crawl's live-progress polling
+// (page polls every 30s + worker beats + every Sources card's reads), after
+// which EVERY request — including /api/health and the frontend's own polls —
+// answered 429 and the UI showed "Progress updates stopped". Localhost is
+// the single demo user; exempt it and raise the cap well above what a
+// crawling session can emit.
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500,
-  message: 'Too many requests from this IP, please try again later.'
+  max: 20_000,
+  message: 'Too many requests from this IP, please try again later.',
+  skip: (req) => {
+    const ip =
+      req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || '';
+    return ip === '::1' || ip === '::ffff:127.0.0.1' || ip === '127.0.0.1';
+  }
 });
 
 // Middleware
@@ -53,6 +68,8 @@ app.use('/api/crawl-jobs', jobRoutes);
 app.use('/api/match', matchRoutes);
 // Phase 5 read path — normalized Store/Product/Snapshot/Event reads (D1).
 app.use('/api/stores', storeRoutes);
+app.use('/api/analyze', analyzeRoutes);
+app.use('/api/proxy', proxyRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

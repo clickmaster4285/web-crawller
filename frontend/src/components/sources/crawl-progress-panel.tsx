@@ -1,4 +1,5 @@
 import {
+  BadgeCheck,
   Cpu,
   Loader2,
   Pause,
@@ -14,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { TierBadge } from "@/components/sources/tier-badge";
 import type { CrawlJob, CrawlJobDiscovery } from "@/lib/crawl";
 import { formatDuration } from "@/utils/format";
 import { cn } from "@/lib/utils";
@@ -151,6 +153,49 @@ export function CrawlProgressPanel({
               : "Estimating time…"}
         </span>
       </div>
+
+      {/* Analyze-first snapshot — the strategy this crawl was started with
+          (captured at enqueue). Shows the recommendation tier, what was
+          auto-applied, and any WAF warning the probes surfaced. */}
+      {job.analysis ? (
+        <div className="rounded-md border border-border bg-muted/40 p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <span className="label-caps text-muted-foreground">Analyzed</span>
+            <TierBadge tier={job.analysis.tier} />
+            <span className="text-muted-foreground">
+              {job.analysis.platform} · {job.analysis.rendering}
+            </span>
+            {job.analysis.sitemap != null ? (
+              <span className="text-muted-foreground">
+                {job.analysis.sitemap.toLocaleString()} product URLs in sitemap
+              </span>
+            ) : null}
+            <span className="text-muted-foreground/70">
+              {job.analysis.requests} probe requests ·{" "}
+              {formatDuration(job.analysis.durationMs)}
+            </span>
+          </div>
+          {job.analysis.applied.length > 0 ? (
+            <ul className="mt-2 space-y-1 border-t border-border pt-2">
+              {job.analysis.applied.map((note) => (
+                <li
+                  key={note}
+                  className="flex items-start gap-1.5 text-muted-foreground"
+                >
+                  <BadgeCheck className="mt-px size-3.5 shrink-0 text-success" />
+                  <span className="leading-snug">{note}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {job.analysis.warning ? (
+            <p className="mt-2 flex items-start gap-1.5 border-t border-border pt-2 text-amber-600">
+              <TriangleAlert className="mt-px size-3.5 shrink-0" />
+              <span className="leading-snug">{job.analysis.warning}</span>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Cooperative control — pause/resume/cancel the running crawl. */}
       <div className="flex flex-wrap items-center gap-2">

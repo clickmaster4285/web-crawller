@@ -132,12 +132,12 @@ export interface CrawlConfig {
    * provider-side — every request exits through a different residential IP,
    * fixing the IP-reputation 403 blocks on dawlance/techmen/teslalaptops.
    * When set, every HTTP request in the crawl (robots.txt, discovery,
-   * product fetches) flows through the proxy via undici's `ProxyAgent`;
-   * retries, politeness and the robots gate are unchanged. (Pages rendered
-   * by the Playwright browser fallback use Chromium's own network stack and
-   * are not proxied.) The URL lives only in server memory / the user's own
-   * browser storage — never persisted to crawl results or logs, and never
-   * echoed in Parity's own error text.
+   * product fetches) flows through the proxy via undici's `ProxyAgent`, and
+   * JS-shell pages rendered by the Playwright fallback exit through the
+   * proxy too (Playwright context proxy) — a WAF can't spare the browser
+   * path. Retries, politeness and the robots gate are unchanged. The URL
+   * lives only in server memory / the user's own browser storage — never
+   * persisted to crawl results or logs, and redacted from error text.
    */
   proxy?: string;
   /** Called after each product is fetched. */
@@ -282,6 +282,27 @@ export interface WooCommerceDiagnostics {
 }
 
 /**
+ * Shopify products.json outcome (Tier 3 adapter).
+ *
+ * Shopify serves the full catalogue at `/products.json` on every storefront;
+ * walking it rescues stores whose sitemap is blocked or missing (athletix.ae:
+ * `/sitemap.xml` 429'd while `/products.json` paged cleanly). The fetch loop's
+ * existing per-product `/products/{handle}.json` probe then parses each URL.
+ */
+export interface ShopifyDiagnostics {
+  /**
+   * "public" — the catalogue is enumerable (walked for URLs);
+   * "auth-required" — 401/403; "unavailable" — no usable API (404 /
+   * non-JSON / robots-disallowed).
+   */
+  status: "public" | "auth-required" | "unavailable";
+  /** Product URLs the API walk contributed to discovery (deduped). */
+  urls: number;
+  /** Human-readable detail (probe failure). */
+  message?: string;
+}
+
+/**
  * BigCommerce Storefront API outcome (Tier 3 adapter).
  *
  * BigCommerce exposes `/api/storefront/catalog/products` (public, no
@@ -363,6 +384,8 @@ export interface DiscoveryDiagnostics {
   wooCommerce?: WooCommerceDiagnostics;
   /** BigCommerce Storefront API outcome (Tier 3 adapter), when probed. */
   bigCommerce?: BigCommerceDiagnostics;
+  /** Shopify products.json outcome (Tier 3 adapter), when probed. */
+  shopifyApi?: ShopifyDiagnostics;
   /** Human-readable findings/suggestions surfaced to the user. */
   findings: CrawlFinding[];
   /** Verbose discovery log (what the crawler did, in order). */
@@ -381,6 +404,14 @@ export interface CrawlStats {
   durationMs: number;
   /** Total HTTP requests made this run (every attempt counts). */
   requests: number;
+  /**
+   * True when the run was capped by `maxPages` (discovery found MORE URLs
+   * than the cap, so only the first `maxPages` were fetched). A capped run
+   * is NOT a full catalogue — the ingest pipeline must not treat the URLs
+   * beyond the cap as removals, and the run must never become the removal-
+   * anchor snapshot.
+   */
+  capped?: boolean;
 }
 
 export interface CrawlResult {

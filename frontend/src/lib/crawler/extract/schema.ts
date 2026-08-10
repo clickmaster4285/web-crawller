@@ -10,7 +10,8 @@
 
 export interface ExtractedOffer {
   price: number;
-  priceCurrency: string;
+  /** ISO 4217 code when declared — undefined = unknown (no silent USD). */
+  priceCurrency?: string;
   availability:
     | "InStock"
     | "OutOfStock"
@@ -36,7 +37,9 @@ export interface ExtractedProduct {
   mpn?: string;
   price: number;
   compareAtPrice?: number;
-  priceCurrency: string;
+  /** ISO 4217 code when the extractor found one — undefined = genuinely
+   *  unknown (never a silent "USD" default, Aug 2026 rule). */
+  priceCurrency?: string;
   availability: "in_stock" | "out_of_stock" | "preorder" | "unknown";
   offers: ExtractedOffer[];
   rating?: number;

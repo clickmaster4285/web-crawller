@@ -1,7 +1,16 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { GitCompareArrows, Play, Plus, Store, UserPlus, X } from "lucide-react";
+import {
+  Check,
+  GitCompareArrows,
+  Play,
+  Plus,
+  Store,
+  User,
+  UserPlus,
+  X,
+} from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { AddCompetitorDialog } from "@/components/competitors/add-competitor-dialog";
@@ -13,13 +22,14 @@ import {
   StorePickerDialog,
   type StoreOption,
 } from "@/components/competitors/store-picker-dialog";
-import { Badge } from "@/components/ui/badge";
+import { StorePill } from "@/components/competitors/store-pill";
 import { Button } from "@/components/ui/button";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { useSavedCrawlMetas } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import {
   getMyStoreData,
+  getStores,
   invalidateMatchingData,
   queryKeys,
   setMyStoreData,
@@ -63,6 +73,23 @@ function CompetitorsPage() {
   // the stores actually selected, so this page never downloads every store's
   // products at once (tens of thousands of products ≈ 10 MB).
   const { data: saved, isLoading, isError } = useSavedCrawlMetas();
+  // The REAL catalogue sizes (Store/productCount computed live from the
+  // products collection). The crawl summaries above report what the LAST
+  // SNAPSHOT captured — a WAF-blocked run saves a 0-product snapshot even
+  // though the catalogue is intact (prosportsae: 441 products, snapshot 0).
+  // Prefer the live count so the picker never misleads; fall back to the
+  // snapshot count for origins without a normalized Store row.
+  const storeSummariesQuery = useQuery({
+    queryKey: queryKeys.stores,
+    queryFn: () => getStores(),
+  });
+  const realCountByKey = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of storeSummariesQuery.data?.data ?? []) {
+      m.set(s.key, s.productCount);
+    }
+    return m;
+  }, [storeSummariesQuery.data]);
   const stores = useMemo<StoreOption[]>(() => {
     const latest = new Map<string, StoreOption>();
     for (const c of saved?.data ?? []) {
@@ -71,14 +98,14 @@ function CompetitorsPage() {
         latest.set(key, {
           key,
           origin: c.origin,
-          productCount: c.productCount,
+          productCount: realCountByKey.get(key) ?? c.productCount,
           platform: c.platform,
           updatedAt: c.updatedAt,
         });
       }
     }
     return [...latest.values()];
-  }, [saved]);
+  }, [saved, realCountByKey]);
 
   // Your website — a single persisted selection, used as store A everywhere.
   const myStoreQuery = useQuery({
@@ -217,15 +244,13 @@ function CompetitorsPage() {
       ) : (
         <>
           {/* Your website — the reference side of every comparison. */}
-          <section className="mx-6 mt-8 border border-border bg-card">
+          <section className="mx-6 mt-8 border border-border border-t-2 border-t-primary/40 bg-card">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
               <div className="flex min-w-0 items-center gap-2.5">
                 <Store className="size-4 shrink-0 text-muted-foreground" />
                 <h3 className="font-display text-lg">Your website</h3>
                 {myStoreKey ? (
-                  <Badge variant="secondary" className="font-normal">
-                    Selected
-                  </Badge>
+                  <StorePill label="Selected" tone="mine" icon={Check} />
                 ) : null}
               </div>
               <div className="flex items-center gap-2">
@@ -258,9 +283,9 @@ function CompetitorsPage() {
               <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-5 py-4">
                 <div className="min-w-0">
                   <p className="label-caps">Domain</p>
-                  <p className="mt-1 truncate font-mono text-sm">
-                    {myStoreKey}
-                  </p>
+                  <div className="mt-1.5">
+                    <StorePill label={myStoreKey} tone="mine" />
+                  </div>
                 </div>
                 <div>
                   <p className="label-caps">Products</p>
@@ -306,7 +331,11 @@ function CompetitorsPage() {
               if (!slot) {
                 return (
                   <div key={i} className="bg-card p-5">
-                    <p className="label-caps">Competitor {i + 1}</p>
+                    <StorePill
+                      label={`Competitor ${i + 1}`}
+                      tone="muted"
+                      icon={UserPlus}
+                    />
                     <div className="mt-4 flex flex-col items-center border border-dashed border-border px-4 py-8 text-center">
                       <UserPlus className="size-5 text-muted-foreground" />
                       <p className="mt-2 text-sm text-muted-foreground">
@@ -327,7 +356,11 @@ function CompetitorsPage() {
               return (
                 <div key={i} className="bg-card p-5">
                   <div className="flex items-start justify-between gap-2">
-                    <p className="label-caps">Competitor {i + 1}</p>
+                    <StorePill
+                      label={`Competitor ${i + 1}`}
+                      tone="muted"
+                      icon={User}
+                    />
                     <Button
                       variant="ghost"
                       size="icon"
@@ -338,9 +371,13 @@ function CompetitorsPage() {
                       <X className="size-3.5" />
                     </Button>
                   </div>
-                  <h3 className="mt-2 truncate font-mono text-sm font-medium">
-                    {slot.key}
-                  </h3>
+                  <div className="mt-2.5">
+                    <StorePill
+                      label={slot.key}
+                      tone="competitor"
+                      className="font-mono"
+                    />
+                  </div>
                   <dl className="mt-3 space-y-1.5 text-xs">
                     {[
                       ["Products", slot.store.productCount.toLocaleString()],

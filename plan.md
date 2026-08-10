@@ -55,6 +55,16 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
       offers instead of saving fake 0s, and never treats `price: 0` (free items) as
       missing. Verified live: `fitnessdepot.pk` prices now extract (1400 / 300 / 4900 PKR
       vs all-0 before).
+- [x] **Non-product junk filter (2026-08)** — `discover/junk-segments.ts` is
+      the **single source of truth** for the classifier (JUNK_SEGMENT_RE +
+      hasJunkSegment + pathSegments + PRODUCT_BASE_RE + isProductUrl); the
+      crawler imports it directly, `crawlSync` (ingest guard) and the
+      `tools/` ops scripts load it via `await import()`. Junk segments are
+      stripped at ANY path depth from every sitemap source (locale-prefixed
+      blogs/policies/collections), a product-base-dominance rule drops
+      non-base URLs when 60%+ sit under `/product(s)/`, and a filtered run
+      reports the count in "What the crawler found". Verified: urbanfitness
+      sitemap 5,477 → 5,117 URLs with 0 junk.
 
 ### Crawl jobs & persistence
 - [x] Job/poll server functions (`startCrawl` / `getCrawlProgress`), live
@@ -79,7 +89,7 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 | Active crawls | `/crawler` | ✅ **background-crawler hub** — every in-flight job (queued/claimed/retrying, paused included) + last 15 min finished, polled 2.5s, with per-card Pause / Resume / Cancel (cancel confirmed via dialog; pause/resume/cancel all fire sonner toasts), progress bar, shallow/deep badges, Track links, and a **debug strip with worker id + live HTTP-request count** |
 | Saved crawls | `/crawls` | ✅ history hidden by default + Show/Hide, "+N new" badges, expandable rows, Re-crawl, delete/clear |
 | Store catalogue | `/stores/$origin` | ✅ full searchable + sortable product table, snapshot picker, **All-snapshots union view with per-product price sparklines**, per-snapshot price trails, Delete store, discovery log, paginated rows |
-| Competitors | `/competitors` | ✅ empty-by-default slot flow (your-website picker + 4 competitor slots), per-slot comparison panels, fuzzy matching **on by default**, paginated tables |
+| Competitors | `/competitors` | ✅ empty-by-default slot flow (your-website picker + 4 competitor slots), per-slot comparison panels reading the server-side matcher — **side-by-side match cards** (your product + price vs theirs, shared `StorePill` ink/amber tones, USD estimates, best-price + out-of-stock chips) in a fixed-width grid so Difference/Cheapest never overlap; fuzzy matching **on by default**, paginated |
 | Matched products | `/products` | ✅ **real matching layer** — your crawled catalogue vs each competitor via `backend/utils/matcher.js` (GTIN > SKU > URL slug > fuzzy name): match method + confidence, your-price / price gap, competitor products you don't carry shown as **Unmatched**; paginated. Honestly empty until your store is set (`/competitors`) and crawled |
 | Pricing | `/pricing` | ✅ real market trend + price index + biggest movers from snapshot time-series |
 | Catalogue gaps | `/catalogue` | ⬜ empty state — matching layer is live; needs category/brand gap analysis on top of your catalogue |
@@ -109,19 +119,23 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
       `CrawlDiffSummary`, `StateCard`, `formatPrice`/`formatDuration` — removed
       ~6× duplicated price formatting, stock badges, stats grids and diff blocks.
 - [x] Dead code removed (unused `EmptyState`, `ui/toggle.tsx`, unused re-export).
+- [x] One-off diagnostic scripts pruned (Aug 9): `tools/` reduced to the two
+      reusable ops scripts (`purge-junk-all-stores.js`,
+      `check-junk-all-stores.js`), `backend/scripts/` to the two `npm run`
+      entries (`backfill`, `reconcile-matches`).
 - [x] `AGENTS.md` kept in sync; docs updated for every feature.
 
 ---
 
 ## 🔜 What's next (priority order)
 
-> **Current focus (Aug 2026):** set **your website** on `/competitors` (the
-> compare/match/alerts pipeline is idle — `mystores`/`competitors`/
-> `productmatches`/`alertstates` are empty in the live DB), then the **D1
-> endgame**: flip `/crawls`, `/sources`, `/pricing` onto the `/api/stores/*`
-> read endpoints and freeze + drop `CrawlResult`. Also: prune terminal
-> `crawljobs` (finished jobs embed full product arrays ≈ 1 MB each) and clear
-> the 0-product snapshots stacked by the 429-blocked stores.
+> **Current focus (Aug 2026):** the **P1 pipeline is complete** — real OMR/AED
+> prices, removal guard, junk filter, real matches. Next: the **D1 endgame**
+> (flip `/crawls`, `/sources`, `/pricing` onto the `/api/stores/*` read
+> endpoints, then freeze + drop `CrawlResult`), the **P2 Website Intelligence
+> Analyzer** (pre-flight probes for new stores), pruning terminal `crawljobs`
+> (finished jobs embed full product arrays ≈ 1 MB each), and the Tier-2
+> proxy for 429-blocked stores (prosportsae/athletix).
 
 ### 1. Price history & Pricing page — done
 - [x] Backend time-series — `computePriceHistory` flattens an origin's

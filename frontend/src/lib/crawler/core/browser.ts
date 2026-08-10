@@ -33,6 +33,31 @@ export interface BrowserRenderOptions {
   timeoutMs?: number;
   /** Extra settle time after network idle (ms) for SPA hydration. Default 1500. */
   settleMs?: number;
+  /**
+   * Tier 2 — residential proxy gateway URL. When set, the rendering context's
+   * traffic exits through the proxy (Playwright context-level proxy), so a
+   * WAF that blocks the machine's IP can't spare the JS-shell pages either.
+   */
+  proxy?: string;
+}
+
+/**
+ * Splits a gateway URL (`http://user:pass@host:port`) into Playwright's
+ * context-proxy shape: the server URL WITHOUT userinfo (Playwright can
+ * mis-parse credentials embedded in the server string) plus explicit
+ * username/password fields.
+ */
+function playwrightProxy(url: string): {
+  server: string;
+  username?: string;
+  password?: string;
+} {
+  const u = new URL(url);
+  return {
+    server: `${u.protocol}//${u.host}`,
+    ...(u.username ? { username: decodeURIComponent(u.username) } : {}),
+    ...(u.password ? { password: decodeURIComponent(u.password) } : {}),
+  };
 }
 
 /** Reused across renders within the process — launch is the expensive part. */
@@ -129,6 +154,10 @@ export async function renderWithBrowser(
   const context = await browser.newContext({
     userAgent: options.userAgent,
     viewport: { width: 1366, height: 900 },
+    // Tier 2: render from the proxy when one is configured — the HTTP layer
+    // already exits through it, the browser must too or a WAF would only
+    // block the rendered (JS-shell) pages.
+    ...(options.proxy ? { proxy: playwrightProxy(options.proxy) } : {}),
   });
   try {
     const page = await context.newPage();

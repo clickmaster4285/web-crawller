@@ -82,7 +82,11 @@ function toUsd(price, currency, rates) {
     return null;
   }
   const c = String(currency || '').toUpperCase().trim();
-  if (!c || c === 'USD') return price;
+  // Unknown currency → NOT comparable. Null/empty must never silently pass
+  // through as USD (the Aug 2026 "no silent USD" rule): an AED price whose
+  // currency token was missed must read as non-comparable, not as $65.
+  if (!c) return null;
+  if (c === 'USD') return price;
   const rate = rates?.[c];
   if (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0) {
     return null;

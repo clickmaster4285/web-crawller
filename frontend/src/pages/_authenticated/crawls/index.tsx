@@ -156,14 +156,18 @@ function CrawlsPage() {
     );
   }, [groups, query]);
 
-  const totals = useMemo(
-    () => ({
-      products: crawls.reduce((n, c) => n + c.products.length, 0),
+  // The store's CURRENT catalogue size = the LATEST snapshot per store,
+  // summed across stores. Summing every snapshot double-counts products that
+  // appear in multiple runs (4 × 5,086 ≠ 5,086) — same for the URL hint.
+  // Failures stay a true historical total (retried next crawl).
+  const totals = useMemo(() => {
+    const latestPerStore = groups.map(([, group]) => group[0]);
+    return {
+      products: latestPerStore.reduce((n, c) => n + c.products.length, 0),
       failures: crawls.reduce((n, c) => n + c.failures.length, 0),
-      urls: crawls.reduce((n, c) => n + c.stats.discovered, 0),
-    }),
-    [crawls],
-  );
+      urls: latestPerStore.reduce((n, c) => n + c.stats.discovered, 0),
+    };
+  }, [groups, crawls]);
 
   // Per-type counts over ALL snapshots (unfiltered) — the toggle shows real
   // numbers even while a filter is active.

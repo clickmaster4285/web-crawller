@@ -12,4 +12,7 @@ export {
   extractProductHandles,
   collectionProductUrlRe,
   SHOPIFY_PRODUCT_URL_RE,
+  probeShopifyApi,
+  discoverShopifyProducts,
+  type ShopifyApiProbe,
 } from "./shopify-discover.ts";

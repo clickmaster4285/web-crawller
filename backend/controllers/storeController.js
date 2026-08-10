@@ -88,13 +88,28 @@ function storeSummary(store) {
   };
 }
 
-/** GET /api/stores — every crawled store, meta only (productCount kept at ingest). */
+/** GET /api/stores — every crawled store, meta only. `productCount` is the
+ *  REAL count from the products collection — `Store.productCount` only
+ *  records the last crawl's count, which a blocked/empty run zeroes out (and
+ *  the ingest removal guard correctly leaves the catalogue intact). One
+ *  grouped aggregation replaces per-store countDocuments. Excludes only the
+ *  soft-deleted junk pages whose `lastSeenAt` was reset to the epoch by the
+ *  purge (Aug 2026 cleanup) — NOT out-of-stock rows, which are still part of
+ *  the catalogue (an out-of-stock-heavy store would otherwise read ~28). */
 const listStores = async (req, res) => {
   try {
-    const docs = await Store.find()
-      .sort({ updatedAt: -1 })
-      .lean();
-    const data = docs.map(storeSummary);
+    const [docs, counts] = await Promise.all([
+      Store.find().sort({ updatedAt: -1 }).lean(),
+      Product.aggregate([
+        { $match: { lastSeenAt: { $gt: new Date(0) } } },
+        { $group: { _id: '$key', n: { $sum: 1 } } }
+      ])
+    ]);
+    const countByKey = new Map(counts.map((r) => [r._id, r.n]));
+    const data = docs.map((s) => ({
+      ...storeSummary(s),
+      productCount: countByKey.get(s.key) ?? s.productCount ?? 0
+    }));
     res.json({ success: true, count: data.length, data });
   } catch (error) {
     console.error('List stores error:', error);
@@ -109,13 +124,20 @@ const getStore = async (req, res) => {
     if (!key) {
       return res.status(400).json({ success: false, message: 'Invalid store key' });
     }
-    const [store, latestSnapshot] = await Promise.all([
+    const [store, latestSnapshot, realCount] = await Promise.all([
       Store.findOne({ key }).lean(),
-      Snapshot.findOne({ key }).sort({ finishedAt: -1 }).lean()
+      Snapshot.findOne({ key }).sort({ finishedAt: -1 }).lean(),
+      // Real catalogue size — Store.productCount is the last crawl's count,
+      // which a blocked run zeroes (products collection is the truth).
+      // Excludes only epoch-lastSeenAt junk pages (Aug 2026 purge marker).
+      Product.countDocuments({ key, lastSeenAt: { $gt: new Date(0) } })
     ]);
     res.json({
       success: true,
-      data: { store: store ? storeSummary(store) : null, latestSnapshot }
+      data: {
+        store: store ? { ...storeSummary(store), productCount: realCount } : null,
+        latestSnapshot
+      }
     });
   } catch (error) {
     console.error('Get store error:', error);
@@ -141,7 +163,13 @@ const listProducts = async (req, res) => {
     // Cap the search string — a huge `q` would build a giant regex over the
     // (documented) in-memory name scan per store.
     const q = (typeof req.query.q === 'string' ? req.query.q.trim() : '').slice(0, 200);
-    const filter = cursorFilter(req.query.cursor, 'lastSeenAt', { key });
+    // Match the card's catalogue definition: skip the epoch-lastSeenAt junk
+    // pages soft-deleted by the Aug 2026 purge, so the store page doesn't
+    // list blog/brand pages the cards already exclude.
+    const filter = cursorFilter(req.query.cursor, 'lastSeenAt', {
+      key,
+      lastSeenAt: { $gt: new Date(0) }
+    });
     if (q) {
       filter.name = { $regex: escapeRegex(q), $options: 'i' };
     }
@@ -152,6 +180,7 @@ const listProducts = async (req, res) => {
       .select(PRODUCT_PROJECTION)
       .limit(limit + 1)
       .lean();
+
 
     const hasMore = docs.length > limit;
     const rows = hasMore ? docs.slice(0, limit) : docs;

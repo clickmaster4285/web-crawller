@@ -118,13 +118,18 @@ export function CrawlSetupPanel({
         ) : null}
 
         <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
-          <Button size="lg" onClick={onRunCrawl} disabled={!canStart}>
+          <Button
+            size="lg"
+            onClick={onRunCrawl}
+            disabled={!canStart}
+            title="Analyzes the store first (a few polite probes, ~5–15s), then starts the crawl with the recommended strategy — API, sitemap or HTML links, browser rendering as needed."
+          >
             {pendingDeep || running ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
               <Play className="size-4" />
             )}
-            {pendingDeep ? "Starting…" : running ? "Crawling…" : "Run crawl"}
+            {pendingDeep ? "Analyzing…" : running ? "Crawling…" : "Run crawl"}
           </Button>
           <Button
             variant="outline"
@@ -166,11 +171,13 @@ export function CrawlSetupPanel({
           </div>
         </div>
         <p className="text-xs text-muted-foreground">
-          Quick check runs a sitemap-only crawl — it fetches just the new
-          product pages (≈1 request when nothing changed). Recurring crawls run
-          automatically via the scheduler (schedules persist on the server, so
-          they survive restarts). Re-scheduling an origin replaces its existing
-          schedule.
+          Run crawl probes the store first (a few polite requests, ~5–15s) and
+          starts with the recommended strategy — you'll see the analysis on the
+          progress panel. Quick check runs a sitemap-only crawl — it fetches
+          just the new product pages (≈1 request when nothing changed).
+          Recurring crawls run automatically via the scheduler (schedules
+          persist on the server, so they survive restarts). Re-scheduling an
+          origin replaces its existing schedule.
         </p>
       </div>
     </section>

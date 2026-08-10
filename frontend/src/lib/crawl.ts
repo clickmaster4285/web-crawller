@@ -74,6 +74,12 @@ export interface CrawlRunInput {
    * don't). Empty = crawl every discovered URL.
    */
   productUrlPattern?: string;
+  /**
+   * Analyze-first (P2 Phase 2): probe the store (~5–15s) before a manual
+   * deep crawl starts and fold the recommendation into the job's params
+   * (default true). Set false for instant re-crawls of already-known stores.
+   */
+  analyze?: boolean;
 }
 
 export interface CrawlRunResult {
@@ -315,6 +321,12 @@ export interface CrawlJob {
   /** Live discovery counts while the discovery phase runs (null after). */
   discovery: CrawlJobDiscovery | null;
   finishedAt: number | null;
+  /**
+   * Pre-crawl analysis snapshot for manual deep crawls (null for shallow
+   * checks / scheduled runs / failed probes) — the strategy the job was
+   * started with and any WAF warning.
+   */
+  analysis?: CrawlJobAnalysis | null;
   /** Present when status === "done". */
   result?: CrawlRunResult;
   /** Present when status === "error". */
@@ -326,6 +338,122 @@ export interface CrawlJob {
 /** Base backend URL for the Express API (dev-proxied same-origin otherwise). */
 const backendUrl = () =>
   process.env.PARITY_BACKEND_URL ?? "http://localhost:3000";
+
+// The WebsiteProfile type lives with the analyzer itself (frontend/src/lib/
+// crawler/analyze.ts) — imported type-only (erased at compile time, zero
+// runtime coupling) so the API boundary and the crawler can never drift apart
+// (the project's single-source-of-truth rule). Re-exported for callers.
+import type {
+  WebsiteProfile,
+  RecommendationTier,
+  RenderVerdict,
+} from "@/lib/crawler/analyze";
+
+export type { WebsiteProfile };
+
+/** The recommended crawl strategy (same union as the analyzer's tiers). */
+export type CrawlTier = RecommendationTier;
+
+/**
+ * The pre-crawl analysis snapshot captured at enqueue time (analyze-first
+ * crawls): what the five probes found and what was auto-applied to the job's
+ * params. Rides on the job so the progress panel can show the strategy the
+ * crawl is actually running with.
+ */
+export interface CrawlJobAnalysis {
+  /** Recommendation tier the crawl was started with. */
+  tier: CrawlTier;
+  /** Detected platform (e.g. "Shopify"). */
+  platform: string;
+  /** Render verdict (ssr / csr-shell / ssg / unknown). */
+  rendering: RenderVerdict;
+  /**
+   * True when the analysis forced browser rendering (csr-shell) over the
+   * panel's setting — the panel "matches" the job even with useBrowser off.
+   */
+  renderingForced: boolean;
+  /** WAF evidence when the store blocks automated requests (null otherwise). */
+  protection: string | null;
+  /** Product sitemap size when one was found (null when not). */
+  sitemap: number | null;
+  /** How long the probes took (ms). */
+  durationMs: number;
+  /** Number of probe requests made. */
+  requests: number;
+  /** Human lines describing config auto-applied from the recommendation. */
+  applied: string[];
+  /** Non-null when the crawl carries a real risk (e.g. WAF-blocked store). */
+  warning: string | null;
+}
+
+/**
+ * Runs the Website Intelligence Analyzer against an origin — the five probes
+ * (platform, store APIs, JSON-LD, bot protection, render mode) answer "how is
+ * this site built?" in ~5–20 polite requests WITHOUT enqueuing a crawl. The
+ * Sources store profile calls this from its "Run analysis" button.
+ */
+export const analyzeWebsite = createServerFn({ method: "POST" })
+  .validator((input: { origin: string; proxy?: string }) => {
+    const origin = input.origin.trim();
+    if (!/^https?:\/\/\S+/i.test(origin)) {
+      throw new Error("Origin must be a valid http(s) URL");
+    }
+    return { ...input, origin, proxy: normalizeProxy(input.proxy) };
+  })
+  .handler(async ({ data }): Promise<WebsiteProfile> => {
+    const res = await fetch(`${backendUrl()}/api/analyze`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: WebsiteProfile;
+    };
+    return body.data;
+  });
+
+/** Result of a Tier-2 proxy-gateway validation (`POST /api/proxy/test`). */
+export interface ProxyTestResult {
+  /** True when the gateway answered the IP echo through the proxy. */
+  ok: boolean;
+  /** The exit IP the crawl would use (null when the test failed). */
+  exitIp: string | null;
+  /** HTTP status of the echo response (null when the connection failed). */
+  status: number | null;
+  /** Round-trip latency of the echo request (ms). */
+  latencyMs: number;
+  /** Redacted failure text (the gateway URL is never echoed). */
+  error: string | null;
+}
+
+/**
+ * Tier 2 — validates a residential proxy gateway BEFORE a crawl uses it:
+ * fetches an IP echo through the proxy and reports the exit IP. The URL is
+ * used transiently server-side and never persisted or logged.
+ */
+export const testProxy = createServerFn({ method: "POST" })
+  .validator((proxy: string) => {
+    const trimmed = proxy.trim();
+    if (!/^https?:\/\/\S+/i.test(trimmed)) {
+      throw new Error("Proxy must be a valid http(s) URL");
+    }
+    return trimmed;
+  })
+  .handler(async ({ data: proxy }): Promise<ProxyTestResult> => {
+    const res = await fetch(`${backendUrl()}/api/proxy/test`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ proxy }),
+    });
+    if (!res.ok) throw await backendError(res);
+    const body = (await res.json()) as {
+      success: boolean;
+      data: ProxyTestResult;
+    };
+    return body.data;
+  });
 
 /** Reads the backend's error message out of a failed response. */
 async function backendError(res: Response): Promise<Error> {
@@ -372,21 +500,31 @@ function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
  * its id immediately. A worker process picks it up; the client polls
  * `getCrawlProgress` for live progress, then the final result.
  */
+/**
+ * Starts a crawl: the backend runs the pre-crawl analysis probes first (for
+ * manual deep crawls, ~5–15s) so the job starts with the recommended
+ * strategy, then enqueues it and returns the job id + the analysis snapshot
+ * immediately. The client polls `getCrawlProgress` for live progress.
+ */
 export const startCrawl = createServerFn({ method: "POST" })
   .validator((input: CrawlRunInput) => validateCrawlInput(input))
-  .handler(async ({ data }): Promise<{ jobId: string }> => {
-    const res = await fetch(`${backendUrl()}/api/crawl-jobs`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) throw await backendError(res);
-    const body = (await res.json()) as {
-      success: boolean;
-      data: { jobId: string };
-    };
-    return { jobId: body.data.jobId };
-  });
+  .handler(
+    async ({
+      data,
+    }): Promise<{ jobId: string; analysis: CrawlJobAnalysis | null }> => {
+      const res = await fetch(`${backendUrl()}/api/crawl-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw await backendError(res);
+      const body = (await res.json()) as {
+        success: boolean;
+        data: { jobId: string; analysis: CrawlJobAnalysis | null };
+      };
+      return { jobId: body.data.jobId, analysis: body.data.analysis ?? null };
+    },
+  );
 
 /** Returns the current snapshot of a crawl job, or null for an unknown id. */
 export const getCrawlProgress = createServerFn({ method: "POST" })

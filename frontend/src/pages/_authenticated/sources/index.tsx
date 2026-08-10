@@ -14,6 +14,7 @@ import { CrawlProgressPanel } from "@/components/sources/crawl-progress-panel";
 import { CrawlResultsPanel } from "@/components/sources/crawl-results-panel";
 import { CrawlConfigPanel } from "@/components/sources/crawl-config-panel";
 import { ActiveSchedulesPanel } from "@/components/sources/active-schedules-panel";
+import { StoreAnalysisPanel } from "@/components/sources/store-analysis-panel";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ErrorState, LoadingState } from "@/components/common/states";
@@ -34,6 +35,7 @@ import {
   resumeCrawlJob,
   scheduleCrawl,
   startCrawl,
+  testProxy,
   type CrawlFrequency,
   type CrawlJob,
   type CrawlRunInput,
@@ -46,6 +48,7 @@ import {
   crawlType,
   normalizeOrigin,
   parseCustomMaxPages,
+  toOriginUrl,
   type MaxPagesMode,
 } from "@/utils/crawls";
 import {
@@ -167,6 +170,13 @@ function SourcesPage() {
     "parity.sources.snapshots",
     true,
   );
+  // Analyze-first (P2 Phase 2): probe the store before a deep crawl starts
+  // and apply the recommended strategy. Default on — turn off for instant
+  // re-crawls of already-known stores.
+  const [analyzeStore, setAnalyzeStore] = useLocalStorageState(
+    "parity.sources.analyze",
+    true,
+  );
   // Tier 1 — Playwright browser rendering. AUTO by default (key bumped to v2
   // so a previously-stored `false` from the old opt-in toggle doesn't keep
   // auto-rendering disabled for existing users): the renderer is available
@@ -265,6 +275,13 @@ function SourcesPage() {
     mutationFn: (input: ScheduleCrawlInput) => scheduleCrawl({ data: input }),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: ["crawl-schedules"] }),
+  });
+
+  // Tier 2 — validate the entered proxy gateway (IP echo through the proxy)
+  // so a bad URL is caught before a crawl burns time on it. The result is
+  // cleared when the URL is edited so a stale pass/fail never sticks.
+  const proxyTest = useMutation({
+    mutationFn: (proxyUrl: string) => testProxy({ data: proxyUrl }),
   });
   const cancelSchedule = useMutation({
     mutationFn: (origin: string) => cancelCrawlSchedule({ data: origin }),
@@ -377,7 +394,10 @@ function SourcesPage() {
       : null;
 
   // Whether the panel's current config still matches what the running job
-  // was started with — false means the job is using stale parameters.
+  // was started with — false means the job is using stale parameters. The
+  // pre-crawl analysis may force browser rendering (csr-shell) over a panel
+  // 'false' — that's the recommendation doing its job, not a config change,
+  // so it still counts as matching.
   const paramsMatch =
     !job ||
     (job.params.delayMs === crawlDelay &&
@@ -386,7 +406,8 @@ function SourcesPage() {
       job.params.respectRobotsTxt === respectRobots &&
       job.params.productOnly === productOnly &&
       job.params.storeSnapshots === storeSnapshots &&
-      job.params.useBrowser === useBrowser &&
+      job.params.useBrowser ===
+        (useBrowser || (job.analysis?.renderingForced ?? false)) &&
       job.params.proxy === proxy.trim().length > 0 &&
       job.params.productUrlPattern === (productUrlPattern.trim() || null));
 
@@ -499,6 +520,9 @@ function SourcesPage() {
     productOnly,
     storeSnapshots,
     useBrowser,
+    // Deep crawls probe the store first and apply the recommendation;
+    // shallow quick-checks stay instant (the backend ignores the flag).
+    analyze: analyzeStore,
     proxy: proxy.trim() || undefined,
     productUrlPattern: productUrlPattern.trim() || undefined,
     type,
@@ -597,6 +621,19 @@ function SourcesPage() {
             ) : undefined
           }
         />
+
+        {/* ── 1.6 Website Intelligence Analyzer — pre-flight probes ──── */}
+        {crawlOrigin.trim() ? (
+          <StoreAnalysisPanel
+            origin={toOriginUrl(crawlOrigin)}
+            proxy={proxy.trim() || undefined}
+            onApplyRecommendation={(patch) => {
+              // A csr-shell verdict means pages are JS shells — the next crawl
+              // must render them to extract prices (sitemap-browser tier).
+              setUseBrowser(patch.useBrowser);
+            }}
+          />
+        ) : null}
 
         {/* ── 2. Live progress while a crawl runs ─────────────────────── */}
         {isRunning && job ? (
@@ -709,8 +746,17 @@ function SourcesPage() {
           onStoreSnapshotsChange={(value) => setStoreSnapshots(value)}
           useBrowser={useBrowser}
           onUseBrowserChange={(value) => setUseBrowser(value)}
+          analyzeStore={analyzeStore}
+          onAnalyzeStoreChange={(value) => setAnalyzeStore(value)}
           proxy={proxy}
-          onProxyChange={(value) => setProxy(value)}
+          onProxyChange={(value) => {
+            setProxy(value);
+            // A stale test result must never describe the edited URL.
+            proxyTest.reset();
+          }}
+          proxyTestPending={proxyTest.isPending}
+          proxyTestResult={proxyTest.data ?? null}
+          onTestProxy={() => proxyTest.mutate(proxy.trim())}
           productUrlPattern={productUrlPattern}
           onProductUrlPatternChange={(value) => setProductUrlPattern(value)}
         />

@@ -107,6 +107,16 @@ const crawlJobSchema = new mongoose.Schema(
     params: { type: crawlParamsSchema, default: () => ({}) },
     progress: { type: progressSchema, default: () => ({}) },
     /**
+     * Pre-crawl analysis snapshot (P2 Phase 2 — analyze-first crawls): the
+     * Website Intelligence Analyzer result folded into the job at enqueue
+     * time for manual deep crawls — recommendation tier, platform/rendering
+     * verdict, sitemap size, what was auto-applied to the captured params
+     * (`applied`) and any WAF warning. Null for shallow checks, scheduled
+     * runs, and crawls whose probe failed (the crawl still starts). Never
+     * contains the proxy URL.
+     */
+    analysis: { type: mongoose.Schema.Types.Mixed, default: null },
+    /**
      * The sanitized crawl result (stats, failures, discovery, products) —
      * written on completion so the final poll can render the result without
      * an extra read. Transient: the TTL index on finishedAt removes the doc

@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { CancelCrawlDialog } from "@/components/crawls/cancel-crawl-dialog";
+import { TierBadge } from "@/components/sources/tier-badge";
 import {
   cancelCrawlJob,
   listActiveCrawlJobs,
@@ -286,6 +287,9 @@ function CrawlerPage() {
                               ? "shallow check"
                               : "deep crawl"}
                           </Badge>
+                          {job.analysis ? (
+                            <TierBadge tier={job.analysis.tier} />
+                          ) : null}
                           <Badge
                             variant={
                               paused

@@ -117,6 +117,17 @@ async function saveFinishedCrawl({
   let store = null;
   try {
     const key = normalizeHost(origin);
+    // productCount mirrors the catalogue — only a run that parsed a genuine
+    // catalogue may update it. Zero-product runs (WAF-blocked or brand-page-
+    // only crawls, which the ingest removal guard treats as "we didn't really
+    // see the store") and capped runs (partial by definition — maxPages cut
+    // the catalogue short) must NOT overwrite the last known count: Aug 2026,
+    // a 400-brand-page capped run zeroed activefitnessstore.com's store card
+    // to 0 while 10,462 products sat untouched in the catalogue.
+    const catalogueCount =
+      payload.products.length > 0 && !payload.stats?.capped
+        ? payload.products.length
+        : undefined;
     const set = {
       key,
       platform: payload.discovery?.platform ?? null,
@@ -127,7 +138,7 @@ async function saveFinishedCrawl({
         durationMs: payload.stats.durationMs ?? 0,
         productCount: payload.products.length
       },
-      productCount: payload.products.length
+      ...(catalogueCount != null ? { productCount: catalogueCount } : {})
     };
     if (type === 'shallow') set.lastShallowAt = new Date();
     else set.lastDeepAt = new Date();

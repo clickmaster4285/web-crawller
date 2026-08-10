@@ -36,6 +36,12 @@ export interface SavedCrawl {
     skippedUnchanged: number;
     failed: number;
     durationMs: number;
+    /**
+     * True when the run was capped by `maxPages` — discovery found more URLs
+     * than were fetched, so this snapshot is NOT the full catalogue and its
+     * absence of products must not be read as removals.
+     */
+    capped?: boolean;
   };
   products: SavedCrawlProduct[];
   failures: SavedCrawlFailure[];

@@ -201,7 +201,7 @@ no page imports local mock data. There are no placeholder shells left:
 | Page             | Route            | What it shows today                                                                                |
 | ---------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
 | Overview         | `/`            | Stat cards + competitor snapshot via`useAnalytics()`; `NoRealDataState` when no crawls exist yet  |
-| Competitors      | `/competitors` | **Empty-by-default slot flow**: a "Your website" picker (persisted via `GET/PUT /api/data/my-store`, used as store A everywhere) + **4 competitor slot cards** (selections persisted under `parity.competitors.slots`), each opening a searchable `StorePickerDialog` of crawled stores that excludes already-used ones. Every filled slot renders its own **ComparePanel** reading the **server-side matcher** (`GET /api/match` — persisted `ProductMatch` rows + paginated only-A / only-B lists, so the browser never downloads the full catalogues): in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with method badges (GTIN/SKU/URL slug/fuzzy + confidence) and a **Cheapest** column, all **paginated** server-side (25/page, per-tab page state). No per-browser fuzzy toggle anymore — matching is server-owned (GTIN > SKU > URL slug > token fuzzy > trigram recall) and refreshed after every crawl (query keys under `queryKeys.competitorMatches`, invalidated with crawl/matching data). A manual **Add competitor** dialog still exists |
+| Competitors      | `/competitors` | **Empty-by-default slot flow**: a "Your website" picker (persisted via `GET/PUT /api/data/my-store`, used as store A everywhere) + **4 competitor slot cards** (selections persisted under `parity.competitors.slots`), each opening a searchable `StorePickerDialog` of crawled stores that excludes already-used ones. Every filled slot renders its own **ComparePanel** reading the **server-side matcher** (`GET /api/match` — persisted `ProductMatch` rows + paginated only-A / only-B lists, so the browser never downloads the full catalogues): in-both / only-A / only-B / price-differs tiles, Matches / Only A / Only B tabs with method badges (GTIN/SKU/URL slug/fuzzy + confidence) and a **Cheapest** column, all **paginated** server-side (25/page, per-tab page state). Each match row renders **side-by-side product cards** — your product + price vs theirs — using the shared `StorePill` (ink = your store, amber = competitor), with visible USD estimates, best-price and out-of-stock chips, in a fixed-width **grid** layout so the Difference/Cheapest cells can never overlap. No per-browser fuzzy toggle anymore — matching is server-owned (GTIN > SKU > URL slug > token fuzzy > trigram recall) and refreshed after every crawl (query keys under `queryKeys.competitorMatches`, invalidated with crawl/matching data). A manual **Add competitor** dialog still exists |
 | Saved crawls     | `/crawls`      | Snapshot history per store via`useSavedCrawls()`: history **hidden by default** with a per-store **Show history / Hide history** toggle, a **type filter toggle** (All / Shallow checks / Deep crawls — persisted under `parity.crawls.typeFilter`, filters snapshots *before* grouping so stat cards + stores reflect the subset, per-type counts shown even while filtered, missing `type` reads as deep), "+N new / removed · price changed / no change / first snapshot" badges, **shallow check / deep crawl** badges per snapshot (`CrawlResult.type`, persisted from the job; old snapshots read as deep), expandable rows (stats, changes vs previous, discovery, first-8 products, failures), a **View all N products** link to the full **Store catalogue** page, **Re-crawl** (prefills the crawler via `prefillCrawlerOrigin`), **Delete snapshot** / **Clear history** (`DELETE /api/data/crawl-results/:id` / `/crawl-results?origin=`) |
 | Store catalogue  | `/stores/$origin` | Full-page product list for one store via the **D1 read path** (`getStore`/`getStoreSnapshots`/`useStoreCatalogue` → `GET /api/stores/:key{,/snapshots,/products}`, dynamic route keyed by **normalized origin**): a **snapshot picker** drives the crawl **stats row** + **Store profile** card + **Discovery log** (the specific per-candidate reasons behind a crawl result); the catalogue table always shows the **current state** — server-paginated (debounced `q=` search applied on the backend, keyset-cursor **Load more** accumulation guarded by a search-generation token so a stale page can't append onto a newer search), per-product **price sparkline** (from the `$slice` priceHistory projection) + point count + range. Empty state for never-crawled stores with a one-click **Crawl {origin}**; header has **Crawl again** (prefills the crawler), **Delete store** (cascade `DELETE /api/stores/:key` — normalized collections + legacy CrawlResult) and a **Saved crawls** back link; dynamic `document.title` |
 | Matched products | `/products`    | **Real matching engine**: `useMatchedProducts()` pulls rows from the backend matcher (`backend/utils/matcher.js` — GTIN > SKU > URL slug > fuzzy name). Your crawled catalogue is matched against each competitor with method + confidence, a your-price / price-gap column, and competitor products you don't carry listed as **Unmatched**; searchable / filterable / paginated. Honestly empty until you set your store on `/competitors` and crawl it + competitors |
@@ -225,7 +225,9 @@ Existing shared primitives: `PageHeader`/`DashboardLayout`/`Sidebar`
 `LoadingState`/`ErrorState`/`NoRealDataState`/`StateCard`/`PriceDelta`/
 `StockBadge`/`ProductCell` (`components/common/`), the saved-crawl and
 competitor feature components (`components/crawls/`,
-`components/competitors/`), and the shadcn set in `components/ui/`. Shared
+`components/competitors/` — incl. the shared `StorePill` used by the compare
+rows and the Competitors page header), and the shadcn set in
+`components/ui/`. Shared
 helpers live in `utils/crawls.ts` (origin/URL utils, `computeCrawlDiff`,
 `robotsText`), `utils/format.ts` (`formatPrice`, `formatDuration`) and
 `utils/crawl-controls.ts` (pause/resume/cancel toast confirmations). The old
@@ -810,6 +812,16 @@ step, pause and confirm before moving on.
 
 ## Current state
 
+- **2026-08 hardening (non-product junk filter):** the classifier lives ONCE
+  in `discover/junk-segments.ts` (`JUNK_SEGMENT_RE` + `hasJunkSegment` +
+  `pathSegments` + `PRODUCT_BASE_RE` + `isProductUrl`) — the crawler imports
+  it directly, and `backend/services/crawlSync.js` (ingest guard) + the
+  `tools/` ops scripts load it via `await import()` (Node 24 type-stripping).
+  `discover/index.ts` strips junk segments at ANY path depth from every
+  sitemap source and drops non-base URLs when a firm 60%+ majority sits
+  under `/product(s)/`; a run that filtered junk reports the count as a
+  finding in "What the crawler found". Verified live: urbanfitness sitemap
+  5,477 → 5,117 URLs with 0 junk.
 - Step 1 (refactor) — **done**. Files split into `core/` (`http`, `types`),
   `discover/sitemap.ts`, `adapters/shopify-parse.ts`,
   `adapters/shopify-discover.ts`, `adapters/shopify.ts` (barrel). `index.ts`

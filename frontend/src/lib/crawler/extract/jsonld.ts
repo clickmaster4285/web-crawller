@@ -153,7 +153,12 @@ function mapProduct(
     mpn,
     price: primary?.price ?? 0,
     compareAtPrice: undefined, // JSON-LD rarely exposes strikethrough cleanly
-    priceCurrency: primary?.priceCurrency ?? "USD",
+    // Honest currency: only a REAL priceCurrency from the offer (direct or
+    // nested in priceSpecification). NO "USD" fallback — a GCC store whose
+    // JSON-LD omits the token must read as unknown (null), not as a silent
+    // USD (Aug 2026 rule). Other extractors in the chain (OG / heuristics)
+    // can still supply a symbol guess.
+    priceCurrency: primary?.priceCurrency ?? undefined,
     availability: toAvailability(primary?.availability),
     offers,
     rating,
@@ -334,8 +339,12 @@ function parsePriceValue(value: unknown): number | undefined {
   return n;
 }
 
-/** Resolves an Offer's currency (direct, or nested in priceSpecification). */
-function offerCurrency(obj: Record<string, unknown>): string {
+/**
+ * Resolves an Offer's currency (direct, or nested in priceSpecification).
+ * Returns `undefined` when the offer declares none — the mapper treats that
+ * as "unknown", never a silent "USD" (Aug 2026 rule).
+ */
+function offerCurrency(obj: Record<string, unknown>): string | undefined {
   const direct = stringField(obj, "priceCurrency");
   if (direct) return direct;
   for (const spec of asArray(obj["priceSpecification"])) {
@@ -343,7 +352,7 @@ function offerCurrency(obj: Record<string, unknown>): string {
     const c = stringField(spec as Record<string, unknown>, "priceCurrency");
     if (c) return c;
   }
-  return "USD";
+  return undefined;
 }
 
 function pickPrimaryOffer(

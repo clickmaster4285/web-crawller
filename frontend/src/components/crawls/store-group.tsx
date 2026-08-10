@@ -58,7 +58,11 @@ export function StoreGroup({
               {group.length} snapshot
               {group.length > 1 ? "s" : ""}
               {typeFilter === "all" ? "" : ` (${typeFilter})`} ·{" "}
-              {group.reduce((n, c) => n + c.products.length, 0)} products · last{" "}
+              {/* The store's current catalogue size = the LATEST snapshot's
+                  capture. Summing every snapshot double-counts products that
+                  appear in multiple runs (e.g. 4 snapshots × 5,086 ≠ 20,340).
+                  Each individual CrawlRow below still shows its own count. */}
+              {latest.products.length.toLocaleString()} products · last{" "}
               {formatCrawlDate(latest.updatedAt)}
             </p>
           </div>

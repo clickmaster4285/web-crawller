@@ -175,6 +175,73 @@ zeros.
 
 ---
 
+## 🧹 Catalogue purity + compare UI (Aug 8–9)
+
+**The "blogs/privacy/terms still coming in" fix — three layers, global for
+every store:**
+
+1. **Any-depth junk filter** (`discover/index.ts`) — the old blocklist only
+   tested `segment[0]`, so a locale prefix (`/uae-en/`) hid every junk page
+   behind segment 1. `hasJunkSegment()` now checks ALL path segments
+   (blog/privacy/terms/collections…) and strips them from every sitemap
+   source; plus **product-base dominance** (a firm 60%+ majority under
+   `/product(s)/` = the catalogue; non-base URLs dropped).
+2. **Ingest guard** (`crawlSync`) — junk-segment rows are dropped before they
+   become Products (second net for HTML-BFS/legacy paths; identity-bearing
+   products always survive; an all-junk crawl can't mass-delete the
+   catalogue).
+3. **Single source of truth** — `frontend/src/lib/crawler/discover/junk-segments.ts`
+   (`JUNK_SEGMENT_RE`, `hasJunkSegment`, `PRODUCT_BASE_RE`, `isProductUrl`)
+   shared by the crawler, `crawlSync` and the `tools/` ops scripts via
+   `await import()` — a probe script had already drifted with extra terms;
+   that drift class is now impossible.
+
+**Applied:** 191 urbanfitness junk rows purged (soft-delete), 1,801
+activefitness non-products purged, matches reconciled — the surviving matches
+are real products with real USD comparisons (51/52 urbanfitness matches have
+both-side USD). Store cards post-cleanup: activefitness 8,667 · urbanfitness
+4,823 · marshalfitness 1,311 · prosportsae 1,607 · miraclefitness 1.
+
+**Compare UI (Aug 9):** match rows are now **side-by-side product cards** —
+your product + price vs theirs — with the shared `StorePill` (ink = your
+store, amber = competitor), visible USD estimates, best-price + out-of-stock
+chips, and a fixed-width **grid** layout (the `table-fixed` Cheapest column
+collapsed to 0px on narrower tables and overlapped the Difference column).
+
+**Housekeeping (Aug 9):** `tools/` pruned 38 scratch probes → 2 reusable ops
+scripts (junk purge/check); `backend/scripts/` trimmed to the two `npm run`
+entries (backfill, reconcile-matches); this doc + `plan.md` + `AGENTS.md`
+synced.
+
+---
+
+## 🛡️ Removal-guard bug fixed (Aug 7) — blocked runs must never wipe the catalogue
+
+- A crawl that **discovered URLs but fetched 0** was treated as authoritative
+  (the guard trusted `discovered > 0`), so activefitnessstore's
+  10,522-discovered / 0-fetched run ("No product data found" on every page —
+  the workers were still on pre-fix code and never rendered the JS shell)
+  **soft-deleted all 10,462 products**. prosportsae's 401-product catalogue
+  was wiped the same way by the broken URL-pattern run (discovery counted
+  before the pattern filter zeroed the set).
+- **Fix:** `crawlSync` `authoritative` now requires `products.length > 0`
+  (parsed products — the honest "we really saw this store" signal), never
+  `discovered`. Verified: backend jest 30/30.
+- **Recovery:** `scripts/restore-catalogues.js` restores fully-wiped stores
+  (conservative: partial soft-deletes are intentional and untouched).
+  Restored 10,463 products: activefitnessstore 10,462 + miraclefitnessuae 1,
+  plus prosportsae 436 (targeted — snapshot forensics proved it was bug
+  damage, not real removals; 441 available again).
+- Also confirmed: **activefitnessstore.com is a multi-region storefront** —
+  robots.txt declares 12 sitemaps (om/bh/qa/kw/sa × en/ar + root). All five
+  regions serve the **same products at different prices/currencies**, so
+  crawling ONE region (om/en — the first robots.txt entry) is correct;
+  crawling all would 6×-duplicate the catalogue. Region selection is a
+  possible future feature; `priceUsd` already makes cross-currency
+  comparison work.
+
+---
+
 ## 📍 Where we are in the plan
 
 Per `plan.md` §9 and `architecture.md`: everything through **indexed matching

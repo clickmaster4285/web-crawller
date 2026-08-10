@@ -98,7 +98,9 @@ async function loadResumeState(origin) {
 const crawlerModule =
   process.env.PARITY_CRAWLER_MODULE ?? '../../frontend/src/lib/crawler/index.ts';
 const crawlerUrl = new URL(crawlerModule, import.meta.url);
-const { runCrawl, isCrawlCancelled } = await import(crawlerUrl.href);
+const { runCrawl, isCrawlCancelled, sanitizeProxyFromMessage } = await import(
+  crawlerUrl.href
+);
 
 const workerId =
   process.env.PARITY_WORKER_ID ??
@@ -138,7 +140,16 @@ function gcNow() {
  * old in-SSR `runJob` used): identity fields survive the crawl → Mongo
  * boundary, failures stay capped, the full catalogue is kept.
  */
-function sanitizeResult(result) {
+function sanitizeResult(result, proxyUrl) {
+  // Defense-in-depth (Tier 2): the gateway URL — especially its embedded
+  // credentials — must NEVER land in persisted failure text or discovery
+  // logs. The crawler's HTTP layer already redacts network-error messages,
+  // but a failure string built elsewhere could still embed the URL; this
+  // boundary net blanket-redacts everything that gets written to Mongo.
+  const redact = proxyUrl
+    ? (text) => sanitizeProxyFromMessage(text, proxyUrl)
+    : (text) => text;
+  const discovery = result.discovery;
   return {
     stats: {
       discovered: result.stats.discovered,
@@ -146,9 +157,15 @@ function sanitizeResult(result) {
       skippedUnchanged: result.stats.skippedUnchanged,
       failed: result.stats.failed,
       durationMs: result.stats.durationMs,
-      requests: result.stats.requests ?? 0
+      requests: result.stats.requests ?? 0,
+      // True when `maxPages` cut the run short of the full catalogue — the
+      // ingest pipeline must never soft-delete the URLs beyond the cap.
+      capped: result.stats.capped ?? false
     },
-    failures: result.stats.failures.slice(0, 100),
+    failures: result.stats.failures.slice(0, 100).map((f) => ({
+      ...f,
+      error: redact(f.error)
+    })),
     products: result.products.map((p) => ({
       name: p.name,
       brand: p.brand,
@@ -161,7 +178,22 @@ function sanitizeResult(result) {
       sku: p.variants?.[0]?.sku ?? '',
       gtin: p.variants?.[0]?.barcode ?? ''
     })),
-    discovery: result.discovery
+    discovery: discovery
+      ? {
+          ...discovery,
+          ...(Array.isArray(discovery.findings)
+            ? {
+                findings: discovery.findings.map((f) => ({
+                  ...f,
+                  message: redact(f.message)
+                }))
+              }
+            : {}),
+          ...(Array.isArray(discovery.log)
+            ? { log: discovery.log.map((line) => redact(line)) }
+            : {})
+        }
+      : discovery
   };
 }
 
@@ -177,9 +209,16 @@ async function processJob(job) {
 
   let lastBeat = 0;
   let fetchStartedAt = null;
-  const beat = (patch) => {
+  // `force` bypasses the 2s throttle — needed for one-shot writes like the
+  // fetchStartedAt transition below: if the very first fetch-phase patch
+  // landed within 2s of the last discovery tick, the throttled beat would
+  // DROP it, and since fetchStartedAt is only ever set once per job, no
+  // later beat would carry it — the Sources ETA would read "Estimating
+  // time…" for the whole run (progress bars kept working, the boundary
+  // didn't).
+  const beat = (patch, force = false) => {
     const now = Date.now();
-    if (now - lastBeat < HEARTBEAT_MS) return;
+    if (!force && now - lastBeat < HEARTBEAT_MS) return;
     lastBeat = now;
     heartbeat(jobId, workerId, patch).catch(() => {});
   };
@@ -242,12 +281,15 @@ async function processJob(job) {
       onProgress: (processed, total) => {
         const patch = { processed, total };
         // First tick with a known URL count marks the end of discovery —
-        // the UI computes its ETA from fetch-phase throughput alone.
-        if (fetchStartedAt === null && total > 0) {
+        // the UI computes its ETA from fetch-phase throughput alone. This
+        // one-shot write is FORCED through the throttle (see beat above): a
+        // discovery tick that landed <2s ago must not eat the boundary.
+        const firstFetchTick = fetchStartedAt === null && total > 0;
+        if (firstFetchTick) {
           fetchStartedAt = new Date();
           patch.fetchStartedAt = fetchStartedAt;
         }
-        beat(patch);
+        beat(patch, firstFetchTick);
         // Periodic full GC mid-crawl (every 1000 products): the engine
         // allocates large transient HTML/JSON per page and V8's heap only
         // grows to the peak — this actively brings RSS back down so a
@@ -260,7 +302,7 @@ async function processJob(job) {
       onRequestCount: (count) => beat({ requests: count })
     });
 
-    const sanitized = sanitizeResult(result);
+    const sanitized = sanitizeResult(result, p.proxyUrl);
 
     // Auto browser-rendering (decision Aug 2026): a deep crawl that ran with
     // rendering OFF and fetched pages but extracted ZERO prices is a
@@ -340,7 +382,10 @@ async function processJob(job) {
       console.log(`🗑️  ${workerId} cancelled crawl for ${origin}`);
       return;
     }
-    const message = error instanceof Error ? error.message : String(error);
+    // The shared redactor reproduces the old behavior exactly: it stringifies
+    // non-Errors and is a pass-through when no proxy URL is configured — the
+    // ternary chain is unnecessary.
+    const message = sanitizeProxyFromMessage(error, p.proxyUrl);
     await failJob(jobId, workerId, message);
   } finally {
     clearInterval(beatTimer);

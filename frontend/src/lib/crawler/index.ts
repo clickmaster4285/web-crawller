@@ -33,8 +33,11 @@
 
 import { discoverProducts } from "./discover/index.ts";
 import {
+  closeProxyAgent,
+  fetchHtmlWithStatus,
   fetchWithRetry,
   httpOptions,
+  sanitizeProxyFromMessage,
   type ConditionalRequest,
 } from "./core/http.ts";
 import { closeBrowser, renderWithBrowser } from "./core/browser.ts";
@@ -47,6 +50,10 @@ import { isCrawlCancelled, waitForControl } from "./core/control.ts";
 // Re-exported for the worker process: it imports `{ runCrawl, isCrawlCancelled }`
 // from this module so a user-cancelled crawl is marked cancelled (not failed).
 export { isCrawlCancelled } from "./core/control.ts";
+// Tier 2 proxy lifecycle + error redaction — shared with the worker so the
+// agent is closed after a crawl and the gateway URL never leaks into persisted
+// failure text (single source of truth).
+export { closeProxyAgent, sanitizeProxyFromMessage };
 import { Politeness } from "./core/politeness.ts";
 import {
   DEFAULT_MAX_PER_HOST,
@@ -146,7 +153,13 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     ...(config.useBrowser !== false
       ? {
           renderWithBrowser: (url: string) =>
-            renderWithBrowser(url, { userAgent: config.userAgent }),
+            renderWithBrowser(url, {
+              userAgent: config.userAgent,
+              // Tier 2: JS-shell pages render from the proxy too — the HTTP
+              // layer already exits through it, and a WAF that blocks the
+              // machine's IP must not spare the browser-rendered pages.
+              proxy: config.proxy,
+            }),
         }
       : {}),
     onRequest: countRequest,
@@ -173,6 +186,10 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     // Tier 1: release the shared browser so the process can exit / the job
     // finishes cleanly (no-op when browser rendering was never used).
     if (config.useBrowser !== false) await closeBrowser();
+    // Tier 2: close the proxy agent's keep-alive sockets too — a crawl that
+    // died mid-discovery must not leave the gateway connection open (socket
+    // leak across jobs, delayed process exit).
+    if (config.proxy) closeProxyAgent(config.proxy);
     // A user-requested cancel must NOT be swallowed into an "empty result" —
     // it unwinds the whole crawl so the worker can mark the job cancelled.
     if (isCrawlCancelled(error)) throw error;
@@ -193,11 +210,22 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
 
   // Optional page cap: crawl at most `maxPages` of the discovered URLs.
   // `stats.discovered` still reports the full discovery; only the fetch
-  // loop is limited.
+  // loop is limited. When discovery found more URLs than the cap, the run
+  // is NOT a full catalogue (`stats.capped`) — the ingest pipeline must
+  // not read the URLs beyond the cap as removals.
+  //
+  // A capped run samples the catalogue, so the sample must SPAN it — take
+  // evenly-spaced URLs, not the first `maxPages`. Discovery orders URLs by
+  // sitemap file, and stores whose "product" sitemaps mix brand/category
+  // landing pages in (e.g. activefitnessstore.com's /om/<brand> pages) can
+  // cluster all of them at the HEAD of the list: a first-N cap then fetches
+  // 400 brand pages and zero products (observed Aug 2026). Stratified
+  // sampling keeps the cap representative of the whole store.
   const urlsToFetch =
     config.maxPages != null && config.maxPages > 0
-      ? discovered.urls.slice(0, config.maxPages)
+      ? stratifiedSample(discovered.urls, config.maxPages)
       : discovered.urls;
+  const capped = urlsToFetch.length < discovered.urls.length;
 
   // Tier 3 (WooCommerce native): when discovery found a public /wp-json/wc/v3
   // API, the fetch loop prefers structured per-product JSON (SKU/GTIN/price/
@@ -370,6 +398,10 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   // Tier 1: release the shared browser once the crawl is done so the job
   // finishes cleanly and the Chromium process isn't left running.
   if (config.useBrowser !== false) await closeBrowser();
+  // Tier 2: same for the proxy agent — close its keep-alive sockets when the
+  // crawl finishes so connections can't leak across jobs or delay worker
+  // shutdown. A fresh agent is re-created on the next proxied crawl (cheap).
+  if (config.proxy) closeProxyAgent(config.proxy);
 
   return {
     config: { origin: config.origin, collections: config.collections },
@@ -385,6 +417,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       finishedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
       requests: requestCount,
+      capped,
     },
     products,
     // Surface what each discovery strategy contributed (sitemap / html-crawl /
@@ -488,26 +521,53 @@ async function fetchOneProduct(
   }
 
   // Tier 2: HTML extractor chain (JSON-LD / OG / microdata / heuristics).
-  const response = await fetchWithRetry(url, { ...opts, conditional });
+  // fetchHtmlWithStatus applies the auto-render decision (needsBrowserRender →
+  // renderWithBrowser) before returning the body — a JS-shell page MUST be
+  // rendered or the raw HTML carries no product data (Aug 2026: the fetch
+  // loop used fetchWithRetry directly, so auto JS rendering never ran for
+  // products and every Next.js store crawled to zero prices).
+  const {
+    status,
+    etag,
+    body: html,
+  } = await fetchHtmlWithStatus(url, {
+    ...opts,
+    conditional,
+  });
   // 304 = page unchanged — the engine reuses the stored product.
-  if (response.status === 304) {
-    return {
-      product: null,
-      etag: response.headers.get("etag"),
-      statusCode: 304,
-    };
+  if (status === 304) {
+    return { product: null, etag, statusCode: 304 };
   }
-  const html = await response.text();
   const htmlHandle = handle ?? slugFromUrl(url);
   return {
     product: extractFromHtml(html, url, origin, htmlHandle),
-    etag: response.headers.get("etag"),
-    statusCode: response.status,
+    etag,
+    statusCode: status,
   };
 }
 
+/**
+ * Picks at most `maxPages` URLs from a larger list, spread evenly across it
+ * (strata) instead of taking the head. `maxPages >= list.length` returns the
+ * list unchanged. Indices are strictly increasing, so the sample never
+ * duplicates a URL.
+ */
+function stratifiedSample<T>(urls: T[], maxPages: number): T[] {
+  if (urls.length <= maxPages) return urls;
+  const step = urls.length / maxPages;
+  const out: T[] = [];
+  for (let i = 0; i < maxPages; i++) {
+    out.push(urls[Math.min(urls.length - 1, Math.floor(i * step))]);
+  }
+  return out;
+}
+
 function shopifyHandleFromUrl(url: string): string | null {
-  const m = url.match(/\/products\/([a-z0-9-]+)(?:\.json)?$/i);
+  // Shopify handles are lowercase letters, digits, hyphens AND underscores
+  // (`…-sab-06_r` is a real handle on athletix.ae) — the underscore is the
+  // part the older [a-z0-9-]+ missed, silently dropping those products to
+  // the HTML extractor chain instead of the structured JSON probe.
+  const m = url.match(/\/products\/([a-z0-9_-]+)(?:\.json)?$/i);
   return m?.[1] ?? null;
 }
 
@@ -540,6 +600,7 @@ function emptyResult(
       finishedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
       requests,
+      capped: false,
     },
     products: [],
     discovery: {

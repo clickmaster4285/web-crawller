@@ -125,12 +125,18 @@ export async function detectPlatform(
       homepageHtml: html,
     };
   }
-  // WooCommerce robots.txt names checkout/cart/my-account paths.
+  // WooCommerce robots.txt names checkout/cart/my-account paths. The bare
+  // `/cart` + `/checkout` disallow forms are ALSO the Shopify default, so a
+  // robots-only match misclassifies Shopify stores as WooCommerce — and the
+  // homepage is already fetched by this point, so the real discriminator is
+  // whether Shopify CDN assets appear there (marshalfitness.com vs
+  // activefitnessstore.com, Aug 2026 — caught by the Website Intelligence
+  // Analyzer). A Shopify-asset homepage falls through to the CDN check below.
   const robotsWc =
     robots.includes("woocommerce") ||
     (robots.includes("/checkout") && robots.includes("/cart")) ||
     robots.includes("filter_brand");
-  if (robotsWc) {
+  if (robotsWc && !lower.includes("cdn.shopify.com")) {
     return {
       platform: "WooCommerce",
       kind: "store",

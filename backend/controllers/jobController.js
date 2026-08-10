@@ -20,6 +20,7 @@ const {
   listActiveJobs,
   publicJob
 } = require('../services/jobQueue');
+const { runAnalyzer } = require('./analyzeController');
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -98,17 +99,106 @@ function normalizeCrawlInput(body = {}) {
   };
 }
 
+/**
+ * Pre-crawl analysis (P2 Phase 2 — "analyze first, then crawl of that
+ * type"): runs the Website Intelligence Analyzer's five probes against the
+ * store BEFORE a manual deep crawl is enqueued and folds the recommendation
+ * into the job's captured params:
+ *
+ *   - csr-shell rendering → force `useBrowser: true` (pages are JS shells;
+ *     prices only exist after a browser render). Recorded in `applied` so
+ *     the UI shows the auto-configuration.
+ *   - WAF-blocking without a proxy → attach a visible `warning` (the crawl
+ *     still proceeds — the user explicitly started it — but the risk is
+ *     surfaced instead of a silent 0-product run). Rate-limit blocks (HTTP
+ *     429) additionally get the documented gentler config applied
+ *     (concurrency → 1, delay ≥ 2s) — challenge blocks need a proxy, so
+ *     they're warning-only.
+ *
+ * Shallow quick-checks and scheduled runs bypass this: the scheduler
+ * enqueues directly and must stay cheap, and recurring runs shouldn't pay a
+ * ~10s probe each time. Degrades to `null` on probe failure — the crawl
+ * still starts with the user's params (never block a crawl on analysis).
+ */
+async function analyzeBeforeCrawl(params) {
+  const startedAt = Date.now();
+  try {
+    const profile = await runAnalyzer(
+      params.origin,
+      params.proxyUrl ?? undefined
+    );
+    const applied = [];
+    let renderingForced = false;
+    if (profile.rendering.verdict === 'csr-shell') {
+      params.useBrowser = true;
+      renderingForced = true;
+      applied.push(
+        'auto JS rendering ON — pages are client-rendered shells, prices need the browser'
+      );
+    }
+    let warning = null;
+    if (profile.protection.blocking && !params.proxy) {
+      warning =
+        `${profile.protection.evidence} — this store blocks automated requests from ` +
+        'this machine. Add a Tier-2 residential proxy (or lower concurrency and ' +
+        'raise the delay) for the crawl to stand a chance.';
+      // Rate-limit blocks respond to gentler crawling — apply the documented
+      // slowdown automatically (transparent via `applied`). Challenge blocks
+      // (Cloudflare JS) can't be fixed by pacing; warning only.
+      if (profile.protection.provider === 'rate-limited') {
+        params.maxConcurrencyPerHost = Math.min(params.maxConcurrencyPerHost, 1);
+        params.delayMs = Math.max(params.delayMs, 2000);
+        applied.push(
+          'rate-limited store — concurrency cut to 1 and delay raised to ≥2s'
+        );
+      }
+    }
+    return {
+      tier: profile.recommendation.tier,
+      platform: profile.platform.name,
+      rendering: profile.rendering.verdict,
+      renderingForced,
+      protection: profile.protection.blocking
+        ? profile.protection.evidence
+        : null,
+      sitemap: profile.sitemap.found ? profile.sitemap.urls : null,
+      durationMs: Date.now() - startedAt,
+      requests: profile.requests,
+      applied,
+      warning
+    };
+  } catch (error) {
+    console.error(`Pre-crawl analysis failed for ${params.origin}:`, error);
+    return null;
+  }
+}
+
 /** POST /api/crawl-jobs — enqueue a one-off crawl (deep by default, or a
- *  shallow sitemap-only check when `type: 'shallow'`), return its id. */
+ *  shallow sitemap-only check when `type: 'shallow'`), return its id.
+ *
+ *  Manual DEEP crawls are analyze-first: the store is probed before the job
+ *  is created so it starts with the recommended strategy (see
+ *  `analyzeBeforeCrawl`). `analyze: false` in the body opts out — instant
+ *  re-crawls of already-known stores skip the ~5–15s probe. The analysis
+ *  snapshot rides on the job + response so the UI can show "Analyzed:
+ *  <platform> · <tier>" immediately.
+ */
 const enqueueCrawlJob = async (req, res) => {
   try {
     const params = normalizeCrawlInput(req.body);
+    const shouldAnalyze =
+      params.type === 'deep' && req.body?.analyze !== false;
+    const analysis = shouldAnalyze ? await analyzeBeforeCrawl(params) : null;
     const job = await enqueueJob({
       origin: params.origin,
       type: params.type,
-      params
+      params,
+      analysis
     });
-    res.status(201).json({ success: true, data: { jobId: String(job._id) } });
+    res.status(201).json({
+      success: true,
+      data: { jobId: String(job._id), analysis }
+    });
   } catch (error) {
     const status = error.status ?? 500;
     console.error('Enqueue crawl job error:', error);

@@ -13,8 +13,29 @@
  * TanStack Start server functions later.
  */
 
-import { ProxyAgent } from "undici";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 import type { CrawlConfig } from "./types.ts";
+
+/**
+ * Tier 2 — the fetch function used for PROXIED requests. Node's global fetch
+ * is a DIFFERENT undici copy than the one this package installs, and it
+ * rejects a `ProxyAgent` built from this copy with "invalid onRequestStart
+ * method" (observed: undici 8.x ProxyAgent under Node 24's global fetch).
+ * undici's own `fetch` + its own `ProxyAgent` from the same copy are always
+ * compatible, so proxied requests bypass the global fetch entirely.
+ */
+const proxiedFetch = (
+  url: string,
+  init: RequestInit,
+  agent: ProxyAgent,
+): Promise<Response> =>
+  undiciFetch(
+    url,
+    // The DOM RequestInit and undici's FetchInit share every field we pass
+    // (headers/signal/body…) — only their FormData typings differ, so cast
+    // at the boundary.
+    { ...init, dispatcher: agent } as Parameters<typeof undiciFetch>[1],
+  ) as Promise<Response>;
 
 const DEFAULT_USER_AGENT =
   "ParityBot/1.0 (+https://parity.app; competitive-intelligence demo crawler)";
@@ -33,11 +54,29 @@ function proxyAgentFor(url: string): ProxyAgent | undefined {
   if (!url) return undefined;
   let agent = proxyAgents.get(url);
   if (!agent) {
-    if (proxyAgents.size >= MAX_CACHED_PROXY_AGENTS) proxyAgents.clear();
+    if (proxyAgents.size >= MAX_CACHED_PROXY_AGENTS) {
+      // Evicted agents must be closed, not just dropped — an unclosed undici
+      // dispatcher keeps its keep-alive sockets (and can delay process exit).
+      for (const a of proxyAgents.values()) a.close().catch(() => {});
+      proxyAgents.clear();
+    }
     agent = new ProxyAgent(url);
     proxyAgents.set(url, agent);
   }
   return agent;
+}
+
+/**
+ * Closes + forgets a cached proxy agent (e.g. after a crawl finishes) so its
+ * keep-alive sockets can't leak across jobs or delay worker shutdown. undici
+ * dispatchers must be closed to release their connections.
+ */
+export function closeProxyAgent(url: string): void {
+  const agent = proxyAgents.get(url);
+  if (agent) {
+    proxyAgents.delete(url);
+    agent.close().catch(() => {});
+  }
 }
 
 /** Adaptive request throttle — see `core/politeness.ts` for the implementation. */
@@ -115,6 +154,33 @@ function makeHeaders(userAgent?: string): Record<string, string> {
 }
 
 /**
+ * Strips a proxy gateway URL (and its credentials) out of an error message.
+ * Proxy-connection failures can embed the gateway host/port in the cause
+ * text, and failure strings are persisted in crawl results + shown in the
+ * UI — the proxy URL (especially its credentials) must never leak there.
+ *
+ * Single source of truth for proxy redaction: the crawler's HTTP layer, the
+ * backend proxy-test controller and the worker's boundary net all reuse it.
+ */
+export function sanitizeProxyFromMessage(
+  error: unknown,
+  proxy: string | undefined,
+): string {
+  let message = error instanceof Error ? error.message : String(error);
+  if (proxy) {
+    // Both the full URL and the credential-stripped form (a cause may print
+    // either the raw URL or a redacted host) are replaced.
+    const withoutCreds = proxy.replace(/\/\/[^@/]*@/, "//[redacted]@");
+    message = message
+      .split(proxy)
+      .join("[proxy]")
+      .split(withoutCreds)
+      .join("[proxy]");
+  }
+  return message;
+}
+
+/**
  * Fetch `url`, waiting `delayMs` first and retrying transient failures.
  * Throws after exhausting retries.
  */
@@ -146,18 +212,27 @@ export async function fetchWithRetry(
 
     let response: Response;
     try {
+      // Tier 2: route through the residential proxy when configured. Proxied
+      // requests use undici's own fetch (same copy as the ProxyAgent) — see
+      // `proxiedFetch` above; direct requests keep the global fetch.
       const proxy = options.proxy ? proxyAgentFor(options.proxy) : undefined;
-      response = await fetch(url, {
-        headers,
-        signal: AbortSignal.timeout(timeoutMs),
-        // Tier 2: route through the residential proxy when configured.
-        ...(proxy ? { dispatcher: proxy } : {}),
-      });
+      response = proxy
+        ? await proxiedFetch(
+            url,
+            { headers, signal: AbortSignal.timeout(timeoutMs) },
+            proxy,
+          )
+        : await fetch(url, {
+            headers,
+            signal: AbortSignal.timeout(timeoutMs),
+          });
     } catch (error) {
       // Count the attempt even when it failed — it was a real request.
       options.onRequest?.();
       if (attempt >= maxRetries) {
-        throw new Error(`Network error for ${url}: ${String(error)}`);
+        throw new Error(
+          `Network error for ${url}: ${sanitizeProxyFromMessage(error, options.proxy)}`,
+        );
       }
       await sleep(delayMs * (attempt + 1));
       continue;
@@ -220,6 +295,30 @@ export async function fetchText(
   url: string,
   options: HttpOptions = {},
 ): Promise<string> {
+  return (await fetchHtmlWithStatus(url, options)).body;
+}
+
+/** A fetched page with the response status + etag (needed by the fetch loop). */
+export interface FetchedHtml {
+  status: number;
+  etag: string | null;
+  body: string;
+}
+
+/**
+ * Fetches an HTML page AND applies the Tier 1 auto-render decision — the
+ * status/etag variant of `fetchText`, so callers that must see the response
+ * (the per-product fetch loop: 304 handling, etag persistence) get rendering
+ * too. Without this, a JS-shell page goes to the extractor raw and yields
+ * "No product data found" — Aug 2026, the product fetch loop called
+ * `fetchWithRetry` directly and auto JS rendering silently never ran for
+ * products (only discovery used fetchText), so every Next.js store crawled
+ * to zero prices regardless of the WAF.
+ */
+export async function fetchHtmlWithStatus(
+  url: string,
+  options: HttpOptions = {},
+): Promise<FetchedHtml> {
   const response = await fetchWithRetry(url, options);
   const body = await response.text();
   // Tier 1 (Playwright) auto fallback: when the renderer is available and the
@@ -232,12 +331,20 @@ export async function fetchText(
     needsBrowserRender(body)
   ) {
     try {
-      return await options.renderWithBrowser(url);
+      return {
+        status: response.status,
+        etag: response.headers.get("etag"),
+        body: await options.renderWithBrowser(url),
+      };
     } catch {
-      return body;
+      // Fall through with the raw HTML.
     }
   }
-  return body;
+  return {
+    status: response.status,
+    etag: response.headers.get("etag"),
+    body,
+  };
 }
 
 /** True when a body is HTML (not sitemap XML / JSON). */
@@ -259,32 +366,43 @@ function isProbablyHtml(body: string): boolean {
  * Auto mode decision — true when server HTML looks like a client-rendered
  * shell that genuinely needs JS to show its content. The check is deliberately
  * CONTENT-POOR ONLY: rendering is expensive (headless Chromium, 1-5s/page), so
- * a page is only ever re-rendered when its raw HTML can't stand alone — an
- * app-mount shell (`#__nuxt`, `#__next`, `#root`…) with a JS bundle and almost
- * no server-side links or structured data. Content-rich pages (server-rendered
- * product pages with JSON-LD / og:title / itemprop or a normal link density)
- * are NEVER rendered, so auto mode costs nothing on regular stores.
+ * a page is only ever re-rendered when its raw HTML can't stand alone — a JS
+ * shell with no server-side price/links. Content-rich pages (server-rendered
+ * product pages with JSON-LD product offers, og:price, itemprop="price" or a
+ * normal link density) are NEVER rendered, so auto mode costs nothing on
+ * regular stores.
+ *
+ * Aug 2026 lesson (activefitnessstore.com): og:title is NOT a price signal —
+ * Next.js shells ship og tags while loading prices via JS, and App Router
+ * shells mount a bare <div> + spinner (no `id="__next"`). A page is only
+ * trusted as "content-rich" when the server HTML actually carries a price;
+ * a bundle + spinner body is a shell and gets rendered.
  */
-function needsBrowserRender(body: string): boolean {
+export function needsBrowserRender(body: string): boolean {
   const head = body.slice(0, 200_000);
   const linkCount = body.match(/<a\s/g)?.length ?? 0;
-  // Structured data or a sensible link count = the server HTML already has
-  // the content extraction needs — no browser required, ever.
-  if (
-    /application\/ld\+json|og:title|itemprop=/i.test(head) ||
-    linkCount >= 10
-  ) {
+  // A REAL price signal in the server HTML — JSON-LD Product offer, og:price,
+  // or itemprop="price" — means extraction works without a browser. og:title
+  // alone is NOT enough (see the note above). A sensible link count also
+  // means the server HTML carries real content.
+  const hasPriceSignal =
+    (/application\/ld\+json/i.test(head) &&
+      /"@type"\s*:\s*"Product"/i.test(head) &&
+      /"price"/i.test(head)) ||
+    /og:price(?::amount)?\s*[:=]/i.test(head) ||
+    /itemprop=["']?price["']?/i.test(head);
+  if (hasPriceSignal || linkCount >= 10) {
     return false;
   }
-  // A genuine shell: an app-mount element paired with a JS bundle. This is
-  // the ONLY trigger — near-empty pages WITHOUT a mount marker are NOT
-  // rendered, so 404/empty category/bot-block pages on ordinary stores never
-  // pay the 1-5s headless-Chromium cost (extraction was going to fail on
-  // them anyway).
+  // A genuine shell: a JS bundle with either an app-mount element
+  // (`#__nuxt`/`#__next`/`#root`…) or a loading-spinner body (Next.js App
+  // Router shells mount a bare <div> + spinner with no id — that IS the
+  // shell signal). Both paired with a bundle.
   const hasBundle = /<script[^>]+src=[^>]*(\.mjs|\.js)/i.test(head);
+  if (!hasBundle) return false;
   return (
-    hasBundle &&
-    /id=["']?(__nuxt|__next|__gatsby|root|app|app-root)["']?/i.test(head)
+    /id=["']?(__nuxt|__next|__gatsby|root|app|app-root)["']?/i.test(head) ||
+    /ant-spin|spinner|loader|aria-busy=["']?true/i.test(head)
   );
 }
 

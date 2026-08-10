@@ -1,7 +1,14 @@
-import { Globe, TriangleAlert } from "lucide-react";
+import {
+  CheckCircle2,
+  Globe,
+  Loader2,
+  PlugZap,
+  TriangleAlert,
+} from "lucide-react";
 
 import { SectionTitle } from "@/components/cards/stat-card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -13,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import type { ProxyTestResult } from "@/lib/crawl";
 import type { MaxPagesMode } from "@/utils/crawls";
 
 /** Crawl configuration section — applies to the next crawl. */
@@ -33,8 +41,13 @@ export function CrawlConfigPanel({
   onStoreSnapshotsChange,
   useBrowser,
   onUseBrowserChange,
+  analyzeStore,
+  onAnalyzeStoreChange,
   proxy,
   onProxyChange,
+  proxyTestPending,
+  proxyTestResult,
+  onTestProxy,
   productUrlPattern,
   onProductUrlPatternChange,
 }: {
@@ -54,8 +67,21 @@ export function CrawlConfigPanel({
   onStoreSnapshotsChange: (value: boolean) => void;
   useBrowser: boolean;
   onUseBrowserChange: (value: boolean) => void;
+  /**
+   * Analyze-first: probe the store before a deep crawl starts (~5–15s) and
+   * apply the recommended strategy. Default on — the whole point of "Run
+   * crawl checks the analysis first".
+   */
+  analyzeStore: boolean;
+  onAnalyzeStoreChange: (value: boolean) => void;
   proxy: string;
   onProxyChange: (value: string) => void;
+  /** True while the gateway-validation request is in flight. */
+  proxyTestPending: boolean;
+  /** Last proxy-test outcome (null before the first test). */
+  proxyTestResult: ProxyTestResult | null;
+  /** Validates the entered gateway URL (fetches an IP echo through it). */
+  onTestProxy: () => void;
   /** Optional product-URL filter regex (empty = every discovered URL). */
   productUrlPattern: string;
   onProductUrlPatternChange: (value: string) => void;
@@ -168,6 +194,21 @@ export function CrawlConfigPanel({
 
         <div className="flex items-center justify-between gap-4">
           <div>
+            <Label htmlFor="analyze-first">Analyze store before crawling</Label>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Probes the store first (~5–15s) and starts with the recommended
+              strategy. Turn off to crawl instantly with your exact settings.
+            </p>
+          </div>
+          <Switch
+            id="analyze-first"
+            checked={analyzeStore}
+            onCheckedChange={onAnalyzeStoreChange}
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-4">
+          <div>
             <Label htmlFor="product-only">Product-only mode</Label>
             <p className="mt-0.5 text-xs text-muted-foreground">
               Skip blog, help and policy pages
@@ -249,21 +290,58 @@ export function CrawlConfigPanel({
 
         <div className="lg:col-span-2">
           <Label htmlFor="proxy">Residential proxy (optional)</Label>
-          <Input
-            id="proxy"
-            type="password"
-            value={proxy}
-            onChange={(e) => onProxyChange(e.target.value)}
-            placeholder="http://user:pass@gate.provider.com:8000"
-            autoComplete="off"
-            spellCheck={false}
-            className="mt-1.5 font-mono text-xs"
-          />
+          <div className="mt-1.5 flex gap-2">
+            <Input
+              id="proxy"
+              type="password"
+              value={proxy}
+              onChange={(e) => onProxyChange(e.target.value)}
+              placeholder="http://user:pass@gate.provider.com:8000"
+              autoComplete="off"
+              spellCheck={false}
+              className="h-9 flex-1 font-mono text-xs"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9 shrink-0"
+              onClick={onTestProxy}
+              disabled={proxyTestPending || !proxy.trim()}
+              title="Validates the gateway by fetching an IP echo through it — see the exit IP your crawl would use."
+            >
+              {proxyTestPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <PlugZap className="size-4" />
+              )}
+              Test proxy
+            </Button>
+          </div>
+          {proxyTestResult ? (
+            proxyTestResult.ok ? (
+              <p className="mt-1 flex items-center gap-1.5 text-xs text-success">
+                <CheckCircle2 className="size-3.5 shrink-0" />
+                Works — exit IP{" "}
+                <span className="font-mono">
+                  {proxyTestResult.exitIp}
+                </span> · {proxyTestResult.latencyMs}ms
+              </p>
+            ) : (
+              <p className="mt-1 flex items-start gap-1.5 text-xs text-destructive">
+                <TriangleAlert className="mt-px size-3.5 shrink-0" />
+                <span className="leading-snug">
+                  Gateway failed — {proxyTestResult.error}
+                </span>
+              </p>
+            )
+          ) : null}
           <p className="mt-1 text-xs text-muted-foreground">
             Tier 2 — routes every request through a rotating residential gateway
             (Oxylabs / Bright Data / Smartproxy) to fix IP blocks on stores that
             403 this machine. Credentials stay in your browser; the server never
-            stores or logs them.
+            stores or logs them. Renders too — browsers and fetches exit through
+            the proxy.
           </p>
         </div>
 
