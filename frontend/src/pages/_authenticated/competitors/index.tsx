@@ -24,6 +24,7 @@ import {
 } from "@/components/competitors/store-picker-dialog";
 import { StorePill } from "@/components/competitors/store-pill";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { useStores } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
@@ -412,10 +413,7 @@ function CompetitorsPage() {
               <EmptyStateCard message="Select a competitor card above to see the comparison." />
             ) : (
               filledSlots.map((slot) => (
-                <section
-                  key={slot.key}
-                  className="border border-border bg-card"
-                >
+                <Card key={slot.key}>
                   <div className="border-b border-border px-5 py-3.5">
                     <CompareSectionHeading labelA={myLabel} labelB={slot.key} />
                   </div>
@@ -428,7 +426,7 @@ function CompetitorsPage() {
                       />
                     ) : null}
                   </div>
-                </section>
+                </Card>
               ))
             )}
           </div>

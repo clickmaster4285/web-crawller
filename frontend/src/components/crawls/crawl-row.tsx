@@ -20,6 +20,7 @@ import { ProductCell } from "@/components/common/product-cell";
 import { StockBadge } from "@/components/common/stock-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { CardList } from "@/components/ui/card";
 import {
   getStoreEvents,
   getStoreProducts,
@@ -222,7 +223,7 @@ export function CrawlRow({
           {d ? (
             <div>
               <p className="label-caps mb-2">Discovery</p>
-              <ul className="divide-y divide-border border border-border bg-card text-sm">
+              <CardList className="text-sm">
                 <li className="flex items-center justify-between gap-4 p-3">
                   <span>Platform</span>
                   <span className="text-xs text-muted-foreground">
@@ -265,7 +266,7 @@ export function CrawlRow({
                     </span>
                   </li>
                 ) : null}
-              </ul>
+              </CardList>
             </div>
           ) : null}
 
@@ -286,7 +287,7 @@ export function CrawlRow({
                   </Link>
                 </Button>
               </div>
-              <ul className="divide-y divide-border border border-border bg-card">
+              <CardList>
                 {previewProducts.map((p) => (
                   <li
                     key={p.url}
@@ -301,7 +302,7 @@ export function CrawlRow({
                     </span>
                   </li>
                 ))}
-              </ul>
+              </CardList>
             </div>
           ) : shallow ? (
             <p className="text-sm text-muted-foreground">

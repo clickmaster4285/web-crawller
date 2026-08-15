@@ -9,6 +9,7 @@ import {
 import { SectionTitle } from "@/components/cards/stat-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -112,7 +113,7 @@ export function CrawlConfigPanel({
       >
         Configuration
       </SectionTitle>
-      <div className="grid gap-6 border border-border bg-card p-6 lg:grid-cols-2">
+      <Card className="grid gap-6 p-6 lg:grid-cols-2">
         <div className="grid gap-2">
           <Label>Maximum pages per crawl</Label>
           <Select
@@ -441,7 +442,7 @@ export function CrawlConfigPanel({
             crawl every discovered URL.
           </p>
         </div>
-      </div>
+      </Card>
     </section>
   );
 }

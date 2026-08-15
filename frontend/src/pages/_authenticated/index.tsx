@@ -20,6 +20,7 @@ import {
   NoRealDataState,
 } from "@/components/common/states";
 import { Button } from "@/components/ui/button";
+import { Card, CardList } from "@/components/ui/card";
 import { useAnalytics } from "@/hooks/useWorkspace";
 import { gbp } from "@/utils";
 
@@ -177,7 +178,7 @@ function DashboardPage() {
           >
             Widest price gaps
           </SectionTitle>
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {data.matchedProducts
               .filter((p) => p.gap !== null)
               .slice(0, 6)
@@ -199,7 +200,7 @@ function DashboardPage() {
                 Crawl your own store to compare prices side by side.
               </li>
             )}
-          </ul>
+          </CardList>
         </div>
       </div>
 
@@ -216,7 +217,7 @@ function DashboardPage() {
         >
           Category coverage
         </SectionTitle>
-        <div className="h-72 border border-border bg-card p-4">
+        <Card className="h-72 p-4">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart
               data={data.categoryGaps.slice(0, 10)}
@@ -248,7 +249,7 @@ function DashboardPage() {
               />
             </BarChart>
           </ResponsiveContainer>
-        </div>
+        </Card>
       </div>
 
       <div className="border-t border-border px-6 py-8">
@@ -264,7 +265,7 @@ function DashboardPage() {
         >
           Competitor snapshot
         </SectionTitle>
-        <ul className="divide-y divide-border border border-border bg-card">
+        <CardList>
           {data.competitors.map((c) => (
             <li
               key={c.id}
@@ -283,7 +284,7 @@ function DashboardPage() {
               </div>
             </li>
           ))}
-        </ul>
+        </CardList>
       </div>
     </div>
   );

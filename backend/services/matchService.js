@@ -34,6 +34,42 @@ const TRIGRAM_MIN_SHARED = 2; // min shared grams to be scored
 const TRIGRAM_JACCARD_MIN = 0.3; // min trigram Jaccard to be scored
 const TRIGRAM_MAX_CANDIDATES = 50_000; // abort tier if candidates explode
 
+// P3 matcher purity: exclude unambiguous non-product URLs (blog/legal/
+// collection/SEO-city landing pages) from the candidate sets — the same
+// shared classifier the crawler and the ingest guard use (single source of
+// truth, backend/crawler/discover/junk-segments.ts). Loaded via
+// `await import()` the same way crawlSync loads it.
+let junkFilterPromise = null;
+function getJunkFilter() {
+  junkFilterPromise ??= import('../crawler/discover/junk-segments.ts').then(
+    (m) => m
+  );
+  return junkFilterPromise;
+}
+
+async function hasJunkSegment(url) {
+  const { hasJunkSegment: check } = await getJunkFilter();
+  return check(url);
+}
+
+/**
+ * A Product doc may enter the matcher only if its URL is not an
+ * unambiguous non-product page — UNLESS it carries a product identity
+ * (gtin/sku), which means it's a real product regardless of path shape.
+ * Mirrors the ingest guard's rule exactly, so matching and ingestion can
+ * never disagree (a junk page that matches on a real gtin IS the product).
+ */
+async function isMatchable(doc) {
+  if (doc.gtin || doc.sku) return true;
+  return !(await hasJunkSegment(doc.url));
+}
+
+/** Filters a doc array by isMatchable, preserving order. */
+async function filterMatchable(docs) {
+  const flags = await Promise.all(docs.map((d) => isMatchable(d)));
+  return docs.filter((_, i) => flags[i]);
+}
+
 /** The user's own store doc, or null when unset. */
 async function getMyStore() {
   return MyStore.findById(MyStore.MY_STORE_ID);
@@ -181,7 +217,9 @@ async function matchByTrigrams(
       ...alreadyMatched,
       trigrams: { $in: chunk }
     })
-      .select('_id name url price available trigrams')
+      // gtin/sku selected so the purity rule's identity escape hatch works
+      // here exactly as it does in the exact tiers.
+      .select('_id name sku gtin url price available trigrams')
       .lean();
     for (const d of docs) {
       if (cands.has(String(d._id))) continue;
@@ -191,6 +229,13 @@ async function matchByTrigrams(
       cands.set(String(d._id), d);
     }
   }
+  if (!cands.size) return [];
+  // P3: same purity filter as the exact tiers — re-scored candidates must
+  // not include junk-slug pages (a noisy competitor catalogue would
+  // otherwise pair category pages with real products on shared grams).
+  const matchable = await filterMatchable([...cands.values()]);
+  cands.clear();
+  for (const d of matchable) cands.set(String(d._id), d);
   if (!cands.size) return [];
 
   // 4. Gram → docs index for scoring.
@@ -312,7 +357,10 @@ async function loadTheirsCandidates(theirsOrigin, mineDocs, boundary) {
   }
   const results = await Promise.all(queries);
   for (const docs of results) grab(docs);
-  return [...byId.values()];
+  // P3: drop unambiguous non-product pages (category/blog/SEO-city) from the
+  // candidate set — junk-to-junk fuzzy pairs were polluting matches. Docs
+  // carrying a gtin/sku are kept (real products regardless of path shape).
+  return filterMatchable([...byId.values()]);
 }
 
 /**
@@ -338,10 +386,13 @@ async function reconcilePair(mineOrigin, theirsOrigin, { threshold = FUZZY_THRES
   // origin, then a no-op.
   await ensureVocabForOrigin(mineOrigin);
   await ensureVocabForOrigin(theirsOrigin);
-  const mine = await loadActiveProducts(
+  const mineAll = await loadActiveProducts(
     mineOrigin,
     '_id name sku gtin url price available tokens trigrams'
   );
+  // P3: the "your website" side gets the same purity rule — category/blog
+  // pages in my own catalogue must not pair with anything.
+  const mine = await filterMatchable(mineAll);
   if (mine.length === 0) {
     await ProductMatch.deleteMany({ mineOrigin, competitorKey });
     return { matched: 0, methods: {}, cleared: true };

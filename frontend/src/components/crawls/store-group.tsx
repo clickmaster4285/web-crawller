@@ -4,6 +4,7 @@ import { ChevronDown, ChevronUp, Globe, RefreshCw, Trash2 } from "lucide-react";
 import { CrawlRow } from "./crawl-row";
 import type { TypeFilter } from "./crawl-type-toggle";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import type { StoreSnapshot } from "@/api";
 import { formatCrawlDate } from "@/utils/crawls";
 
@@ -99,7 +100,7 @@ export function StoreGroup({
       </div>
 
       {open ? (
-        <div className="divide-y divide-border border border-border bg-card">
+        <Card className="divide-y divide-border">
           {group.map((snapshot, i) => (
             <CrawlRow
               key={snapshot._id}
@@ -114,7 +115,7 @@ export function StoreGroup({
               onDelete={() => onDeleteRow(snapshot._id, origin)}
             />
           ))}
-        </div>
+        </Card>
       ) : (
         <p className="border border-dashed border-border bg-card px-4 py-6 text-center text-xs text-muted-foreground">
           {group.length} snapshot

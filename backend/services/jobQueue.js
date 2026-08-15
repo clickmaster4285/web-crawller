@@ -206,6 +206,8 @@ async function heartbeat(jobId, workerId, patch = {}) {
   }
   if (patch.discovery != null) set['progress.discovery'] = patch.discovery;
   if (patch.requests != null) set['progress.requests'] = patch.requests;
+  // P4: engine version stamped once, on the worker's first beat after claim.
+  if (patch.crawlerVersion != null) set.crawlerVersion = patch.crawlerVersion;
   const ops = [{ updateOne: { filter: { _id: jobId, workerId }, update: { $set: set } } }];
   // Run-log append (Phase 5 observability): `patch.log` is an array of NEW
   // {at, level, message} lines since the last beat — appended atomically and
@@ -337,6 +339,12 @@ function publicJob(job, options = {}) {
     origin: job.origin,
     /** Worker that claimed/owns the job (null while queued — debugging). */
     workerId: job.workerId ?? null,
+    /**
+     * P4: deployed engine version that ran this crawl (package version + git
+     * SHA at worker boot) — null while queued. Restarting the backend is how
+     * new engine code deploys.
+     */
+    crawlerVersion: job.crawlerVersion ?? null,
     /** Last worker heartbeat (ms) — null while queued/terminal. */
     heartbeatAt,
     /**

@@ -11,6 +11,7 @@ import {
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { SectionTitle, StatCard } from "@/components/cards/stat-card";
+import { Card, CardList } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import {
   LoadingState,
@@ -98,7 +99,7 @@ function CataloguePage() {
 
       <div className="px-6 py-8">
         <SectionTitle>Category coverage</SectionTitle>
-        <div className="h-80 border border-border bg-card p-4">
+        <Card className="h-80 p-4">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart
               data={sortedCategories}
@@ -143,13 +144,13 @@ function CataloguePage() {
               />
             </BarChart>
           </ResponsiveContainer>
-        </div>
+        </Card>
       </div>
 
       <div className="grid gap-8 border-t border-border px-6 py-8 lg:grid-cols-2">
         <div>
           <SectionTitle>Where to invest first</SectionTitle>
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {sortedCategories.map((c) => {
               const gap = c.competitors - c.you;
               return (
@@ -172,12 +173,12 @@ function CataloguePage() {
                 </li>
               );
             })}
-          </ul>
+          </CardList>
         </div>
 
         <div>
           <SectionTitle>Brand intelligence</SectionTitle>
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {sortedBrands.map((b) => (
               <li
                 key={b.brand}
@@ -204,7 +205,7 @@ function CataloguePage() {
                 </div>
               </li>
             ))}
-          </ul>
+          </CardList>
         </div>
       </div>
     </div>

@@ -111,7 +111,13 @@ export interface CrawlRunResult {
     /** Total HTTP requests made this run (debug; absent on old results). */
     requests?: number;
   };
-  failures: Array<{ url: string; error: string }>;
+  failures: Array<{
+    url: string;
+    error: string;
+    /** P4: 'extraction' = page loaded but nothing parsed; 'http' = fetch
+     *  failed (blocked/rate-limited/network). Absent on legacy results. */
+    kind?: "extraction" | "http";
+  }>;
   products: Array<{
     name: string;
     brand: string;
@@ -328,6 +334,13 @@ export interface CrawlJob {
    * while the job is still queued.
    */
   workerId: string | null;
+  /**
+   * P4: deployed engine version that ran this crawl (backend package version
+   * + git SHA at worker boot) — null while queued. Restarting the backend is
+   * how new engine code deploys, so a job running an old version is expected
+   * until the next restart.
+   */
+  crawlerVersion: string | null;
   /**
    * Last worker heartbeat (ms) — null while queued/terminal (never
    * heartbeated, or released after a crash).

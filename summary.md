@@ -302,6 +302,76 @@ synced.
 
 ---
 
+## 🔧 This session — P4 close-out + matcher purity (Aug 15)
+
+Three roadmap items shipped, all verified:
+
+1. **Worker code versioning (P4)** — the worker stamps `crawlerVersion`
+   (backend package version + git short SHA read at boot) on the job at
+   claim: first forced beat + the run-log opens with
+   `engine vX — restarting the backend deploys this`. Exposed via
+   `publicJob`, shown as an `engine <v>` chip on the Active crawls debug
+   strip. Live-verified: `1.0.0+eb33dfc` on a real job, matching the
+   deployed commit — a stale worker is now visible, not a mystery.
+2. **Failure classification (P4)** — `CrawlFailure.kind`
+   (`'extraction'` = page loaded, nothing parsed; `'http'` = fetch failed:
+   timeout / rate-limit / WAF / network), set at the two engine push sites
+   + discovery failure. The run-log finish lines (engine AND worker) split
+   the count (`[N extraction-miss · N http]`); the results panel badges
+   each row (muted `no data` vs red `http`) and the empty state reads
+   honestly ("every page loaded, nothing parseable" vs "some pages
+   blocked"). Legacy results without `kind` render unchanged.
+3. **Matcher purity (P3 watch)** — non-product URLs excluded from the
+   matcher entirely: all candidate sets (exact tiers, my own catalogue,
+   trigram tier) filtered by the shared `hasJunkSegment` classifier unless
+   the doc carries gtin/sku (the ingest guard's identity rule, so matching
+   and ingestion can't disagree). Junk-to-junk fuzzy pairs can no longer
+   form; existing pairs clear on the next per-pair reconcile.
+
+## 🎨 This session — UI polish + 1M-scale readiness (Aug 15)
+
+**UI polish (audit-driven, not a redesign — the warm-editorial design system
+was already intentional):**
+
+1. **`Card` primitive** (`components/ui/card.tsx`) — the pages had 40+
+   hand-rolled `border border-border bg-card` divs that skipped the radius;
+   the new Card applies `rounded-md` + a whisper of shadow from the tokens.
+   Migrated the visible surfaces: every Sources panel (setup / analysis /
+   progress / results / config / schedules), the store profile card, Active
+   crawls job cards + finished list, the /metrics page (tiles, worker list,
+   legend), login, the dashboard + catalogue + products + reports + store
+   catalogue tables/charts, the competitors compare slots and the diff
+   tiles. The `<ul>` list surfaces got their own primitive — **`CardList`**
+   (renders a `<ul>` with the same surface + dividers + clipped corners so
+   list semantics stay valid) — and all 14 of them were migrated: alerts
+   feed, dashboard gaps + competitor snapshot, catalogue invest/brand
+   lists, pricing gaps/positioning/movers, crawl diff products, crawl-row
+   discovery + preview lists, schedules, and the results-panel products
+   list. Zero old-style list surfaces remain.
+2. **`EmptyState` component** (`components/common/empty-state.tsx`) — one
+   icon + title + description treatment replacing the scattered plain-text
+   empties: Active crawls ("No crawls running"), /metrics ("No worker
+   holds a job"), /crawls (with the query/type-filter-aware copy).
+3. **/metrics page elevated** — stat tiles are now proper cards; the legend
+   strip, worker list and empty state use the primitives.
+
+**1M-scale readiness:**
+
+1. **Terminal-CrawlJob pruning** (`npm run prune-terminal-jobs`, dry-run by
+   default, `--apply` to strip): finished jobs embed the full product array
+   in `result` (~1 MB each, the biggest duplicated chunk); the script
+   strips `result` from terminal jobs older than a keep window (default
+   1h, `KEEP_MS` to change) while KEEPING the run log. Verified live:
+   dry-run connects, finds 0 to prune (recent jobs are inside the window;
+   older ones were TTL'd).
+2. **`.env.example` restored** (was deleted in the previous commit; docs
+   reference it) — reconstructed from git history.
+3. **Pagination audit — clean**: no full-catalogue reads remain on either
+   side. Frontend product fetches all use the paginated `/stores/:key/
+   products` endpoints; `/data/pricing` + `/data/matched-products` are
+   server-side aggregates over metadata + persisted `ProductMatch` rows
+   (never full product arrays).
+
 ## 📍 Where we are in the plan
 
 Per `plan.md` §9 and `architecture.md`: everything through **indexed matching

@@ -21,6 +21,7 @@ import { CrawlStatsGrid } from "@/components/cards/crawl-stats-grid";
 import { ProductCell } from "@/components/common/product-cell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -384,7 +385,7 @@ function StoreCataloguePage() {
         {/* Snapshot details picker — drives the stats / profile / discovery
             log below. The catalogue table always shows the current state. */}
         {snapshots.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-3 border border-border bg-card px-5 py-3.5">
+          <Card className="flex flex-wrap items-center gap-3 px-5 py-3.5">
             <Globe className="size-4 shrink-0 text-muted-foreground" />
             <span className="text-xs text-muted-foreground">
               Snapshot details
@@ -416,7 +417,7 @@ function StoreCataloguePage() {
                     : "no changes"}
               </span>
             ) : null}
-          </div>
+          </Card>
         ) : null}
 
         {/* Stats for the selected snapshot */}
@@ -437,7 +438,7 @@ function StoreCataloguePage() {
         ) : null}
 
         {/* Catalogue — the CURRENT state, server-paginated (D1 read path) */}
-        <section className="border border-border bg-card">
+        <Card>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
             <div className="flex items-center gap-2">
               <PackageSearch className="size-4 text-muted-foreground" />
@@ -559,7 +560,7 @@ function StoreCataloguePage() {
               ) : null}
             </>
           )}
-        </section>
+        </Card>
       </div>
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>

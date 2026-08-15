@@ -8,6 +8,7 @@ import {
 import { CrawlStatsGrid } from "@/components/cards/crawl-stats-grid";
 import { DiscoveryLog } from "@/components/crawls/discovery-log";
 import { RunLog } from "@/components/crawls/run-log";
+import { Card, CardList } from "@/components/ui/card";
 import { ProductCell } from "@/components/common/product-cell";
 import { StockBadge } from "@/components/common/stock-badge";
 import { Badge } from "@/components/ui/badge";
@@ -40,7 +41,7 @@ export function CrawlResultsPanel({
   onActionUrl: (url: string) => void;
 }) {
   return (
-    <section className="space-y-5 border border-border bg-card p-6">
+    <Card className="space-y-5 p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="font-display text-xl">Crawl complete</p>
@@ -203,14 +204,44 @@ export function CrawlResultsPanel({
       <RunLog lines={job?.log ?? []} defaultOpen />
       {result.failures.length > 0 ? (
         <div>
-          <p className="label-caps mb-2">Failures</p>
+          <p className="label-caps mb-2">
+            Failures — {result.failures.length.toLocaleString()} total (
+            {result.failures.filter((f) => f.kind === "extraction").length}{" "}
+            extraction-miss ·{" "}
+            {result.failures.filter((f) => f.kind !== "extraction").length}{" "}
+            http)
+          </p>
           <ul className="max-h-40 space-y-1 overflow-auto text-xs">
             {result.failures.slice(0, 12).map((f) => (
-              <li key={f.url} className="flex justify-between gap-3">
+              <li
+                key={f.url}
+                className="flex items-center justify-between gap-3"
+              >
                 <span className="truncate font-mono text-muted-foreground">
                   {f.url}
                 </span>
-                <span className="shrink-0 text-destructive">{f.error}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {/* P4: extraction-miss = the page loaded but nothing parsed
+                      (muted — not the store's fault); http = the fetch failed
+                      (blocked / rate-limited / network — red). */}
+                  <Badge
+                    variant={
+                      f.kind === "extraction" ? "secondary" : "destructive"
+                    }
+                    className="font-normal"
+                  >
+                    {f.kind === "extraction" ? "no data" : "http"}
+                  </Badge>
+                  <span
+                    className={
+                      f.kind === "extraction"
+                        ? "text-muted-foreground"
+                        : "text-destructive"
+                    }
+                  >
+                    {f.error}
+                  </span>
+                </span>
               </li>
             ))}
             {result.failures.length > 12 ? (
@@ -227,7 +258,7 @@ export function CrawlResultsPanel({
             Products ({result.products.length}) — first{" "}
             {Math.min(result.products.length, 8)}
           </p>
-          <ul className="divide-y divide-border border border-border">
+          <CardList>
             {result.products.slice(0, 8).map((p) => (
               <li
                 key={p.url}
@@ -247,14 +278,21 @@ export function CrawlResultsPanel({
                 </span>
               </li>
             ))}
-          </ul>
+          </CardList>
         </div>
       ) : shallowRun ? null : (
         <p className="text-sm text-muted-foreground">
-          No products were parsed — the store may have rate-limited this machine
-          (HTTP 429) or no structured data was found. Check the failures above.
+          {/* P4 honest empty state: the failure classification decides what
+              this actually means — all extraction misses (the store loaded,
+              nothing parseable) vs any http failure (blocked/rate-limited). */}
+          {result.failures.length > 0 &&
+          result.failures.every((f) => f.kind === "extraction")
+            ? "No products were parsed — every page that loaded carried no structured product data (JS-rendered pages or a non-product sitemap). Check the failures above."
+            : result.failures.length > 0
+              ? "No products were parsed — some pages failed to load (blocked or rate-limited by the store). Check the failures above."
+              : "No products were parsed — the store may have rate-limited this machine (HTTP 429) or no structured data was found. Check the failures above."}
         </p>
       )}
-    </section>
+    </Card>
   );
 }

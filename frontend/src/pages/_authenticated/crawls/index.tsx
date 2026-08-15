@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Play, Search } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
+import { EmptyState } from "@/components/common/empty-state";
 import { StatCard } from "@/components/cards/stat-card";
 import {
   CrawlTypeToggle,
@@ -294,15 +295,21 @@ function CrawlsPage() {
           </div>
 
           {filtered.length === 0 ? (
-            <p className="border border-border bg-card p-8 text-center text-sm text-muted-foreground">
-              {query.trim()
-                ? `No saved crawls match “${query}”.`
-                : typeFilter === "all"
-                  ? "No saved crawls yet."
-                  : typeFilter === "shallow"
-                    ? "No shallow checks saved — run a Quick check on /sources to spot new products between deep crawls."
-                    : "No deep crawls saved — run a full crawl on /sources to build the catalogue."}
-            </p>
+            <EmptyState
+              icon={Play}
+              title={
+                query.trim()
+                  ? `No saved crawls match “${query}”`
+                  : "No saved crawls yet"
+              }
+              description={
+                typeFilter === "shallow"
+                  ? "Run a Quick check on /sources to spot new products between deep crawls."
+                  : typeFilter === "deep"
+                    ? "Run a full crawl on /sources to build the catalogue."
+                    : undefined
+              }
+            />
           ) : (
             <div className="space-y-8">
               {filtered.map(([key, group]) => (

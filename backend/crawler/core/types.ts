@@ -244,6 +244,13 @@ export interface CrawledProduct {
 export interface CrawlFailure {
   url: string;
   error: string;
+  /**
+   * What failed (P4): 'extraction' = the page loaded but no product was
+   * parsed from it; 'http' = the fetch itself failed (timeout, rate-limit,
+   * WAF block, network). Lets a 0-priced run read honestly — "all
+   * extraction misses" vs "blocked by the store". Absent on legacy runs.
+   */
+  kind?: 'extraction' | 'http';
 }
 
 /** robots.txt fetch outcome for the origin. */

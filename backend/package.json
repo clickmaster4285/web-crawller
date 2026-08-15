@@ -12,7 +12,8 @@
     "typecheck": "tsc -p crawler/tsconfig.json --noEmit",
     "worker": "node --expose-gc --max-old-space-size=3072 workers/worker.mjs",
     "scheduler": "node workers/scheduler.mjs",
-    "reconcile-matches": "node scripts/reconcile-matches.js"
+    "reconcile-matches": "node scripts/reconcile-matches.js",
+    "prune-terminal-jobs": "node scripts/prune-terminal-jobs.js"
   },
   "keywords": [
     "nodejs",

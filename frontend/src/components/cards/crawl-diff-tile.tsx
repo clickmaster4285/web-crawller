@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { Card } from "@/components/ui/card";
 
 /** Colored change tile: new products / removed / price changed between runs. */
 export function CrawlDiffTile({
@@ -11,7 +12,7 @@ export function CrawlDiffTile({
   tone?: "success" | "destructive" | "warning" | "neutral";
 }) {
   return (
-    <div className="border border-border bg-card p-3">
+    <Card className="p-3">
       <p
         className={cn(
           "numeric text-xl",
@@ -23,6 +24,6 @@ export function CrawlDiffTile({
         {value}
       </p>
       <p className="mt-0.5 text-xs text-muted-foreground">{label}</p>
-    </div>
+    </Card>
   );
 }

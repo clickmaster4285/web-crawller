@@ -14,6 +14,8 @@
  * Run: `npm run worker` (from backend/), or let `index.js` spawn it in dev.
  */
 import { createRequire } from 'node:module';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 require('dotenv').config();
@@ -103,6 +105,26 @@ const crawlerUrl = new URL(crawlerModule, import.meta.url);
 const { runCrawl, isCrawlCancelled, sanitizeProxyFromMessage } = await import(
   crawlerUrl.href
 );
+
+// P4 worker code versioning: stamp the DEPLOYED engine version on every job
+// (fixes have bit us twice by not reaching already-running workers — this
+// makes a stale worker visible instead of a mystery). Best-effort: backend
+// package version + git short SHA read at boot; 'dev' when git isn't
+// available. Restarting the backend IS the deploy step — this value is what
+// that restart actually shipped.
+const ENGINE_VERSION = (() => {
+  try {
+    const { execSync } = require('node:child_process');
+    const pkg = require('../package.json');
+    const sha = execSync('git rev-parse --short HEAD', {
+      cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), '..'),
+      encoding: 'utf8',
+    }).trim();
+    return `${pkg.version}+${sha}`;
+  } catch {
+    return 'dev';
+  }
+})();
 
 const workerId =
   process.env.PARITY_WORKER_ID ??
@@ -235,6 +257,11 @@ async function processJob(job) {
     }
     heartbeat(jobId, workerId, withLog).catch(() => {});
   };
+  // P4: stamp the deployed engine version on the job immediately (forced
+  // beat so the very first throttled tick can't drop it) and open the run
+  // log with it — the UI's first line says what code this crawl runs.
+  logLine('info', `engine v${ENGINE_VERSION} — restarting the backend deploys this`);
+  beat({ crawlerVersion: ENGINE_VERSION }, true);
   // Liveness beat even when there's nothing to report (discovery in progress
   // or the engine is paused and waiting). Buffered run-log lines ride along
   // (a crawl that logs between progress ticks still flushes its story).
@@ -385,12 +412,20 @@ async function processJob(job) {
     // ATOMICALLY with the completion write below — the heartbeat timers are
     // torn down in `finally`, so this is the last chance to persist the
     // buffered story (a beat after completeJob would race the status flip).
+    // P4: the failed count splits extraction-miss vs http (same as the
+    // engine's finish line) so a 0-priced run reads honestly.
+    const failedList = sanitized.stats.failures ?? [];
+    const extractionMisses = failedList.filter(
+      (f) => f.kind === 'extraction'
+    ).length;
+    const httpFailures = failedList.length - extractionMisses;
     logLine(
       'info',
       `${workerId}: finished ${origin} — ${result.products.length.toLocaleString()} products ` +
         `(${result.stats.fetched.toLocaleString()} fetched, ` +
         `${result.stats.skippedUnchanged.toLocaleString()} cached, ` +
-        `${result.stats.failed} failed) in ${(result.stats.durationMs / 1000).toFixed(1)}s`
+        `${result.stats.failed} failed [${extractionMisses} extraction-miss · ${httpFailures} http]) ` +
+        `in ${(result.stats.durationMs / 1000).toFixed(1)}s`
     );
     if (autoBrowserFollowup) {
       logLine(

@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/layout/app-shell";
 import { SectionTitle, StatCard } from "@/components/cards/stat-card";
 import { MarketTrendChart } from "@/components/common/market-trend-chart";
 import { Badge } from "@/components/ui/badge";
+import { CardList } from "@/components/ui/card";
 import {
   LoadingState,
   ErrorState,
@@ -125,7 +126,7 @@ function PricingPage() {
       <div className="grid gap-8 border-t border-border px-6 py-8 lg:grid-cols-2">
         <div>
           <SectionTitle>Biggest pricing gaps against you</SectionTitle>
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {gaps.slice(0, 5).map((p) => (
               <li
                 key={p.id}
@@ -155,12 +156,12 @@ function PricingPage() {
                 each competitor's.
               </li>
             ) : null}
-          </ul>
+          </CardList>
         </div>
 
         <div>
           <SectionTitle>Competitor positioning</SectionTitle>
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {competitors.map((c) => (
               <li key={c.id} className="p-4">
                 <div className="flex items-center justify-between gap-3">
@@ -194,7 +195,7 @@ function PricingPage() {
                 </div>
               </li>
             ))}
-          </ul>
+          </CardList>
           <p className="mt-2 text-xs text-muted-foreground">
             Index 100 = at the market average of crawled stores; below 100 means
             cheaper than market.
@@ -218,7 +219,7 @@ function PricingPage() {
             price changed between the runs will appear here.
           </p>
         ) : (
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {movers.slice(0, 8).map((m) => (
               <li
                 key={`${m.origin}-${m.url}`}
@@ -256,7 +257,7 @@ function PricingPage() {
                 </div>
               </li>
             ))}
-          </ul>
+          </CardList>
         )}
       </div>
     </div>

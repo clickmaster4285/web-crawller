@@ -10,6 +10,7 @@ import {
 
 import { SectionTitle } from "@/components/cards/stat-card";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { TierBadge } from "@/components/sources/tier-badge";
 import { analyzeWebsite, type WebsiteProfile } from "@/lib/crawl";
@@ -142,7 +143,7 @@ export function StoreAnalysisPanel({
         Website analysis
       </SectionTitle>
 
-      <div className="border border-border bg-card">
+      <Card>
         {analyze.isPending ? (
           <div className="flex items-center gap-3 px-5 py-6">
             <Loader2 className="size-4 animate-spin text-accent" />
@@ -307,7 +308,7 @@ export function StoreAnalysisPanel({
             </Alert>
           </div>
         ) : null}
-      </div>
+      </Card>
     </section>
   );
 }

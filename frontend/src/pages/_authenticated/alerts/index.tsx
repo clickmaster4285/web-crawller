@@ -29,6 +29,7 @@ import {
 } from "@/components/common/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { CardList } from "@/components/ui/card";
 import {
   dismissAlert,
   getAlertsData,
@@ -221,7 +222,7 @@ function AlertsPage() {
 
         {/* ── Feed ────────────────────────────────────────────────────── */}
         {data.alerts.length > 0 ? (
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {data.alerts.map((a) => (
               <AlertRow
                 key={a.id}
@@ -230,7 +231,7 @@ function AlertsPage() {
                 onDismiss={dismiss}
               />
             ))}
-          </ul>
+          </CardList>
         ) : filteredEmpty ? (
           <div className="flex flex-col items-center gap-2 border border-dashed border-border bg-muted/30 px-6 py-14 text-center">
             <Inbox className="size-6 text-muted-foreground" />

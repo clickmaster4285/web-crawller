@@ -231,7 +231,14 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     return emptyResult(
       config,
       startedAt,
-      [{ url: config.origin, error: `Discovery failed: ${String(error)}` }],
+      [
+        {
+          url: config.origin,
+          error: `Discovery failed: ${String(error)}`,
+          // Network-level failure (sitemap fetch threw / was blocked).
+          kind: 'http',
+        },
+      ],
       robotsSnapshot
         ? {
             status: robotsSnapshot.status,
@@ -441,11 +448,21 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             products.push(prev.product);
             skippedUnchanged++;
           } else {
-            failures.push({ url, error: "No product data found" });
+            // P4 failure classification: the page LOADED but no product was
+            // parsed from it (extraction miss) — not an HTTP failure. A
+            // 0-priced run made of these reads "the store loaded, nothing
+            // parseable", not "we were blocked".
+            failures.push({
+              url,
+              error: "No product data found",
+              kind: 'extraction',
+            });
             store?.recordFailure(config.origin, url);
           }
         } catch (error) {
-          failures.push({ url, error: String(error) });
+          // The fetch itself failed (timeout, rate-limit, WAF block,
+          // network) — an HTTP-level failure.
+          failures.push({ url, error: String(error), kind: 'http' });
           store?.recordFailure(config.origin, url);
         }
         config.onProgress?.(products.length, urlsToFetch.length);
@@ -482,10 +499,13 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   }
 
   // Completion summary — the crawl's story in one line (landed on the job's
-  // run log so it's visible after the process exits).
+  // run log so it's visible after the process exits). P4: the failed count
+  // splits extraction-miss vs http so a 0-priced run reads honestly.
+  const extractionMisses = failures.filter((f) => f.kind === 'extraction').length;
+  const httpFailures = failures.length - extractionMisses;
   log(
     failures.length > 0 ? "warn" : "info",
-    `finished — ${products.length.toLocaleString()} products (${fetchedCount.toLocaleString()} fetched, ${skippedUnchanged.toLocaleString()} cached, ${failures.length.toLocaleString()} failed) in ${Math.round((Date.now() - startedAt) / 1000)}s` +
+    `finished — ${products.length.toLocaleString()} products (${fetchedCount.toLocaleString()} fetched, ${skippedUnchanged.toLocaleString()} cached, ${failures.length.toLocaleString()} failed [${extractionMisses.toLocaleString()} extraction-miss · ${httpFailures.toLocaleString()} http]) in ${Math.round((Date.now() - startedAt) / 1000)}s` +
       (capped ? " — capped run" : "")
   );
 

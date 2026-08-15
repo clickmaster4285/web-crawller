@@ -10,6 +10,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import type { CrawlDiscovery } from "@/api";
 import { formatCrawlDate, robotsText } from "@/utils/crawls";
 import { cn } from "@/lib/utils";
@@ -179,7 +180,7 @@ export function StoreProfile({
   const homepage = d.homepage;
 
   return (
-    <section className="border border-border bg-card">
+    <Card>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
         <div className="flex min-w-0 items-center gap-2.5">
           <Store className="size-4 shrink-0 text-muted-foreground" />
@@ -308,6 +309,6 @@ export function StoreProfile({
           ))}
         </ul>
       ) : null}
-    </section>
+    </Card>
   );
 }

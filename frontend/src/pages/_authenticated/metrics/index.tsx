@@ -13,6 +13,8 @@ import {
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/common/empty-state";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { useMetrics } from "@/hooks/useData";
 import { formatDuration } from "@/utils/format";
@@ -54,7 +56,7 @@ function Stat({
           ? "text-destructive"
           : "text-foreground";
   return (
-    <div className="border border-border bg-card p-4">
+    <Card className="p-4">
       <p className="label-caps text-muted-foreground">{label}</p>
       <p className={`numeric mt-1 font-display text-2xl ${toneClass}`}>
         {value}
@@ -62,7 +64,7 @@ function Stat({
       {sub ? (
         <p className="mt-0.5 text-[11px] text-muted-foreground">{sub}</p>
       ) : null}
-    </div>
+    </Card>
   );
 }
 
@@ -190,7 +192,7 @@ function MetricsPage() {
           </div>
 
           {w.active.length > 0 ? (
-            <div className="divide-y divide-border border border-border bg-card">
+            <Card className="divide-y divide-border">
               {w.active.map((worker) => (
                 <div
                   key={worker.workerId}
@@ -236,11 +238,13 @@ function MetricsPage() {
                   ))}
                 </div>
               ))}
-            </div>
+            </Card>
           ) : (
-            <p className="border border-dashed border-border bg-muted/30 px-5 py-6 text-center text-xs text-muted-foreground">
-              No worker currently holds a crawl job — the queue is idle.
-            </p>
+            <EmptyState
+              icon={Cpu}
+              title="No worker holds a job"
+              description="The queue is idle — start a crawl on the Sources page and the claiming worker appears here."
+            />
           )}
         </section>
 
@@ -306,7 +310,7 @@ function MetricsPage() {
         ))}
 
         {/* ── Legend / about ──────────────────────────────────────────── */}
-        <section className="flex flex-wrap items-center gap-x-6 gap-y-2 border border-border bg-card px-5 py-3 text-[11px] text-muted-foreground">
+        <Card className="flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3 text-[11px] text-muted-foreground">
           <span className="flex items-center gap-1.5">
             <Gauge className="size-3.5" /> Derived live from CrawlJob — no
             counters to maintain
@@ -319,7 +323,7 @@ function MetricsPage() {
             <ShieldAlert className="size-3.5" /> Stale claims are released and
             requeued
           </span>
-        </section>
+        </Card>
       </div>
     </div>
   );

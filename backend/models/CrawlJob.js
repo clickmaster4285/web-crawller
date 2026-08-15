@@ -138,6 +138,12 @@ const crawlJobSchema = new mongoose.Schema(
     startedAt: Date,
     finishedAt: Date,
     workerId: String,
+    /**
+     * P4: deployed engine version that ran this crawl (backend package
+     * version + git SHA at worker boot). Restarting the backend IS the
+     * deploy step — this makes a stale worker visible instead of a mystery.
+     */
+    crawlerVersion: String,
     /** Last worker heartbeat — stale claims are released and requeued. */
     heartbeatAt: Date,
     params: { type: crawlParamsSchema, default: () => ({}) },

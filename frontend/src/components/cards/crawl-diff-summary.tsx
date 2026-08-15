@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { CrawlDiffTile } from "@/components/cards/crawl-diff-tile";
+import { CardList } from "@/components/ui/card";
 import { ProductCell } from "@/components/common/product-cell";
 import { StockBadge } from "@/components/common/stock-badge";
 import { formatPrice } from "@/utils/format";
@@ -32,7 +33,7 @@ export function NewProductsList({
       {title ? (
         <p className="mb-2 text-xs text-muted-foreground">{title}</p>
       ) : null}
-      <ul className="divide-y divide-border border border-border bg-card">
+      <CardList>
         {products.slice(0, limit).map((p) => (
           <li
             key={p.url}
@@ -50,7 +51,7 @@ export function NewProductsList({
             {footer ?? `…and ${products.length - limit} more`}
           </li>
         ) : null}
-      </ul>
+      </CardList>
     </div>
   );
 }

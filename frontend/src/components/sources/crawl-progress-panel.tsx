@@ -17,6 +17,7 @@ import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { TierBadge } from "@/components/sources/tier-badge";
 import { RunLog } from "@/components/crawls/run-log";
+import { Card } from "@/components/ui/card";
 import type { CrawlJob, CrawlJobDiscovery } from "@/lib/crawl";
 import { formatDuration } from "@/utils/format";
 import { cn } from "@/lib/utils";
@@ -73,7 +74,7 @@ export function CrawlProgressPanel({
   onCancel: () => void;
 }) {
   return (
-    <section className="space-y-3 border border-border bg-card p-6">
+    <Card className="space-y-3 p-6">
       {reconnected ? (
         <div className="flex flex-wrap items-center gap-2">
           <Badge
@@ -384,6 +385,6 @@ export function CrawlProgressPanel({
           ? `Reading sitemaps and following internal links — ${job.params.respectRobotsTxt === false ? "robots.txt ignored" : "robots.txt respected"}.`
           : `Polite crawl (max ${job.params.maxConcurrencyPerHost} concurrent requests, ${(job.params.delayMs / 1000).toLocaleString()}s base delay, ${job.params.respectRobotsTxt === false ? "robots.txt ignored" : "robots.txt respected"}) — the estimate adjusts to the observed speed and any rate limits.${job.params.maxPages != null ? ` Crawl capped at ${job.params.maxPages.toLocaleString()} pages.` : ""}`}
       </p>
-    </section>
+    </Card>
   );
 }

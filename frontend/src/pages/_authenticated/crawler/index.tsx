@@ -16,7 +16,9 @@ import {
 import { PageHeader } from "@/components/layout/app-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { EmptyState } from "@/components/common/empty-state";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { useMetrics } from "@/hooks/useData";
 import { CancelCrawlDialog } from "@/components/crawls/cancel-crawl-dialog";
@@ -273,21 +275,23 @@ function CrawlerPage() {
           ) : null}
 
           {active.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 border border-dashed border-border bg-muted/30 px-8 py-12 text-center">
-              <Play className="size-6 text-muted-foreground/60" />
-              <p className="text-sm font-medium">No crawls running</p>
-              <p className="max-w-md text-xs text-muted-foreground">
-                Start one from the{" "}
-                <Link
-                  to="/sources"
-                  className="text-primary underline-offset-2 hover:underline"
-                >
-                  Crawler
-                </Link>{" "}
-                page, or schedule a recurring crawl — it appears here the moment
-                it's enqueued.
-              </p>
-            </div>
+            <EmptyState
+              icon={Play}
+              title="No crawls running"
+              description={
+                <>
+                  Start one from the{" "}
+                  <Link
+                    to="/sources"
+                    className="text-primary underline-offset-2 hover:underline"
+                  >
+                    Crawler
+                  </Link>{" "}
+                  page, or schedule a recurring crawl — it appears here the
+                  moment it's enqueued.
+                </>
+              }
+            />
           ) : (
             <div className="space-y-3">
               {active.map((job) => {
@@ -295,10 +299,7 @@ function CrawlerPage() {
                 const pending = controlPendingId === job.id;
                 const running = job.state === "claimed";
                 return (
-                  <article
-                    key={job.id}
-                    className="border border-border bg-card p-5"
-                  >
+                  <Card key={job.id} className="p-5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -412,6 +413,15 @@ function CrawlerPage() {
                           ) : (
                             <span className="font-mono">not claimed yet</span>
                           )}
+                          {/* P4: the deployed engine version this crawl runs —
+                              restarting the backend is how new code ships, so
+                              this chip is how a stale worker stops being a
+                              mystery. */}
+                          {job.crawlerVersion ? (
+                            <span className="font-mono">
+                              engine {job.crawlerVersion}
+                            </span>
+                          ) : null}
                           {job.state === "retrying" ? (
                             <span className="text-amber-600">retrying…</span>
                           ) : null}
@@ -512,7 +522,7 @@ function CrawlerPage() {
                     {/* Structured run log — collapsed by default so the cards
                         stay scannable; expand for the crawl's full story. */}
                     <RunLog lines={job.log} className="mt-3" />
-                  </article>
+                  </Card>
                 );
               })}
             </div>
@@ -525,7 +535,7 @@ function CrawlerPage() {
             <h2 className="label-caps text-muted-foreground">
               Finished in the last 15 minutes
             </h2>
-            <div className="divide-y divide-border border border-border bg-card">
+            <Card className="divide-y divide-border">
               {recent.map((job) => {
                 const done = job.state === "done";
                 return (
@@ -571,7 +581,7 @@ function CrawlerPage() {
                   </div>
                 );
               })}
-            </div>
+            </Card>
           </section>
         ) : null}
       </div>
