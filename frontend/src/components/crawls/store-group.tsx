@@ -6,7 +6,9 @@ import type { TypeFilter } from "./crawl-type-toggle";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import type { StoreSnapshot } from "@/api";
+import type { StoreHealth } from "@/lib/crawl";
 import { formatCrawlDate } from "@/utils/crawls";
+import { HealthChip } from "@/components/sources/health-chip";
 
 /**
  * One store's snapshot history on /crawls: a header (domain, count, actions)
@@ -18,6 +20,7 @@ export function StoreGroup({
   storeKey,
   origin,
   storeCount,
+  health,
   group,
   typeFilter,
   open,
@@ -34,6 +37,12 @@ export function StoreGroup({
   origin: string;
   /** Current catalogue size — the store's live product count. */
   storeCount: number;
+  /**
+   * P4 store-health pass — last pre-flight verdict, so a 0-product store
+   * (no-products / blocked / corporate) is flagged right in the history list
+   * without running a fresh analysis.
+   */
+  health?: StoreHealth | null;
   /** Snapshots for this store, newest first. */
   group: StoreSnapshot[];
   /** Active type filter — shown in the subtitle when not "all". */
@@ -53,14 +62,17 @@ export function StoreGroup({
         <div className="flex min-w-0 items-center gap-3">
           <Globe className="size-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0">
-            <p className="truncate font-mono text-sm font-medium">
+            <p className="flex items-center gap-2 truncate font-mono text-sm font-medium">
               <Link
                 to="/stores/$origin"
                 params={{ origin: storeKey }}
-                className="transition-colors hover:text-primary hover:underline"
+                className="truncate transition-colors hover:text-primary hover:underline"
               >
                 {storeKey}
               </Link>
+              {health?.verdict ? (
+                <HealthChip verdict={health.verdict} score={health.score} />
+              ) : null}
             </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {group.length} snapshot

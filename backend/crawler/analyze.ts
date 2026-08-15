@@ -71,6 +71,33 @@ export type Framework = "next" | "nuxt" | "gatsby" | "plain" | "unknown";
 export type RecommendationTier =
   "API-first" | "sitemap-HTTP" | "sitemap-browser" | "HTML-BFS" | "manual";
 
+/**
+ * Store-health verdict — the pre-flight answer to "will a crawl of this
+ * store actually yield products?" (P4 store-health pass).
+ */
+export type StoreHealthVerdict =
+  | "healthy"
+  | "no-products"
+  | "blocked"
+  | "corporate"
+  | "unclear";
+
+/**
+ * Pre-flight health assessment of a store, derived from the probe profile.
+ * Flags the expensive dead ends BEFORE a crawl spends worker hours on them
+ * (the lifetimefitnessstore class: 39k classified URLs that were all
+ * `<category>-in-<city>` landing pages with no Product schema, no API and no
+ * real product sitemap — a 6-hour crawl would have ended at 0 products).
+ */
+export interface StoreHealth {
+  verdict: StoreHealthVerdict;
+  /** 0–100 — how confident we are the store yields parseable products. */
+  score: number;
+  /** Short human-readable reasons (the "why" behind the verdict). */
+  flags: string[];
+  analyzedAt: string;
+}
+
 /** What the analyzer learned about one website. */
 export interface WebsiteProfile {
   origin: string;
@@ -133,6 +160,8 @@ export interface WebsiteProfile {
     tier: RecommendationTier;
     notes: string[];
   };
+  /** P4 store-health pass — pre-flight verdict (see assessStoreHealth). */
+  health: StoreHealth;
 }
 
 export interface AnalyzeOptions {
@@ -343,6 +372,141 @@ export function recommend(
     "Product sitemap + server-rendered content-rich pages — plain HTTP at full speed, no rendering cost.",
   );
   return { tier: "sitemap-HTTP", notes };
+}
+
+/**
+ * P4 store-health pass — a pure function over the probed profile that
+ * answers "will a crawl of this store yield products?" BEFORE a crawl burns
+ * worker hours on it. Combines the signals the five probes already gathered:
+ *
+ *   - public store API → the strongest signal (API-first sidesteps HTML
+ *     extraction AND most WAFs — recommend() puts it above blocking)
+ *   - Product schema with prices on a sampled product page → the decisive
+ *     extraction signal (lifetimefitnessstore had NONE of these)
+ *   - product sitemap size (post-classifier → an honest count)
+ *   - WAF blocking (the dawlance class — fixable with a proxy/browser UA,
+ *     so it's "blocked", not "no-products")
+ *   - corporate-vs-store (the haier class — prices live on the linked store)
+ *   - csr-shell rendering (no server-rendered schema ≠ no products — the
+ *     browser render would reveal them)
+ *
+ * Verdict priority: API > blocked > corporate > no-products > unclear.
+ * Pure: no network, no side effects — callable from the analyzer, the
+ * pre-crawl gate, or a re-check over a stored profile.
+ */
+export function assessStoreHealth(
+  p: Pick<
+    WebsiteProfile,
+    | "analyzedAt"
+    | "api"
+    | "protection"
+    | "sitemap"
+    | "jsonLd"
+    | "rendering"
+    | "platform"
+    | "homepage"
+  >,
+): StoreHealth {
+  const flags: string[] = [];
+  const apiPublic =
+    p.api.shopifyProductsJson === "public" ||
+    p.api.wooCommerce === "public" ||
+    p.api.bigCommerce === "public";
+
+  const pricedSchema =
+    p.jsonLd.productOnProductPage && p.jsonLd.hasPrice;
+
+  // Corporate site that links out to its real store (haier.com → haiermall.pk).
+  const corporate =
+    p.platform.kind === "corporate" ||
+    (p.homepage.externalStoreLinks.length > 0 && !p.homepage.looksLikeStore);
+
+  // A client-rendered shell has no server-rendered schema BY DESIGN — the
+  // absence of JSON-LD in the raw HTML is not evidence of no products there
+  // (the browser render would reveal them). Only judge schema absence on
+  // server-rendered pages.
+  const shell = p.rendering.verdict === "csr-shell";
+
+  let score = 0;
+  if (apiPublic) {
+    score += 50;
+    flags.push(
+      "Public store API — structured product JSON beats HTML extraction",
+    );
+  }
+  if (pricedSchema) {
+    score += 40;
+    flags.push("Product pages carry Product schema with prices");
+  } else if (p.jsonLd.productOnProductPage || p.jsonLd.hasPrice) {
+    score += 20;
+    flags.push("Partial product schema found on sampled pages");
+  } else if (!apiPublic && !shell) {
+    flags.push("No Product schema found on sampled pages");
+  }
+  if (p.sitemap.found) {
+    score += 10;
+    const n = p.sitemap.urls;
+    if (n >= 1000) score += 15;
+    else if (n >= 100) score += 10;
+    else if (n >= 10) score += 5;
+    flags.push(`${n.toLocaleString()} product URLs in the sitemap`);
+  } else if (p.sitemap.budgetLimited) {
+    flags.push("Sitemap walk budget-limited — count unknown");
+  } else {
+    flags.push("No usable product sitemap");
+  }
+  if (p.homepage.looksLikeStore) {
+    score += 5;
+    flags.push("Homepage looks like a store");
+  }
+
+  // A small/absent sitemap + no schema + no API on server-rendered pages is
+  // the expensive dead end: pages load fine but nothing will parse. Stores
+  // with a real catalogue (>100 URLs) stay healthy even without schema — the
+  // HTML extractor handles them.
+  const noProductsSignal =
+    !shell &&
+    !apiPublic &&
+    !pricedSchema &&
+    !p.jsonLd.productOnProductPage &&
+    !p.jsonLd.hasPrice &&
+    (!p.sitemap.found || p.sitemap.urls < 100);
+
+  let verdict: StoreHealthVerdict;
+  if (apiPublic) {
+    verdict = "healthy";
+  } else if (p.protection.blocking) {
+    verdict = "blocked";
+    score = Math.min(score, 45); // a WAF blocks everything — cap the score
+    flags.push(p.protection.evidence);
+  } else if (corporate) {
+    verdict = "corporate";
+    score = Math.min(score, 30);
+    const hosts = p.homepage.externalStoreLinks.map((l) => l.host).join(", ");
+    flags.push(
+      hosts
+        ? `Corporate site — prices likely live on ${hosts}`
+        : "Corporate site — no direct product pages",
+    );
+  } else if (noProductsSignal) {
+    verdict = "no-products";
+    score = Math.min(score, 25);
+    flags.push(
+      "Store serves pages but exposes no parseable product data — expect ~0 products",
+    );
+  } else if (p.sitemap.budgetLimited && !p.sitemap.found) {
+    verdict = "unclear";
+    flags.push("Sitemap walk was cut short by the request budget");
+  } else {
+    verdict = "healthy";
+  }
+
+  return {
+    verdict,
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    flags: flags.slice(0, 4),
+    analyzedAt: p.analyzedAt,
+  };
 }
 
 // ── The probes ───────────────────────────────────────────────────────────
@@ -666,6 +830,13 @@ async function runProbes(
       tier: "sitemap-HTTP",
       notes: [],
     },
+    // P4 store-health — filled below with the probed profile (same pattern).
+    health: {
+      verdict: "unclear",
+      score: 0,
+      flags: [],
+      analyzedAt,
+    },
   };
 
   // The recommendation is a pure function of the probed profile — computed
@@ -677,6 +848,10 @@ async function runProbes(
     rendering: profile.rendering,
     platform: profile.platform,
   });
+  // P4 store-health pass — same pattern: a pure function of the probed
+  // profile, attached so every consumer (POST /api/analyze, the pre-crawl
+  // gate, the analysis panel) gets the verdict for free.
+  profile.health = assessStoreHealth(profile);
 
   return profile;
 }

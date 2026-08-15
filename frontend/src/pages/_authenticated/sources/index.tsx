@@ -21,6 +21,7 @@ import { RunLog } from "@/components/crawls/run-log";
 import { CrawlConfigPanel } from "@/components/sources/crawl-config-panel";
 import { ActiveSchedulesPanel } from "@/components/sources/active-schedules-panel";
 import { StoreAnalysisPanel } from "@/components/sources/store-analysis-panel";
+import { TrackedStoresPanel } from "@/components/sources/tracked-stores-panel";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ErrorState, LoadingState } from "@/components/common/states";
@@ -643,6 +644,7 @@ function SourcesPage() {
           domain={profileKey}
           lastShallow={lastShallowCrawl}
           productCount={profileStore?.productCount}
+          health={profileStore?.health}
           onSuggestionClick={actionUrl}
           headerAction={
             (profileStore?.productCount ?? 0) > 0 ? (
@@ -674,6 +676,19 @@ function SourcesPage() {
             onCrawlInstead={actionUrl}
           />
         ) : null}
+
+        {/* ── 1.7 Store health — every tracked store's verdict at a glance
+            (P4 pass: flags 0-product stores before you waste a crawl on
+            them). Problem verdicts sort to the top; clicking a row loads it
+            into the crawler above. ──────────────────────────────────── */}
+        <TrackedStoresPanel
+          stores={saved.data?.data ?? []}
+          onPickStore={(origin) => {
+            setCrawlOrigin(origin);
+            setCollections("");
+            setJobId(null);
+          }}
+        />
 
         {/* ── 2. Live progress while a crawl runs ─────────────────────── */}
         {isRunning && job ? (

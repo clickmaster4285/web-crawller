@@ -20,7 +20,7 @@ const {
   listActiveJobs,
   publicJob
 } = require('../services/jobQueue');
-const { runAnalyzer } = require('./analyzeController');
+const { runAnalyzer, persistStoreHealth } = require('./analyzeController');
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -169,6 +169,27 @@ async function analyzeBeforeCrawl(params) {
         );
       }
     }
+    // P4 store-health pass: flag the expensive dead ends BEFORE worker hours
+    // burn — a no-products/corporate verdict means the crawl will likely end
+    // at ~0 products (lifetimefitnessstore: 39k landing pages, nothing to
+    // parse). Warning-only; the crawl still proceeds (the user asked for it).
+    const health = profile.health;
+    if (!warning && health?.verdict === 'no-products') {
+      warning =
+        'Analysis flags this store as having NO parseable product data — ' +
+        'expect ~0 products. It serves pages, but no Product schema/API/' +
+        'product sitemap was found.';
+    }
+    if (!warning && health?.verdict === 'corporate') {
+      const hosts = (profile.homepage?.externalStoreLinks ?? [])
+        .map((l) => l.host)
+        .join(', ');
+      warning = hosts
+        ? `Analysis flags this as a corporate site — prices likely live on ${hosts}. Crawling this domain will probably find no products.`
+        : 'Analysis flags this as a corporate site — expect ~0 products here.';
+    }
+    // Persist the health verdict for the Sources profile + /crawls list.
+    await persistStoreHealth(params.origin, health);
     return {
       tier: profile.recommendation.tier,
       platform: profile.platform.name,
@@ -181,7 +202,10 @@ async function analyzeBeforeCrawl(params) {
       durationMs: Date.now() - startedAt,
       requests: profile.requests,
       applied,
-      warning
+      warning,
+      // P4 store-health: the verdict rides on the snapshot so the progress
+      // panel can render the flag next to the tier badge.
+      healthVerdict: health?.verdict ?? null
     };
   } catch (error) {
     console.error(`Pre-crawl analysis failed for ${params.origin}:`, error);

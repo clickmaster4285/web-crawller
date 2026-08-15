@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { TierBadge } from "@/components/sources/tier-badge";
+import { HealthChip } from "@/components/sources/health-chip";
 import { analyzeWebsite, type WebsiteProfile } from "@/lib/crawl";
 
 /**
@@ -160,6 +161,22 @@ export function StoreAnalysisPanel({
           </div>
         ) : profile ? (
           <div>
+            {/* P4 store-health pass — the pre-flight verdict: will a crawl of
+                this store actually yield products? Flags the expensive dead
+                ends (no-products / blocked / corporate) before worker hours
+                burn. The flags are the human-readable "why". */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border bg-card px-5 py-3.5">
+              <HealthChip
+                verdict={profile.health.verdict}
+                score={profile.health.score}
+              />
+              <p className="min-w-0 flex-1 text-xs leading-snug text-muted-foreground">
+                {profile.health.flags.length > 0
+                  ? profile.health.flags.join(" · ")
+                  : "Store-health pass — probe results only."}
+              </p>
+            </div>
+
             {/* Probe results grid. */}
             <div className="grid grid-cols-2 gap-px bg-border sm:grid-cols-3 lg:grid-cols-6">
               <Cell

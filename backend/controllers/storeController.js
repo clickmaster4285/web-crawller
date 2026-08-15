@@ -83,6 +83,9 @@ function storeSummary(store) {
       deepHours: store.cadence?.deepHours ?? 168
     },
     scheduledFrequency: store.scheduledCrawl?.frequency ?? null,
+    // P4 store-health pass — last pre-flight verdict (flags 0-product stores
+    // on the Sources profile + /crawls list without re-analyzing).
+    health: store.health ?? null,
     createdAt: store.createdAt ?? null,
     updatedAt: store.updatedAt ?? null
   };

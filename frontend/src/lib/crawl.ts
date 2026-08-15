@@ -428,9 +428,11 @@ import type {
   WebsiteProfile,
   RecommendationTier,
   RenderVerdict,
+  StoreHealth,
+  StoreHealthVerdict,
 } from "../../../backend/crawler/analyze";
 
-export type { WebsiteProfile };
+export type { WebsiteProfile, StoreHealth, StoreHealthVerdict };
 
 /** The recommended crawl strategy (same union as the analyzer's tiers). */
 export type CrawlTier = RecommendationTier;
@@ -465,6 +467,11 @@ export interface CrawlJobAnalysis {
   applied: string[];
   /** Non-null when the crawl carries a real risk (e.g. WAF-blocked store). */
   warning: string | null;
+  /**
+   * P4 store-health pass: the pre-flight verdict (healthy / no-products /
+   * blocked / corporate / unclear) — null on failed probes or shallow runs.
+   */
+  healthVerdict: StoreHealthVerdict | null;
 }
 
 /**

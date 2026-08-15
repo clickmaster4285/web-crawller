@@ -67,6 +67,23 @@ const crawlParamsSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// P4 store-health pass: the last pre-flight verdict for this store, persisted
+// so the Sources profile + /crawls list can flag 0-product stores without a
+// fresh analysis. Written by the analyzer controller / pre-crawl gate.
+const storeHealthSchema = new mongoose.Schema(
+  {
+    verdict: {
+      type: String,
+      enum: ['healthy', 'no-products', 'blocked', 'corporate', 'unclear'],
+      default: null
+    },
+    score: { type: Number, min: 0, max: 100, default: null },
+    flags: { type: [String], default: [] },
+    analyzedAt: Date
+  },
+  { _id: false }
+);
+
 // The UI's recurring-crawl registration (frequency + the params to run with).
 // The scheduler reads this to enqueue shallow/deep jobs (decision D4).
 const scheduledCrawlSchema = new mongoose.Schema(
@@ -109,7 +126,9 @@ const storeSchema = new mongoose.Schema(
     lastDeepAt: Date,
     // Latest live count of active products — kept at ingest so
     // `GET /api/stores` needs no per-read aggregation over Product.
-    productCount: { type: Number, default: 0 }
+    productCount: { type: Number, default: 0 },
+    // P4 store-health pass — last pre-flight verdict (see storeHealthSchema).
+    health: { type: storeHealthSchema, default: null }
   },
   { timestamps: true }
 );
