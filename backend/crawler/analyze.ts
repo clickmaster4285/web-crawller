@@ -44,6 +44,7 @@ import {
   fetchText,
   fetchWithRetry,
   needsBrowserRender,
+  resolveUserAgent,
   type HttpOptions,
 } from "./core/http.ts";
 import { extractJsonLdBlocks, findProductNode } from "./extract/jsonld.ts";
@@ -121,6 +122,12 @@ export interface WebsiteProfile {
     productLinks: number;
     looksLikeStore: boolean;
     note: string;
+    /**
+     * Out-links to other hosts that look like stores (max 5, deduped) — a
+     * corporate site that links to its real shop (haier.com/pk →
+     * haiermall.pk). "Crawl that domain instead — the prices live there."
+     */
+    externalStoreLinks: Array<{ url: string; host: string; label: string }>;
   };
   recommendation: {
     tier: RecommendationTier;
@@ -469,9 +476,12 @@ async function runProbes(
   };
 
   // robots.txt + adaptive throttle + robots gate — one request, everything
-  // below shares it (the analyzer is as polite as the crawler).
+  // below shares it (the analyzer is as polite as the crawler). The `"browser"`
+  // sentinel resolves to the Chrome UA so a WAF that 403s ParityBot (dawlance)
+  // can be analyzed the same way it would be crawled.
+  const userAgent = resolveUserAgent(options.userAgent);
   const politeness = await Politeness.load(base, {
-    userAgent: options.userAgent,
+    userAgent,
     delayMs: options.delayMs ?? 750,
     proxy: options.proxy,
     onRequest,
@@ -480,7 +490,7 @@ async function runProbes(
   const opts: HttpOptions = {
     delayMs: options.delayMs ?? 750,
     maxRetries: options.maxRetries ?? 1,
-    userAgent: options.userAgent,
+    userAgent,
     throttle: politeness,
     isAllowed: (url) => politeness.isUrlAllowed(url),
     proxy: options.proxy,
@@ -649,6 +659,7 @@ async function runProbes(
       productLinks: home.productLinks,
       looksLikeStore: home.looksLikeStore,
       note: home.note,
+      externalStoreLinks: home.externalStoreLinks,
     },
     // Recommendation derives from the probed view only (filled below).
     recommendation: {

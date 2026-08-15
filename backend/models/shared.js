@@ -1,12 +1,11 @@
 /**
- * Shared embedded schemas used by BOTH the legacy `CrawlResult` model and the
- * Phase-1 collections (`Snapshot`). Kept in one module so the dual-write
- * window can't drift: whatever the crawler reports, both models persist
- * identically.
+ * Shared embedded schemas used by the normalized collections (`Snapshot`).
+ * Originally shared with the legacy `CrawlResult` model during the D1
+ * dual-write window; that model is gone, the schemas live on for Snapshot.
  */
 const mongoose = require('mongoose');
 
-// --- Crawl stats (CrawlResult.stats / Snapshot.stats) ---
+// --- Crawl stats (Snapshot.stats) ---
 const statsSchema = new mongoose.Schema(
   {
     discovered: { type: Number, default: 0 },
@@ -18,7 +17,7 @@ const statsSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// --- Per-URL crawl failures (CrawlResult.failures / Snapshot.failures) ---
+// --- Per-URL crawl failures (Snapshot.failures) ---
 const failureSchema = new mongoose.Schema(
   {
     url: String,
@@ -27,7 +26,7 @@ const failureSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// --- Discovery diagnostics (CrawlResult.discovery / Snapshot.discovery) ---
+// --- Discovery diagnostics (Snapshot.discovery) ---
 const discoveryCollectionSchema = new mongoose.Schema(
   {
     collection: String,

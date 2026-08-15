@@ -11,6 +11,7 @@ export const ROUTES = {
   sources: "/sources",
   crawls: "/crawls",
   crawler: "/crawler",
+  metrics: "/metrics",
 } as const;
 
 export type AppRoute = (typeof ROUTES)[keyof typeof ROUTES];

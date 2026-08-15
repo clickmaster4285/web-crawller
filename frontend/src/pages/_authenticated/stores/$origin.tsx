@@ -57,9 +57,9 @@ import {
   getStoreSnapshots,
   invalidateCrawlData,
   queryKeys,
-  type SavedCrawl,
   type StoreProduct,
 } from "@/api";
+import type { StoreProfileCrawl } from "@/components/crawls/store-profile";
 import {
   formatCrawlDate,
   normalizeOrigin,
@@ -225,7 +225,7 @@ function StoreCataloguePage() {
   const navigate = Route.useNavigate();
   const queryClient = useQueryClient();
 
-  // D1 read path — the normalized collections replace CrawlResult reads.
+  // D1 read path — the normalized collections replace the legacy reads.
   const storeQuery = useQuery({
     queryKey: queryKeys.store(key),
     queryFn: () => getStore(key),
@@ -259,44 +259,36 @@ function StoreCataloguePage() {
 
   // The selected snapshot mapped to the shape StoreProfile expects — the
   // read path has no product arrays, so the count/URL pattern are passed as
-  // overrides. Note: snapshots carry a `full` boolean, NOT a SavedCrawl
-  // `type` field (crawls use `crawlType()`); this is the Snapshot equivalent.
-  const profileCrawl: SavedCrawl | undefined = useMemo(() => {
+  // overrides. Snapshots carry a `full` boolean (false = shallow check), the
+  // Snapshot equivalent of the legacy `type` field.
+  const profileCrawl: StoreProfileCrawl | undefined = useMemo(() => {
     if (!selected) return undefined;
     return {
-      _id: selected._id,
-      origin: store?.origin ?? selected.origin,
-      type: selected.full ? "deep" : "shallow",
-      collections: [],
-      stats: selected.stats,
-      products: [],
-      failures: selected.failures,
-      discovery: (selected.discovery as SavedCrawl["discovery"]) ?? undefined,
-      createdAt: selected.startedAt ?? selected.finishedAt,
       updatedAt: selected.finishedAt,
+      stats: selected.stats,
+      discovery: selected.discovery ?? undefined,
     };
-  }, [selected, store?.origin]);
+  }, [selected]);
 
   // URL pattern for the profile card — derived from the first catalogue row.
   const urlPattern = catalogue.products[0]?.url
     ? productUrlPattern(catalogue.products[0].url)
     : null;
   // The selected snapshot's verbose discovery log (if any).
-  const discoveryLog = (
-    selected?.discovery as SavedCrawl["discovery"] | undefined
-  )?.log;
+  const discoveryLog = selected?.discovery?.log;
 
   const crawlAgain = () => {
     prefillCrawlerOrigin(store?.origin ?? key);
     navigate({ to: "/sources" });
   };
 
-  // Remove the store everywhere (normalized collections + legacy CrawlResult).
+  // Remove the store from the normalized collections (the frozen legacy
+  // crawlresults data is intentionally left untouched).
   const deleteStoreMutation = useMutation({
     mutationFn: (k: string) => deleteStore(k),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.stores });
-      // The cascade also removes legacy CrawlResult docs — refresh /crawls too.
+      // Refresh every crawl-derived query so the store disappears everywhere.
       invalidateCrawlData(queryClient);
       setConfirmDelete(false);
       navigate({ to: "/crawls" });

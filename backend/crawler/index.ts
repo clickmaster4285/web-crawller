@@ -37,6 +37,7 @@ import {
   fetchHtmlWithStatus,
   fetchWithRetry,
   httpOptions,
+  resolveUserAgent,
   sanitizeProxyFromMessage,
   type ConditionalRequest,
 } from "./core/http.ts";
@@ -45,6 +46,7 @@ import { fetchBigCommerceProductById } from "./adapters/bigcommerce.ts";
 import { parseShopifyProduct, type RawProduct } from "./adapters/shopify.ts";
 import { fetchWooCommerceProductBySlug } from "./adapters/woocommerce.ts";
 import { extractFromHtml } from "./extract/mapper.ts";
+import { analyzeHomepage } from "./discover/homepage.ts";
 import { openCheckpointStore } from "./core/checkpoint.ts";
 import { isCrawlCancelled, waitForControl } from "./core/control.ts";
 // Re-exported for the worker process: it imports `{ runCrawl, isCrawlCancelled }`
@@ -125,12 +127,30 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   // Shopify JSON probes — so the whole run costs ≈1 request + new pages.
   const shallow = config.mode === "shallow";
 
+  // Structured run-log (Phase 5 observability): every emit lands on the
+  // CrawlJob's capped progress.log via the worker, so a crawl's story
+  // survives the process. No-op when the caller didn't wire onLog (the
+  // standalone scripts run without it).
+  const log = (level: "info" | "warn" | "error", message: string) =>
+    config.onLog?.(level, message);
+
   // Step 5 politeness: robots.txt (fetched once, unless disabled) + adaptive
   // throttle + bounded per-host concurrency. Every HTTP request in this crawl
   // flows through them.
+  log(
+    "info",
+    `${shallow ? "shallow check" : "deep crawl"} started — ${config.origin}` +
+      (config.proxy ? " via residential proxy" : "") +
+      (config.locale ? ` (region: ${config.locale})` : "")
+  );
   const respectRobots = config.respectRobotsTxt !== false;
+  // Per-store UA setting: the `"browser"` sentinel resolves to a Chrome UA
+  // (for WAF-blocked stores that 403 the ParityBot UA — dawlance/prosportsae/
+  // athletix); any other string passes through raw. The resolution lives in
+  // http.ts next to the constant (single source of truth).
+  const userAgent = resolveUserAgent(config.userAgent);
   const politeness = await Politeness.load(config.origin, {
-    userAgent: config.userAgent,
+    userAgent,
     delayMs: config.delayMs,
     respectRobots,
     // Tier 2: robots.txt is fetched from the same (possibly IP-blocked)
@@ -139,6 +159,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     onRequest: countRequest,
   });
   const opts = httpOptions(config, {
+    userAgent,
     throttle: politeness,
     isAllowed: respectRobots
       ? (url) => politeness.isUrlAllowed(url)
@@ -154,7 +175,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       ? {
           renderWithBrowser: (url: string) =>
             renderWithBrowser(url, {
-              userAgent: config.userAgent,
+              userAgent,
               // Tier 2: JS-shell pages render from the proxy too — the HTTP
               // layer already exits through it, and a WAF that blocks the
               // machine's IP must not spare the browser-rendered pages.
@@ -178,9 +199,22 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
         crawlDelayMs: politeness.robotsCrawlDelayMs,
       }
     : null;
+  if (respectRobots) {
+    log(
+      politeness.robotsStatus === "found" ? "info" : "warn",
+      `robots.txt ${politeness.robotsStatus}${politeness.robotsCrawlDelayMs ? ` (crawl-delay ${Math.round(politeness.robotsCrawlDelayMs / 1000)}s)` : ""}`
+    );
+  }
   let discovered;
   try {
     discovered = await discoverProducts(config, opts, robotsSnapshot);
+    log(
+      "info",
+      `discovery done — ${discovered.urls.length.toLocaleString()} product URLs` +
+        (discovered.diagnostics.platform?.platform
+          ? ` (${discovered.diagnostics.platform.platform})`
+          : "")
+    );
   } catch (error) {
     store?.close();
     // Tier 1: release the shared browser so the process can exit / the job
@@ -193,6 +227,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     // A user-requested cancel must NOT be swallowed into an "empty result" —
     // it unwinds the whole crawl so the worker can mark the job cancelled.
     if (isCrawlCancelled(error)) throw error;
+    log("error", `discovery failed — ${String(error).slice(0, 300)}`);
     return emptyResult(
       config,
       startedAt,
@@ -227,6 +262,24 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       : discovered.urls;
   const capped = urlsToFetch.length < discovered.urls.length;
 
+  // Store-detour hints (Aug 2026): a corporate site's product pages often
+  // carry a "Buy Now" button that links out to the REAL priced storefront
+  // (haier.com/pk → haiermall.pk). Pages that fail extraction may still have
+  // that link — aggregate the hosts so a 0-product run explains itself
+  // instead of reading as a broken crawl.
+  const externalStoreHints = new Map<string, { url: string; count: number }>();
+  const noteStoreLink = (html: string, pageUrl: string) => {
+    try {
+      for (const l of analyzeHomepage(html, pageUrl).externalStoreLinks) {
+        const cur = externalStoreHints.get(l.host);
+        if (cur) cur.count++;
+        else externalStoreHints.set(l.host, { url: l.url, count: 1 });
+      }
+    } catch {
+      // A malformed page must never break the crawl — hints are best-effort.
+    }
+  };
+
   // Tier 3 (WooCommerce native): when discovery found a public /wp-json/wc/v3
   // API, the fetch loop prefers structured per-product JSON (SKU/GTIN/price/
   // stock) over the Shopify probe + HTML extractor chain. Shallow mode never
@@ -255,6 +308,12 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   // i.e. progress through the run; `stats.fetched` is the fresh-only count.
   // try/finally guarantees the checkpoint/resume store is closed even if a
   // worker throws (e.g. a user onProgress callback).
+  if (capped) {
+    log(
+      "info",
+      `maxPages cap — fetching ${urlsToFetch.length.toLocaleString()} of ${discovered.urls.length.toLocaleString()} discovered URLs (stratified sample)`
+    );
+  }
   try {
     await runWithConcurrency(urlsToFetch, concurrency, async (url) => {
       // Cooperative control: pause waits here, cancel throws. Checked before
@@ -338,6 +397,9 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             shallow,
             conditional,
             skipShopifyProbe,
+            // Failed extraction → scan the page for external store links
+            // (the buy-now button to the real priced storefront).
+            noteStoreLink,
           );
           if (product) {
             // Persist before mutating run state so a storage failure can't
@@ -394,6 +456,38 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   } finally {
     store?.close();
   }
+
+  // A run that extracted (almost) NOTHING but kept finding links to a
+  // store-like host is a corporate-site detour (haier.com → haiermall.pk):
+  // surface the top candidate as a finding with a crawl action, so the user
+  // knows where the prices actually live instead of staring at a 0-product
+  // result. Threshold is deliberately tiny — a real store extracting ≤5
+  // products from hundreds of pages is broken, and the hint is what explains
+  // it (haier.com/pk extracted 1 of 883 pages; its Buy Now buttons all point
+  // at haiermall.pk).
+  if (products.length <= 5 && externalStoreHints.size > 0) {
+    const top = [...externalStoreHints.entries()].sort(
+      (a, b) => b[1].count - a[1].count,
+    )[0];
+    const none = products.length === 0;
+    discovered.diagnostics.findings.push({
+      level: "info",
+      message: `${
+        none
+          ? "No products could be extracted from this site"
+          : `Only ${products.length} of ${urlsToFetch.length} pages extracted a product`
+      } — its pages keep linking to ${top[0]}, which is where it actually sells. Crawl that domain instead, the prices live there.`,
+      action: { label: `Crawl ${top[0]}`, url: top[1].url },
+    });
+  }
+
+  // Completion summary — the crawl's story in one line (landed on the job's
+  // run log so it's visible after the process exits).
+  log(
+    failures.length > 0 ? "warn" : "info",
+    `finished — ${products.length.toLocaleString()} products (${fetchedCount.toLocaleString()} fetched, ${skippedUnchanged.toLocaleString()} cached, ${failures.length.toLocaleString()} failed) in ${Math.round((Date.now() - startedAt) / 1000)}s` +
+      (capped ? " — capped run" : "")
+  );
 
   // Tier 1: release the shared browser once the crawl is done so the job
   // finishes cleanly and the Chromium process isn't left running.
@@ -452,6 +546,7 @@ async function fetchOneProduct(
   shallow = false,
   conditional?: ConditionalRequest,
   skipShopifyProbe = false,
+  onStoreLink?: (html: string, pageUrl: string) => void,
 ): Promise<FetchedProduct> {
   // The Shopify handle is needed by the HTML path too (it seeds the
   // extractor), so it's computed here, outside the shallow guard.
@@ -539,8 +634,20 @@ async function fetchOneProduct(
     return { product: null, etag, statusCode: 304 };
   }
   const htmlHandle = handle ?? slugFromUrl(url);
+  const product = extractFromHtml(html, url, origin, htmlHandle);
+  // Extraction failed but the page is in hand — it may carry the "Buy Now"
+  // link to the real priced storefront (store-detour hint). Best-effort
+  // anchor scan; never throws (the crawl's own error handling covers fetch
+  // failures, this is purely additive diagnostics).
+  if (!product && onStoreLink) {
+    try {
+      onStoreLink(html, url);
+    } catch {
+      // Ignore — hints are optional diagnostics.
+    }
+  }
   return {
-    product: extractFromHtml(html, url, origin, htmlHandle),
+    product,
     etag,
     statusCode: status,
   };

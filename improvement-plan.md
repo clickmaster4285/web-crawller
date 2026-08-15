@@ -191,12 +191,13 @@ which even extracted a price from a badge). Three-layer fix:
    → 0 keeps the removal guard from mass-deleting the catalogue.
 
 **Dedup (Aug 8, evening):** the classifier now lives ONCE in
-`frontend/src/lib/crawler/discover/junk-segments.ts` (JUNK_SEGMENT_RE,
-hasJunkSegment, pathSegments, PRODUCT_BASE_RE, isProductUrl). The crawler
-imports it directly; `crawlSync` and the `tools/` ops scripts (junk purge +
-check) load it via `await import()` (Node 24 type-stripping — the same
-mechanism the worker uses for the crawler engine). A probe script had
-already drifted with extra terms; that class of bug is now impossible —
+`backend/crawler/discover/junk-segments.ts` (JUNK_SEGMENT_RE, hasJunkSegment,
+pathSegments, PRODUCT_BASE_RE, isProductUrl — the path is post-P6; the
+crawler moved from `frontend/src/lib/crawler/` to the backend on Aug 10).
+The crawler imports it directly; `crawlSync` and the `tools/` ops scripts
+(junk purge + check) load it via `await import()` (Node 24 type-stripping —
+the same mechanism the worker uses for the crawler engine). A probe script
+had already drifted with extra terms; that class of bug is now impossible —
 change the list in one file.
 
 **Applied:** purged 191 already-ingested urbanfitness junk rows (soft-delete,
@@ -306,8 +307,8 @@ interface WebsiteProfile {
 - **Phase 2 (UI): ✅ shipped (Aug 9).** `POST /api/analyze`
   (`backend/routes/analyze.js` + `controllers/analyzeController.js`) runs the
   SAME type-stripped analyzer the CLI uses (Node 24 import of
-  `frontend/src/lib/crawler/analyze.ts`, cached per process — the worker's
-  loading mechanism), taking `{ origin, proxy? }` and returning the full
+  `backend/crawler/analyze.ts` — post-P6 path; cached per process — the
+  worker's loading mechanism), taking `{ origin, proxy? }` and returning the full
   `WebsiteProfile`. The Sources page renders a **Website analysis** section
   (`components/sources/store-analysis-panel.tsx`) below the store profile:
   a **Run analysis** button fires the probes without enqueuing a crawl, the
@@ -320,8 +321,9 @@ interface WebsiteProfile {
   boundary). Verified live: `POST /api/analyze` answered 200 in 6.5s with
   the identical profile the CLI prints (marshalfitness: Shopify · store ·
   ssr(next) · sitemap-HTTP · 1310 urls).
-- **Architecture:** one new module `frontend/src/lib/crawler/analyze.ts` that
-  imports the existing discovery/extract functions. Probes share the same
+- **Architecture:** one new module `backend/crawler/analyze.ts` (post-P6
+  path — the crawler moved into the backend on Aug 10) that imports the
+  existing discovery/extract functions. Probes share the same
   `HttpOptions` (politeness, throttle, proxy, robots gate), so the analyzer
   is as polite as the crawler. One surgical exception to "zero changes":
   the acceptance run exposed a real `detectPlatform` bug (see below) that
@@ -405,7 +407,7 @@ lives in `discover/platform.ts` — the analyzer and the crawler share it.
 ### P4 — Crawler robustness (lessons from this session)
 | Item | Problem it solves |
 |---|---|
-| **Region/locale selection** | activefitness has 12 sitemaps (om/bh/qa/kw/sa × en/ar) — same products, different currencies. Let the user pick the country on the crawl form. |
+| **Region/locale selection** | ✅ **done (Aug 10).** New optional `locale` crawl param (Sources → Configuration → **Region / locale**) filters sitemap candidates to one region: activefitness's 12 sitemaps (om/bh/qa/kw/sa × en/ar) become the 2 `om` ones, lifetimefitness's 4 country files (`sitemap_ae/sa/om/qa.xml`) become 1 — the same products in different currencies are no longer crawled 4× or mixed into one catalogue (AED + SAR + OMR). Matching handles both encodings seen in the wild — path segment (`/om/sitemaps/…`) and filename suffix (`sitemap_om.xml`) — and never filters the default `/sitemap.xml` candidates, so single-region stores are unaffected. Plumbed `CrawlRunInput.locale` → job params → worker → `CrawlConfig.locale` → `sitemapCandidates`/`fetchSitemapUrls`, with the panel's config-match check and a `region:` badge on the live progress panel; discovery logs how many other-region sitemaps were skipped. **Verified:** 11 unit sanity checks against the real robots.txt patterns (12→2, 4→1, language filter, word-boundary safety); tsc/eslint/jest 30/30 green. |
 | **SEO-city landing pages** | ✅ **fixed (Aug 9).** Rank Math auto-generates category × city pages for GCC stores (`/treadmills/treadmills-in-abu-dhabi`, `…-in-al-ain`…). They're sitemap leaves with ZERO product data, so the flat leaf heuristic queued all 7,714 of them from `lifetimefitnessstore.com/sitemap_ae.xml` — and a 500-page cap crawl consumed its entire budget on them: `fetched 0 · failed 500 · products 0`, while the site itself answered 200 (no WAF!). Shared classifier now flags a URL whose LAST segment ends `-in-<city>` (UAE/KSA/OM/QA city list) as junk — real products end in SKU codes, never place names. Verified on the live sitemap: 7,744 flagged, **zero false positives** on real products (`…-nnnetl19718`, `…-f-g20-base` kept), all flagged samples confirmed no-product-data. |
 | **Shopify products.json discovery (Tier 3)** | ✅ **fixed (Aug 9).** Discovery only probed WooCommerce + BigCommerce APIs — a store whose sitemap is 429-blocked crawled to zero even with a public Shopify catalogue (athletix.ae: `/sitemap.xml` 429'd, HTML BFS found nothing, 0 products — while `/products.json?limit=250` paged cleanly; the analyzer already flagged `products.json: public`). New `probeShopifyApi` + `discoverShopifyProducts` in `adapters/shopify-discover.ts` (mirrors the WooCommerce adapter: 1-request probe, then walk `page=N` until a short page, respect robots + pause/cancel + 10k cap), wired into `discover/index.ts` as Tier 2.7 gated on the analyzer's `looksShopify` rule (platform Shopify/unknown/plain OR `cdn.shopify.com` in the homepage). The fetch loop's existing per-product `/products/{handle}.json` probe then parses each URL. **Verified live: full walk returned 5,679 product URLs** (matching the 5,679-product sitemap); `analyze.mjs athletix.ae` → `products.json: public` · **API-first**. `analyze.ts` now reuses the shared probe (its private copy deleted). |
 | **Tier-2 residential proxy** | ✅ **built (Aug 9).** The gateway URL flows `CrawlRunInput.proxy` → `CrawlConfig.proxy` → every HTTP request via undici's `ProxyAgent` (the field was already plumbed end-to-end). This session closed the real gaps: **(1) Playwright rendering now exits through the proxy too** (`core/browser.ts` splits the gateway URL into context-proxy shape — server without userinfo + explicit username/password, since Playwright mis-parses credentials in the server string) so a WAF can't spare the JS-shell pages; **(2) POST /api/proxy/test** (`proxyController.js` + `routes/proxy.js`) verifies a gateway BEFORE a crawl burns time on it — fetches an IP-echo THROUGH the proxy and returns the exit IP the crawl would use; **(3) a latent undici-version bug fixed**: Node's global fetch is a DIFFERENT undici copy than this package's and rejects its `ProxyAgent` with "invalid onRequestStart method" (undici 8.10.0 agent under Node 24's global fetch) — proxied requests now use undici's OWN `fetch` + its `ProxyAgent` from the same copy (proven: exit IP `182.180.56.177` through a real CONNECT tunnel); **(4) redaction + lifecycle**: proxy agents are pooled (bounded, evicted agents closed) and closed after each crawl so sockets can't leak across jobs or delay worker exit; the gateway URL (especially its credentials) is redacted from persisted failure text at THREE layers — the crawler's `sanitizeProxyFromMessage` (single source of truth in `core/http.ts`), the worker's boundary net in `sanitizeResult` (blanket-redacts failures + discovery findings/log), and the controller's error paths. **Verified live:** proxy-test endpoint positive (`ok: true · exit IP …`), negative (clean `fetch failed`, zero credential leak), and the engine's own `fetchWithRetry` through the proxy (was broken — would have failed EVERY proxied crawl). `tsc`, eslint, jest 30/30 green. **UI:** the Sources config panel's **Residential proxy** field gained a **Test proxy** button showing the exit IP. Note: athletix's *API* path still works without it — the products.json walk sidesteps the WAF entirely, like prosportsae's would. |
@@ -415,6 +417,150 @@ lives in `discover/platform.ts` — the analyzer and the crawler share it.
 ### P5 — Production (unchanged from `plan.md` Phase 5)
 Auth on the data API · observability (job metrics + crawl logs) ·
 containerized workers · CI · drop `CrawlResult` after the read-path flip.
+
+### P6 — Crawler packaging cleanup — ✅ **done (Aug 10)**
+
+**The wart (now fixed):** the crawler lived in `frontend/src/lib/crawler/` —
+a *browser* package folder — but it only ever ran **server-side**: in the
+backend worker process (`worker.mjs` imports it via Node 24
+type-stripping), in backend controllers (`/api/analyze`, `/api/proxy/test`),
+in the ingest pipeline (`crawlSync`), and in `tools/`. The frontend browser
+bundle never shipped it (the only frontend reference was a **type-only**
+import). The folder name misled, its 4 runtime deps sat in
+`frontend/package.json`, and every server-side consumer reached across the
+repo with awkward `../../frontend/src/lib/crawler/...` paths.
+
+**Shipped (Aug 10):** `git mv` to **`backend/crawler/`** — everything-in-
+backend, **no separate `packages/` workspace, no nested package.json** (the
+user's decision). The 4 runtime deps (`undici`, `robots-parser`, `playwright`,
+`better-sqlite3`) moved from `frontend/package.json` to `backend/package.json`
+(same versions) + `typescript`/`@types/node`/`@types/better-sqlite3`
+devDeps; new `backend/crawler/tsconfig.json` + `npm run typecheck`
+(`tsc -p crawler/tsconfig.json --noEmit`) so the moved TS is checked where it
+runs. All 8 importer paths rewritten (worker `../crawler/index.ts`,
+controllers/services `../crawler/…`, tools `../backend/crawler/…`, and the
+frontend's type-only import now crosses into `backend/crawler/analyze` —
+erased at compile, zero runtime coupling). `tools/` junk scripts became
+cwd-independent (`__dirname`-relative) so they work from anywhere.
+
+**Verified:** Node 24 loads the ESM `.ts` files under backend's CommonJS
+package via module-syntax detection (the probe proved deps — not module kind
+— were the real blocker; the benign `MODULE_TYPELESS_PACKAGE_JSON` warning
+is logged once per process, the accepted tradeoff for no nested
+package.json). Worker-style import loads (`runCrawl`, `sanitizeProxyFromMessage`
+✅), backend `typecheck` ✅, `jest` 30/30 ✅, frontend `tsc`+eslint ✅,
+`tools/analyze.mjs` live (activefitness → sitemap-browser ✅), junk
+check/purge ✅. Docs updated (this section, summary, plan, AGENTS, worker/
+crawlSync comments).
+
+#### Complete inventory (ground truth, Aug 10)
+
+**The module — 26 files:**
+
+```
+frontend/src/lib/crawler/
+├── index.ts                  (public API: runCrawl, runSitemapCrawl, closeProxyAgent, sanitizeProxyFromMessage)
+├── analyze.ts                (P2 Website Intelligence Analyzer: analyzeWebsite, WebsiteProfile)
+├── adapters/  (5): bigcommerce.ts, shopify.ts, shopify-discover.ts, shopify-parse.ts, woocommerce.ts
+├── core/      (7): browser.ts, checkpoint.ts, control.ts, http.ts, politeness.ts, queue.ts, types.ts
+├── discover/  (6): homepage.ts, html-crawl.ts, index.ts, junk-segments.ts, platform.ts, sitemap.ts
+└── extract/   (6): html-heuristics.ts, jsonld.ts, mapper.ts, microdata.ts, opengraph.ts, schema.ts
+```
+
+**Every external importer (8 files):**
+
+| # | File | Import | What it pulls |
+|---|---|---|---|
+| 1 | `backend/workers/worker.mjs:99` | `PARITY_CRAWLER_MODULE ?? '../../frontend/src/lib/crawler/index.ts'` (env override is the test seam) | `runCrawl`, `isCrawlCancelled`, `sanitizeProxyFromMessage` |
+| 2 | `backend/controllers/analyzeController.js:24` | `'../../frontend/src/lib/crawler/analyze.ts'` (cached) | `analyzeWebsite` |
+| 3 | `backend/controllers/proxyController.js:45` | `'../../frontend/src/lib/crawler/core/http.ts'` (cached) | `sanitizeProxyFromMessage` |
+| 4 | `backend/services/crawlSync.js:46` | `'../../frontend/src/lib/crawler/discover/junk-segments.ts'` (cached) | `hasJunkSegment` |
+| 5 | `tools/analyze.mjs:37` | `'../frontend/src/lib/crawler/analyze.ts'` | `analyzeWebsite` |
+| 6 | `tools/purge-junk-all-stores.js:15` | `'../frontend/src/lib/crawler/discover/junk-segments.ts'` | `hasJunkSegment` |
+| 7 | `tools/check-junk-all-stores.js:12` | `'../frontend/src/lib/crawler/discover/junk-segments.ts'` | `hasJunkSegment`, `isProductUrl` |
+| 8 | `frontend/src/lib/crawl.ts:367` | `import type {…} from "@/lib/crawler/analyze"` — **type-only** (`WebsiteProfile`, `RecommendationTier`, `RenderVerdict`), erased at compile | types only, zero runtime coupling |
+
+**Runtime npm deps the crawler actually imports (4 — all currently in
+`frontend/package.json`):**
+
+| Dep | Used by | Notes |
+|---|---|---|
+| `undici` | `core/http.ts` | `ProxyAgent` + its own `fetch` (the version-coupling fix) — **must stay the SAME copy as every consumer** |
+| `robots-parser` | `core/politeness.ts` | robots gate |
+| `playwright` | `core/browser.ts` | lazy `require` |
+| `better-sqlite3` | `core/checkpoint.ts` | lazy `require`, native module |
+
+**Scripts / entrypoints:**
+- `backend/package.json` → `"worker": "node --expose-gc --max-old-space-size=3072 workers/worker.mjs"` (runs the crawler).
+- `tools/analyze.mjs` — standalone CLI (node `tools/analyze.mjs <url>`).
+- No root `package.json`, no npm workspaces, no monorepo tooling (frontend + backend are independent installs).
+
+**Config that covers the crawler today:**
+- `frontend/tsconfig.json` — `include: ["src/**/*.ts"…]` + `paths: { "@/*": ["./src/*"] }` (typechecks the crawler; `allowImportingTsExtensions` already on).
+- `frontend/eslint.config.js` — lints `**/*.{ts,tsx}` (crawler included).
+- `frontend/vite.config.ts` — `resolve.tsconfigPaths`.
+- Backend has **no** tsconfig / eslint config (plain CJS JS).
+
+**Docs referencing the path (update in the same change):** `summary.md`
+(lines 21/27/193), `plan.md`, `architecture.md`, `improvement-plan.md`
+(this section), `frontend/AGENTS.md`, plus inline comments in `worker.mjs`,
+`crawlSync.js`, `proxyController.js`, `analyzeController.js`, `junk-segments.ts`.
+
+#### The critical constraint (verified empirically)
+
+Node 24's type-stripping decides module kind for a `.ts` file by the nearest
+`package.json` `type` field. The crawler uses ESM `import`/`export` — it loads
+**only because** `frontend/package.json` has `"type": "module"` (verified:
+frontend = `module`, backend = no `type` → CommonJS). **Any new home needs a
+`"type": "module"` package.json at or nearest above the moved folder**, or
+`import`/`export` syntax fails at worker boot. This is the trap that makes the
+move non-trivial.
+
+#### Option A — `packages/crawler/` (recommended: the honest home)
+
+1. `git mv frontend/src/lib/crawler packages/crawler/`
+2. New `packages/crawler/package.json`: `{ "name": "@parity/crawler",
+   "private": true, "type": "module", "dependencies": { undici,
+   robots-parser, playwright, better-sqlite3 } }` + `npm install` inside it
+   (own `node_modules`; no root workspaces needed).
+3. New `packages/crawler/tsconfig.json` (mirror frontend's) so `tsc --noEmit`
+   still checks it; a `typecheck:crawler` script.
+4. Rewrite the 8 importer paths: worker
+   `'../../../packages/crawler/index.ts'`, controllers/services
+   `'../../packages/crawler/…'`, tools `'../packages/crawler/…'`, and
+   `crawl.ts`'s type-only import → relative
+   `'../../../packages/crawler/analyze'` (or a `@crawler/*` tsconfig path).
+5. Drop the 4 deps from `frontend/package.json` (verify each is crawler-only
+   first); exclude `packages/` from frontend lint/tsc.
+6. Verify: `tsc` (frontend + crawler), eslint, backend `jest` 30/30, worker
+   boot smoke, `tools/analyze.mjs` live, one live crawl.
+
+**Pros:** honest module boundary; ESM works via its own `type: module`;
+deps travel with the code; frontend ships/lints/typechecks nothing it never
+runs. **Cons:** biggest footprint (own package.json + tsconfig + install);
+no monorepo tooling today, so `packages/` is a third independent install.
+
+#### Option B — `backend/crawler/` (lighter touch)
+
+1. `git mv frontend/src/lib/crawler backend/crawler/`
+2. New `backend/crawler/package.json` with `"type": "module"` (CRITICAL —
+   backend's own package.json is CJS; without the nested one the worker dies)
+   + the 4 deps in `backend/package.json` (resolution walks up to
+   `backend/node_modules`).
+3. Rewrite importers: worker `'../crawler/index.ts'`, controllers/services
+   `'../crawler/…'`, tools `'../backend/crawler/…'`.
+4. Frontend type-only import → relative `'../../../backend/crawler/analyze'`
+   (frontend reaching INTO backend for a type — the awkward part).
+5. Same verification battery.
+
+**Pros:** minimal — backend is already the primary consumer; paths shrink.
+**Cons:** the engine stays buried inside the API package; frontend imports a
+type from backend (arguably worse than today); ESM subpackage inside a CJS
+backend needs the nested package.json explained forever.
+
+**Recommendation: Option A** — the folder's only real purpose is to be a
+shared server-side module; `packages/crawler/` states that honestly and keeps
+both frontend (types only) and backend (runtime) consumers on equal footing.
 
 ---
 

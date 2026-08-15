@@ -1,15 +1,19 @@
 // Run the junk classifier across every store: which catalogues still hold
 // non-product rows (blog/policy/collection/category pages) right now?
 // Classifier imported from the SINGLE source of truth — the crawler's
-// junk-segments module — so this check can never drift from the crawler.
+// junk-segments module (backend/crawler/discover/junk-segments.ts) — so this
+// check can never drift from the crawler.
 const path = require("path");
 const { pathToFileURL } = require("url");
 const { createRequire } = require("module");
-const req = createRequire(path.join(process.cwd(), "backend", "x.js"));
-req("dotenv").config({ path: path.join(process.cwd(), ".env") });
+// Script-relative (works from any cwd): tools/ sits at the repo root, so
+// backend/ is one level up. Backend deps (mongoose, dotenv) resolve through
+// this require base; the crawler TS module is loaded by file URL below.
+const req = createRequire(path.join(__dirname, "..", "backend", "x.js"));
+req("dotenv").config({ path: path.join(__dirname, "..", "backend", ".env") });
 
 const junkModuleUrl = pathToFileURL(
-  path.join(process.cwd(), "../frontend/src/lib/crawler/discover/junk-segments.ts")
+  path.join(__dirname, "..", "backend", "crawler", "discover", "junk-segments.ts")
 ).href;
 
 (async () => {

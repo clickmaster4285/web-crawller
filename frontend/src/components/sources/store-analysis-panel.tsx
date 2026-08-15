@@ -60,14 +60,27 @@ function Cell({ label, value }: { label: string; value: string }) {
 export function StoreAnalysisPanel({
   origin,
   proxy,
+  userAgent,
   onApplyRecommendation,
+  onCrawlInstead,
 }: {
   /** Full origin URL to analyze (https://…). */
   origin: string;
   /** Current Tier-2 proxy URL from the config panel (probes route through it). */
   proxy?: string;
+  /**
+   * Current per-store User-Agent: "browser" probes with a Chrome UA so a WAF
+   * that 403s ParityBot (dawlance) doesn't hide its real answers here either.
+   */
+  userAgent?: "browser";
   /** Applies the recommended crawl config (e.g. useBrowser for JS shells). */
   onApplyRecommendation?: (patch: AnalysisConfigPatch) => void;
+  /**
+   * Fills the crawler with an external store URL (a corporate site's real
+   * priced storefront, e.g. haiermall.pk behind haier.com) so the user can
+   * crawl THAT domain instead.
+   */
+  onCrawlInstead?: (url: string) => void;
 }) {
   const [profile, setProfile] = useState<WebsiteProfile | null>(null);
   // When the run that produced the CURRENT profile started, so the "Probes"
@@ -78,7 +91,7 @@ export function StoreAnalysisPanel({
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [runDurationMs, setRunDurationMs] = useState<number | null>(null);
   const analyze = useMutation({
-    mutationFn: () => analyzeWebsite({ data: { origin, proxy } }),
+    mutationFn: () => analyzeWebsite({ data: { origin, proxy, userAgent } }),
     onMutate: () => {
       setStartedAt(Date.now());
       setProfile(null); // a re-run replaces the previous result (no stale pair)
@@ -191,6 +204,44 @@ export function StoreAnalysisPanel({
                 }
               />
             </div>
+
+            {/* External store links — a corporate site (haier.com) that links
+                out to its real priced storefront (haiermall.pk). The crawl's
+                discovery findings already suggest it; show it here too with
+                a one-click "crawl instead" action. */}
+            {profile.homepage.externalStoreLinks.length > 0 ? (
+              <div className="border-t border-border bg-card px-5 py-3">
+                <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <ScanSearch className="mt-px size-3.5 shrink-0 text-accent" />
+                  <span className="leading-snug">
+                    This site looks corporate — its links point to{" "}
+                    <span className="font-medium text-foreground">
+                      {profile.homepage.externalStoreLinks
+                        .map((l) => l.host)
+                        .join(", ")}
+                    </span>
+                    . The prices likely live there, not here.
+                  </span>
+                </p>
+                {onCrawlInstead ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {profile.homepage.externalStoreLinks
+                      .slice(0, 2)
+                      .map((l) => (
+                        <Button
+                          key={l.host}
+                          variant="outline"
+                          size="sm"
+                          className="h-7 font-mono text-[11px]"
+                          onClick={() => onCrawlInstead(l.url)}
+                        >
+                          Crawl {l.host} instead
+                        </Button>
+                      ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
             {/* Recommendation banner. */}
             <div className="border-t border-border bg-card px-5 py-4">

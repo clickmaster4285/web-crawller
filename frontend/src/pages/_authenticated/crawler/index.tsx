@@ -18,7 +18,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { ErrorState, LoadingState } from "@/components/common/states";
+import { useMetrics } from "@/hooks/useData";
 import { CancelCrawlDialog } from "@/components/crawls/cancel-crawl-dialog";
+import { RunLog } from "@/components/crawls/run-log";
 import { TierBadge } from "@/components/sources/tier-badge";
 import {
   cancelCrawlJob,
@@ -86,6 +88,9 @@ function CrawlerPage() {
     queryFn: () => listActiveCrawlJobs(),
     refetchInterval: 2500,
   });
+  // Queue-depth snapshot (GET /api/data/metrics) — drives the header badge
+  // so the queued-vs-running split is visible at a glance.
+  const metrics = useMetrics();
   // Live clock so elapsed / "x ago" ticks every second.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -163,11 +168,43 @@ function CrawlerPage() {
   const act = (job: CrawlJob, action: CrawlControlAction) =>
     control.mutate({ id: job.id, action, label: job.origin });
 
+  const queue = metrics.data?.data?.queue;
+
   return (
     <div>
       <PageHeader
         title="Active crawls"
         description="Everything running in the background — pause, resume or cancel from one place. Crawls keep heartbeating to the server, so controls work from any tab."
+        actions={
+          queue ? (
+            <Badge
+              variant="secondary"
+              className={
+                queue.inFlight > 0
+                  ? "gap-2 border-emerald-500/30 py-1.5 font-normal"
+                  : "gap-2 py-1.5 font-normal"
+              }
+            >
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={
+                    queue.inFlight > 0
+                      ? "size-1.5 animate-pulse rounded-full bg-emerald-500"
+                      : "size-1.5 rounded-full bg-border"
+                  }
+                />
+                <span className="numeric">
+                  {queue.inFlight.toLocaleString()} in flight
+                </span>
+              </span>
+              {queue.queued > 0 ? (
+                <span className="text-muted-foreground">
+                  {queue.queued.toLocaleString()} queued
+                </span>
+              ) : null}
+            </Badge>
+          ) : null
+        }
       />
 
       <div className="space-y-8 px-6 py-8">
@@ -472,6 +509,9 @@ function CrawlerPage() {
                         </div>
                       )}
                     </div>
+                    {/* Structured run log — collapsed by default so the cards
+                        stay scannable; expand for the crawl's full story. */}
+                    <RunLog lines={job.log} className="mt-3" />
                   </article>
                 );
               })}

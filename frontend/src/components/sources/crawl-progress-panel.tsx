@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { TierBadge } from "@/components/sources/tier-badge";
+import { RunLog } from "@/components/crawls/run-log";
 import type { CrawlJob, CrawlJobDiscovery } from "@/lib/crawl";
 import { formatDuration } from "@/utils/format";
 import { cn } from "@/lib/utils";
@@ -309,6 +310,11 @@ export function CrawlProgressPanel({
         </div>
       ) : null}
 
+      {/* Structured run log — the crawl's story (engine lifecycle + HTTP
+          warnings + worker lines), live. Open by default here: this panel is
+          where a run is watched, and the log is why. */}
+      <RunLog lines={job.log} defaultOpen />
+
       {/* The parameters this job actually runs with (captured at start) — so
           it's clear when the panel config changed. */}
       <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -339,6 +345,9 @@ export function CrawlProgressPanel({
         <Badge variant="secondary" className="font-normal">
           {job.params.proxy ? "residential proxy" : "direct"}
         </Badge>
+        <Badge variant="secondary" className="font-normal">
+          {job.params.userAgent != null ? "browser UA" : "ParityBot UA"}
+        </Badge>
         {job.params.productUrlPattern ? (
           <Badge
             variant="secondary"
@@ -346,6 +355,15 @@ export function CrawlProgressPanel({
             title={`Product URL pattern: ${job.params.productUrlPattern}`}
           >
             pattern: {job.params.productUrlPattern}
+          </Badge>
+        ) : null}
+        {job.params.locale ? (
+          <Badge
+            variant="secondary"
+            className="font-mono font-normal uppercase"
+            title={`Region filter: only ${job.params.locale} sitemaps crawled`}
+          >
+            region: {job.params.locale}
           </Badge>
         ) : null}
       </div>

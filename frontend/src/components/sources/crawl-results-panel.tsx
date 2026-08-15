@@ -7,6 +7,7 @@ import {
 } from "@/components/cards/crawl-diff-summary";
 import { CrawlStatsGrid } from "@/components/cards/crawl-stats-grid";
 import { DiscoveryLog } from "@/components/crawls/discovery-log";
+import { RunLog } from "@/components/crawls/run-log";
 import { ProductCell } from "@/components/common/product-cell";
 import { StockBadge } from "@/components/common/stock-badge";
 import { Badge } from "@/components/ui/badge";
@@ -194,6 +195,12 @@ export function CrawlResultsPanel({
         </div>
       ) : null}
       <DiscoveryLog lines={result.discovery?.log ?? []} />
+      {/* Structured run log — the crawl's full story (engine lifecycle +
+          HTTP warnings + the worker's own lines), persisted on the job so
+          the reason behind this result stays visible after the run ends.
+          Open by default: it's usually only a handful of lines and it's why
+          this panel exists. */}
+      <RunLog lines={job?.log ?? []} defaultOpen />
       {result.failures.length > 0 ? (
         <div>
           <p className="label-caps mb-2">Failures</p>

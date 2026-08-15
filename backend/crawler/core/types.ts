@@ -45,7 +45,11 @@ export interface CrawlConfig {
   delayMs?: number;
   /** Retries on 429/5xx/network errors. Default 3. */
   maxRetries?: number;
-  /** Custom User-Agent. Defaults to a ParityBot UA. */
+  /**
+   * Custom User-Agent. Defaults to a ParityBot UA. The `"browser"` sentinel
+   * resolves to a Chrome UA (see core/http.ts resolveUserAgent) for WAF
+   * stores that 403 the ParityBot UA; any other string is sent as-is.
+   */
   userAgent?: string;
   /**
    * SQLite checkpoint DB path. When set, the engine stores per-URL status
@@ -124,6 +128,21 @@ export interface CrawlConfig {
    */
   productUrlPattern?: string;
   /**
+   * Optional region/locale token (e.g. "om", "ae", "sa", "en", "ar").
+   * Multi-country GCC stores publish a SEPARATE sitemap set per country
+   * (activefitnessstore.com: `/om/sitemaps/en/sitemap.xml` … `/bh/…`,
+   * `/qa/…`, `/kw/…`, `/sa/…`; lifetimefitnessstore.com:
+   * `sitemap_ae.xml` … `sitemap_qa.xml`) — the same products in different
+   * currencies. When set, discovery keeps only sitemap candidates (and
+   * index children) whose URL carries the token as a path segment
+   * (`/om/…`) or filename suffix (`sitemap_om.xml`), so a crawl fetches
+   * ONE country's catalogue (~4× less work, one currency) instead of
+   * walking every region and mixing AED/SAR/OMR prices. Empty = all
+   * regions (the pre-locale behavior). Stores with a single sitemap are
+   * unaffected (the default `/sitemap.xml` candidates are never filtered).
+   */
+  locale?: string;
+  /**
    * Tier 2 — rotating residential proxy (opt-in per crawl). A single HTTP(S)
    * proxy gateway URL (e.g. Oxylabs
    * `http://user-USER:pass@pr.oxylabs.io:7777`, Bright Data
@@ -142,6 +161,15 @@ export interface CrawlConfig {
   proxy?: string;
   /** Called after each product is fetched. */
   onProgress?: (fetched: number, discovered: number) => void;
+  /**
+   * Structured run-log lines — lifecycle + warnings emitted by the engine
+   * (crawl start, robots outcome, discovery done, fetch-phase start, HTTP
+   * 429 rate-limit warnings, completion summary, discovery failure). The
+   * worker appends them to the CrawlJob's capped `progress.log` so a crawl's
+   * story survives the process (vs console output, which is lost on
+   * restart). `level` ∈ "info" | "warn" | "error".
+   */
+  onLog?: (level: "info" | "warn" | "error", message: string) => void;
   /**
    * Called during the discovery phase with live per-strategy counts (sitemap
    * URLs found, HTML pages visited, product URLs accumulated) so a UI can

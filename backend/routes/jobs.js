@@ -1,7 +1,11 @@
 const express = require('express');
 const jobController = require('../controllers/jobController');
+const auth = require('../middleware/auth');
 
 const router = express.Router();
+
+// Phase 5 — JWT-protected (crawl enqueue/controls/schedules are user actions).
+router.use(auth);
 
 // Order matters: literal routes (/schedules, /active) must precede the
 // /:id param routes, and /:id/action routes must precede /:id.

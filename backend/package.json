@@ -9,7 +9,7 @@
     "test": "jest",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "backfill": "node scripts/backfill.js",
+    "typecheck": "tsc -p crawler/tsconfig.json --noEmit",
     "worker": "node --expose-gc --max-old-space-size=3072 workers/worker.mjs",
     "scheduler": "node workers/scheduler.mjs",
     "reconcile-matches": "node scripts/reconcile-matches.js"
@@ -31,12 +31,19 @@
     "joi": "^17.11.0",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.0.0"
+    "mongoose": "^8.0.0",
+    "better-sqlite3": "^13.0.2",
+    "playwright": "^1.62.1",
+    "robots-parser": "^3.0.1",
+    "undici": "^8.10.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2",
     "jest": "^29.7.0",
     "eslint": "^8.56.0",
-    "prettier": "^3.1.1"
+    "prettier": "^3.1.1",
+    "typescript": "^5.7.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.0"
   }
 }

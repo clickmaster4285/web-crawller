@@ -18,13 +18,13 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find module
 ```
 
 **Root cause:** the worker resolves the crawler module **relative to its own
-file** (`backend/workers/worker.mjs`). `'../frontend/src/lib/crawler/index.ts'`
+file** (`backend/workers/worker.mjs`). `'../crawler/index.ts'`
 therefore landed in `backend/frontend/…` (one level too shallow) instead of the
 sibling `frontend/` package at the project root. The error message shows the
 wrong path exactly.
 
 **Fix:** `backend/workers/worker.mjs` now loads
-`'../../frontend/src/lib/crawler/index.ts'` (with a comment explaining why it's
+`'../crawler/index.ts'` (with a comment explaining why it's
 two levels up, so it never regresses).
 
 **Verified:**
@@ -93,13 +93,21 @@ flow.
   one targeted prev-snapshot fetch when a crawl finishes. `/crawls` +
   `/pricing` still poll full catalogues — migrate them next if they lag.
 
-### UA experiment → reverted (decision recorded)
+### UA experiment → reverted (decision recorded) → re-opened per-store (Aug 11)
 - A browser-like Chrome UA got HTTP 200s where `ParityBot/1.0` got 429s on
   prosportsae.com / athletix.ae (curl-verified). It was implemented end-to-end
   (engine → queue → schedule → UI field) and then **fully reverted by
   decision** — ParityBot stays, and blocked stores rely on the Tier 2
-  residential proxy + slower concurrency instead. Don't re-do this without a
-  fresh decision.
+  residential proxy + slower concurrency instead.
+- **Re-opened scoped (Aug 11):** dawlance.com.pk **403s every ParityBot
+  request** while a Chrome UA gets 200s from the same IP (verified live — the
+  same class as prosportsae/athletix). Since it's UA-based, a residential
+  proxy can't fix it. The old global change returned as a **per-store opt-in**:
+  Sources → Configuration → **User agent** select (ParityBot default / Browser
+  Chrome). The `'browser'` sentinel flows Store → job → worker → engine
+  (`resolveUserAgent` in `core/http.ts`, single source of truth), robots.txt
+  is still parsed for the browser token, and the pre-crawl analyzer probes
+  with the same UA.
 
 ### Live DB state (crawler-new, Aug 2026)
 
@@ -175,6 +183,58 @@ zeros.
 
 ---
 
+## 🏪 Store-detour detection — corporate sites that link to their real store (Aug 11)
+
+haier.com/pk crawled 888 pages → **1 product**: it's a corporate dealer
+catalog — product pages have 0 JSON-LD and 0 price markers (verified live),
+so there's genuinely nothing to extract. But every page's **"Buy Now"** button
+links to **haiermall.pk** — the real priced storefront.
+
+**Shipped:**
+
+1. **`analyzeHomepage` store-host detection broadened** — `STORE_HOST_RE` now
+   covers `mall`/`market`/`marketplace`/`outlet`/`deals` plus a mid-word
+   `mall(\\.|$|-)` check (haiermall.pk embeds "mall" mid-word, which the old
+   boundary regex missed) and an anchor-label check (`buy now` / `shop now` /
+   `order now`). Verified on the live haier homepage AND product page →
+   `externalStoreLinks: [haiermall.pk]`.
+2. **Run-level aggregation** (`runCrawl`) — every product page that fails
+   extraction is anchor-scanned (the HTML is already in hand, best-effort);
+   a run that extracts **zero products** but keeps finding store-like hosts
+   appends a finding: *"its pages keep linking to haiermall.pk — crawl that
+   domain instead, the prices live there"* with a one-click **Crawl X
+   instead** action.
+3. **Website Intelligence Analyzer** now reports `homepage.externalStoreLinks`
+   in its profile; the Sources analysis panel shows them with the same
+   crawl-instead buttons.
+
+Not retroactive: the finding appears on the next crawl (or Run analysis) of
+haier.com — the existing 0-product snapshot is untouched.
+
+### Follow-up (Aug 11) — the two remaining 0-product crawls explained + fixed
+
+- **Dawlance (0 products, 7 requests) was a REAL bug, now fixed.** Its
+  product sitemap lives at `/medias/Product-en-PKR-*.xml` (SAP/Hybris
+  convention), and `isNonProductSitemap` matched the word `media` ANYWHERE in
+  the URL — so the whole catalogue was silently dropped as "media junk". Fix:
+  the filter now tests only the **basename** (with word boundaries), plus
+  Hybris-aware rules (`Product-*` = product sitemap, `Homepage-` /
+  `Category-` / `Content-` = skip), so the walk keeps + trusts the product
+  child wholesale. Verified against the live dawlance index (383 product URLs
+  retained; 13-case unit sweep passes; typecheck + jest 30/30).
+- **The honest remainder:** dawlance's product AND category pages return
+  **HTTP 500 from this machine even with a full Chrome header set** (12/12
+  sampled) while the homepage 200s with prices — Akamai Bot Manager serves
+  the homepage for fingerprinting but 500s deep paths. UA override can't fix
+  that; the Tier-2 residential proxy is the path. The re-crawl will now
+  honestly report "383 discovered, pages 500-blocked" instead of
+  "0 discovered".
+- **Haier store-detour trigger widened:** it fired only at exactly 0
+  products, but haier squeaked out 1 of 883 — so the haiermall.pk hint never
+  appeared. Threshold is now `≤ 5 products` (with a count-aware message).
+
+---
+
 ## 🧹 Catalogue purity + compare UI (Aug 8–9)
 
 **The "blogs/privacy/terms still coming in" fix — three layers, global for
@@ -190,7 +250,7 @@ every store:**
    become Products (second net for HTML-BFS/legacy paths; identity-bearing
    products always survive; an all-junk crawl can't mass-delete the
    catalogue).
-3. **Single source of truth** — `frontend/src/lib/crawler/discover/junk-segments.ts`
+3. **Single source of truth** — `backend/crawler/discover/junk-segments.ts`
    (`JUNK_SEGMENT_RE`, `hasJunkSegment`, `PRODUCT_BASE_RE`, `isProductUrl`)
    shared by the crawler, `crawlSync` and the `tools/` ops scripts via
    `await import()` — a probe script had already drifted with extra terms;
@@ -255,7 +315,7 @@ and events → alerts is shipped and live-Mongo verified**. **Next: Phase 5
 | **Phase 2** | Worker pool + queue + scheduler (crawls left the server process) | ✅ Done |
 | **Phase 3** | Indexed matching (GTIN > SKU > slug > token fuzzy) + persisted `ProductMatch` | ✅ Done |
 | **Phase 4** | `ProductEvent` → `/alerts` engine (price drops %, stock, new/removed, unread/dismiss) | ✅ Done |
-| **Phase 5** | Productionize: deploy (Nitro), CI, observability, auth hardening | ⬜ **Next** |
+| **Phase 5** | Productionize: deploy (Nitro), CI, observability, auth hardening | 🔄 **In progress** |
 
 Also shipped along the way:
 
@@ -317,12 +377,61 @@ code") — the granular version of the phase table above.
 ### ⬜ What's left (the open items)
 
 1. **Phase 5 — Productionize (item 10)**
-   - **Auth on `/api/data/*`** — only the alerts routes are auth-protected
-     today; the rest of the data API is open.
-   - **Observability** — job metrics + crawl logs (nothing systematic yet).
-   - **Deploy workers as separate containers** (one image, two entry points:
-     `worker.mjs` pool + single `scheduler.mjs`).
-   - **CI pipeline.**
+   - **Auth on `/api/data/*`** — ✅ done (this session): `router.use(auth)`
+     on the whole data router (the alerts routes were already protected).
+     `/api/auth/*` + `/health` stay open; the frontend already attaches the
+     JWT on every request and redirects to login on 401.
+   - **Auth on the remaining routers** — ✅ done: `/api/stores`,
+     `/api/crawl-jobs`, `/api/match`, `/api/analyze`, `/api/proxy` all
+     `router.use(auth)`. The browser http client was already token-bearing;
+     the TanStack Start SERVER functions in `src/lib/crawl.ts` (which fetch
+     the backend directly from Nitro) now recover the JWT from a mirrored
+     `parity.token` cookie (set by `lib/http.ts` on login) and forward it as
+     the Authorization header — so crawl/analyze/proxy flows keep working.
+   - **Observability — job metrics** — ✅ `GET /api/data/metrics`
+     (`controllers/metricsController.js`): queue depth by status, live
+     worker picture (fresh/stale heartbeats — same
+     `PARITY_HEARTBEAT_TIMEOUT_MS` the release sweep uses), 24h/7d
+     throughput by type with success/failure rates, avg/median/p95
+     durations, request totals, active schedules. All derived live from
+     `CrawlJob` — no counters to maintain. **UI:** new **/metrics** page
+     (`src/pages/_authenticated/metrics/`, sidebar → Operations) renders
+     queue tiles, worker liveness + per-worker job list, and 24h/7d
+     throughput cards, polling every 10s via `useMetrics()`.
+   - **Observability — crawl logs** — ✅ done (this session): a structured,
+     capped **run log lives on each CrawlJob** (`progress.log`, 200-line
+     cap). The engine got an `onLog` callback (start/robots/discovery
+     done/finished lifecycle lines + 429 rate-limit warnings from
+     `core/http.ts`); the worker buffers the emissions and its own
+     lifecycle lines (claimed → crawling → finished/cancelled/failed) and
+     flushes them with the heartbeat — the terminal lines ride ATOMICALLY
+     with the `completeJob`/`failJob`/`cancelJob` status write (the
+     heartbeat timers are torn down right after, so the final flush can't
+     race). `publicJob` exposes `log`; the UI renders it via the new
+     `RunLog` component (`components/crawls/run-log.tsx`, collapsible,
+     level-tinted, auto-scroll) in the Sources progress panel (open by
+     default), on Active crawls cards (collapsed), AND on finished crawls:
+     the results panel renders it open by default (the reason behind a
+     result stays visible after the job ends — the job snapshot the panel
+     renders carries the full log, and a refresh re-fetches it from the
+     still-live job), and cancelled/failed runs get theirs next to the
+     status alert (the worker's terminal line rides the same write).
+     Verified live with a real shallow crawl: all 7 lines landed — worker
+     `shallow check → crawling` + engine `started → robots.txt → discovery
+     done → finished` + the worker's final `finished` line flushed with the
+     `done` write, still served 10 min after finish.
+   - **Deploy workers as separate containers** — ❌ removed by decision
+     (this session): the Docker artifacts were deleted (no Dockerfiles, no
+     `docker-compose.yml`). The prod-SSR pieces that were built for it
+     REMAIN because they're not docker-specific: `src/server.ts` now proxies
+     browser `/api/*` calls to Express (the built Nitro server has no Vite
+     dev proxy — without it, prod 404s every API call; JWT header passes
+     through), and `server-entry.mjs` + `npm start` boot the built server
+     via `h3`'s `toNodeHandler` (validated: SSR 200, `/api` 401 no-token /
+     200 with-token).
+   - **CI pipeline** — ❌ removed by decision (this session):
+     `.github/workflows/ci.yml` was deleted along with the Docker artifacts
+     (no CI config remains in the repo).
 2. **D1 endgame — "freeze, then drop" `CrawlResult`**
    - *Freeze (in progress):* the new read path is built and
      **`/stores/$origin` is flipped onto it** (server-paginated catalogue,

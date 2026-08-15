@@ -58,6 +58,8 @@ function paramsFor(store, type) {
     // publicJob on every read).
     proxyUrl: p.proxyUrl ?? null,
     productUrlPattern: p.productUrlPattern ?? null,
+    locale: p.locale ?? null,
+    userAgent: p.userAgent ?? null,
     fullCrawl: type === 'deep'
   };
 }

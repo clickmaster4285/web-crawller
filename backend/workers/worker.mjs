@@ -87,16 +87,18 @@ async function loadResumeState(origin) {
   return resumeState;
 }
 
-// The crawler engine lives in the frontend package. Node 24 strips types on
-// import, so we load it directly — `PARITY_CRAWLER_MODULE` overrides it for
-// tests (must be a path relative to this file or a file:// URL).
-//
-// Path note: `new URL(path, import.meta.url)` resolves against THIS file
-// (backend/workers/), so the sibling frontend package is TWO levels up — a
-// single `../` would land in backend/frontend/ and crash every worker boot
-// with ERR_MODULE_NOT_FOUND.
+// The crawler engine lives in the backend package (P6 — moved from
+// crawler on Aug 10 so the server-side-only engine, its deps
+// and its typecheck live where it runs; see improvement-plan.md P6). Node 24
+// strips types on import, so
+// we load it directly — `PARITY_CRAWLER_MODULE` overrides it for tests (must
+// be a path relative to this file or a file:// URL). The `.ts` files are ESM
+// syntax; Node 24's module-syntax detection loads them as ESM even under
+// backend's CommonJS package (a benign MODULE_TYPELESS_PACKAGE_JSON warning
+// is logged once per process — the nested type:module package.json that would
+// silence it is intentionally omitted: everything-in-backend, no nested pkg).
 const crawlerModule =
-  process.env.PARITY_CRAWLER_MODULE ?? '../../frontend/src/lib/crawler/index.ts';
+  process.env.PARITY_CRAWLER_MODULE ?? '../crawler/index.ts';
 const crawlerUrl = new URL(crawlerModule, import.meta.url);
 const { runCrawl, isCrawlCancelled, sanitizeProxyFromMessage } = await import(
   crawlerUrl.href
@@ -209,6 +211,13 @@ async function processJob(job) {
 
   let lastBeat = 0;
   let fetchStartedAt = null;
+  // Phase 5 run-log: lines since the last beat, flushed with it (the engine's
+  // onLog emissions + this worker's own lifecycle lines). Kept in the job's
+  // capped progress.log so a crawl's story survives the process.
+  const logBuffer = [];
+  const logLine = (level, message) => {
+    logBuffer.push({ at: new Date(), level, message });
+  };
   // `force` bypasses the 2s throttle — needed for one-shot writes like the
   // fetchStartedAt transition below: if the very first fetch-phase patch
   // landed within 2s of the last discovery tick, the throttled beat would
@@ -220,12 +229,23 @@ async function processJob(job) {
     const now = Date.now();
     if (!force && now - lastBeat < HEARTBEAT_MS) return;
     lastBeat = now;
-    heartbeat(jobId, workerId, patch).catch(() => {});
+    const withLog = { ...patch };
+    if (logBuffer.length > 0) {
+      withLog.log = logBuffer.splice(0, logBuffer.length);
+    }
+    heartbeat(jobId, workerId, withLog).catch(() => {});
   };
   // Liveness beat even when there's nothing to report (discovery in progress
-  // or the engine is paused and waiting).
+  // or the engine is paused and waiting). Buffered run-log lines ride along
+  // (a crawl that logs between progress ticks still flushes its story).
   const beatTimer = setInterval(
-    () => heartbeat(jobId, workerId).catch(() => {}),
+    () => {
+      if (logBuffer.length > 0) {
+        beat({}, true);
+      } else {
+        heartbeat(jobId, workerId).catch(() => {});
+      }
+    },
     HEARTBEAT_MS
   );
 
@@ -257,9 +277,14 @@ async function processJob(job) {
       console.log(
         `🔎 ${workerId} shallow-checking ${origin}: ${knownUrls.size} products already known`
       );
+      logLine(
+        'info',
+        `${workerId}: shallow check — ${knownUrls.size.toLocaleString()} products already known`
+      );
     }
 
     console.log(`🕷️  ${workerId} crawling ${origin} (${type})`);
+    logLine('info', `${workerId}: crawling ${origin} (${type})`);
     const result = await runCrawl({
       origin,
       collections: p.collections ?? [],
@@ -276,6 +301,13 @@ async function processJob(job) {
       // Optional product-URL filter (only discovered URLs matching the regex
       // are crawled — blog/brand/category pages stay out of the catalogue).
       productUrlPattern: p.productUrlPattern ?? undefined,
+      // Optional region/locale token — discovery keeps only sitemaps matching
+      // this region (GCC stores: one sitemap set per country, ~4× less work).
+      locale: p.locale ?? undefined,
+      // Per-store User-Agent: 'browser' (sentinel) or a raw UA string — the
+      // engine resolves 'browser' to a Chrome UA so WAF stores that 403 the
+      // ParityBot UA (dawlance/prosportsae/athletix) can be crawled.
+      userAgent: p.userAgent ?? undefined,
       proxy: p.proxyUrl ?? undefined,
       maxRetries: 1,
       onProgress: (processed, total) => {
@@ -299,7 +331,10 @@ async function processJob(job) {
       onDiscoveryProgress: (discovery) => beat({ discovery }),
       // Debug: surface the live HTTP-request count on the job (throttled by
       // beat, so a 10k-page crawl doesn't write Mongo per request).
-      onRequestCount: (count) => beat({ requests: count })
+      onRequestCount: (count) => beat({ requests: count }),
+      // Structured run-log: engine lifecycle + HTTP warnings land on the
+      // job's capped progress.log (flushed with the next heartbeat).
+      onLog: (level, message) => logLine(level, message)
     });
 
     const sanitized = sanitizeResult(result, p.proxyUrl);
@@ -346,6 +381,23 @@ async function processJob(job) {
       // worker (any machine) skips unchanged products on resume.
       httpStateByUrl: result.httpStateByUrl
     });
+    // Phase 5 run-log: final lifecycle line + any follow-up note, flushed
+    // ATOMICALLY with the completion write below — the heartbeat timers are
+    // torn down in `finally`, so this is the last chance to persist the
+    // buffered story (a beat after completeJob would race the status flip).
+    logLine(
+      'info',
+      `${workerId}: finished ${origin} — ${result.products.length.toLocaleString()} products ` +
+        `(${result.stats.fetched.toLocaleString()} fetched, ` +
+        `${result.stats.skippedUnchanged.toLocaleString()} cached, ` +
+        `${result.stats.failed} failed) in ${(result.stats.durationMs / 1000).toFixed(1)}s`
+    );
+    if (autoBrowserFollowup) {
+      logLine(
+        'warn',
+        `0 prices from ${sanitized.stats.fetched} fetched pages — looks JS-rendered; auto re-crawling with browser rendering ON`
+      );
+    }
     await completeJob(jobId, workerId, {
       result: sanitized,
       persisted: true,
@@ -354,7 +406,8 @@ async function processJob(job) {
         total: result.stats.discovered,
         requests: result.stats.requests ?? 0,
         fetchStartedAt
-      }
+      },
+      log: logBuffer.splice(0, logBuffer.length)
     });
     if (autoBrowserFollowup) {
       await enqueueJob({
@@ -378,7 +431,12 @@ async function processJob(job) {
     // job goes `cancelled` (the API's control request, mirrored into
     // controlRef, made the engine throw CrawlCancelledError).
     if (isCrawlCancelled(error)) {
-      await cancelJob(jobId, workerId);
+      logLine('info', `${workerId}: cancelled crawl for ${origin}`);
+      await cancelJob(
+        jobId,
+        workerId,
+        logBuffer.splice(0, logBuffer.length)
+      );
       console.log(`🗑️  ${workerId} cancelled crawl for ${origin}`);
       return;
     }
@@ -386,7 +444,13 @@ async function processJob(job) {
     // non-Errors and is a pass-through when no proxy URL is configured — the
     // ternary chain is unnecessary.
     const message = sanitizeProxyFromMessage(error, p.proxyUrl);
-    await failJob(jobId, workerId, message);
+    logLine('error', `${workerId}: crawl failed — ${message}`);
+    await failJob(
+      jobId,
+      workerId,
+      message,
+      logBuffer.splice(0, logBuffer.length)
+    );
   } finally {
     clearInterval(beatTimer);
     clearInterval(controlTimer);

@@ -4,28 +4,30 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, Eye, PlayCircle, TriangleAlert } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
-import { StoreProfile } from "@/components/crawls/store-profile";
+import {
+  StoreProfile,
+  type StoreProfileCrawl,
+  type StoreProfileShallow,
+} from "@/components/crawls/store-profile";
 import { CancelCrawlDialog } from "@/components/crawls/cancel-crawl-dialog";
+import type { DiffProduct } from "@/components/cards/crawl-diff-summary";
 import {
   CrawlSetupPanel,
   type RecentCrawl,
 } from "@/components/sources/crawl-setup-panel";
 import { CrawlProgressPanel } from "@/components/sources/crawl-progress-panel";
 import { CrawlResultsPanel } from "@/components/sources/crawl-results-panel";
+import { RunLog } from "@/components/crawls/run-log";
 import { CrawlConfigPanel } from "@/components/sources/crawl-config-panel";
 import { ActiveSchedulesPanel } from "@/components/sources/active-schedules-panel";
 import { StoreAnalysisPanel } from "@/components/sources/store-analysis-panel";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ErrorState, LoadingState } from "@/components/common/states";
-import { useSavedCrawlMetas } from "@/hooks/useData";
+import { useStoresWithSnapshots } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import { useWorkspace } from "@/hooks/useWorkspace";
-import {
-  getCrawlResultsData,
-  invalidateCrawlData,
-  type SavedCrawlMeta,
-} from "@/api";
+import { getStoreEvents, invalidateCrawlData } from "@/api";
 import {
   cancelCrawlJob,
   cancelCrawlSchedule,
@@ -44,11 +46,10 @@ import {
   type ScheduleCrawlInput,
 } from "@/lib/crawl";
 import {
-  computeCrawlDiff,
-  crawlType,
   normalizeOrigin,
   parseCustomMaxPages,
   toOriginUrl,
+  type CrawlDiff,
   type MaxPagesMode,
 } from "@/utils/crawls";
 import {
@@ -84,10 +85,11 @@ export const Route = createFileRoute("/_authenticated/sources/")({
 
 function SourcesPage() {
   const { data: workspace, isLoading, isError } = useWorkspace();
-  // Lightweight crawl summaries (origin, product count, platform, discovery
-  // diagnostics — no product catalogues), polled every 30s. Full snapshots
-  // are fetched on demand below, only when a finished crawl needs the diff.
-  const saved = useSavedCrawlMetas();
+  // Every crawled store with its snapshot history (metadata only — the D1
+  // read path), polled every 30s. Snapshot product arrays are gone; the
+  // finished-crawl diff below is built from the ProductEvent change log
+  // instead of diffing catalogues in the browser.
+  const saved = useStoresWithSnapshots();
   const queryClient = useQueryClient();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
@@ -197,6 +199,20 @@ function SourcesPage() {
   const [productUrlPattern, setProductUrlPattern] = useLocalStorageState(
     "parity.sources.productUrlPattern",
     "",
+  );
+  // Optional region/locale token (empty = all regions) — filters sitemap
+  // candidates to one country for multi-country GCC stores (the P4 item):
+  // activefitnessstore.com has 12 sitemaps (om/bh/qa/kw/sa × en/ar) of the
+  // same products in different currencies — picking "om" crawls the OMR
+  // catalogue instead of all of them (~4× less work, one currency).
+  const [locale, setLocale] = useLocalStorageState("parity.sources.locale", "");
+  // Per-store User-Agent (Aug 2026): "browser" sends a Chrome UA on every
+  // request for WAF stores that 403 the default ParityBot UA (dawlance/
+  // prosportsae/athletix — verified 403-for-bot, 200-for-browser from the
+  // same IP). Default keeps the honest ParityBot identity everywhere else.
+  const [userAgent, setUserAgent] = useLocalStorageState<"browser" | "default">(
+    "parity.sources.userAgent",
+    "default",
   );
   const [frequency, setFrequency] = useLocalStorageState<CrawlFrequency>(
     "parity.sources.frequency",
@@ -409,57 +425,65 @@ function SourcesPage() {
       job.params.useBrowser ===
         (useBrowser || (job.analysis?.renderingForced ?? false)) &&
       job.params.proxy === proxy.trim().length > 0 &&
-      job.params.productUrlPattern === (productUrlPattern.trim() || null));
+      job.params.productUrlPattern === (productUrlPattern.trim() || null) &&
+      job.params.locale === (locale.trim().toLowerCase() || null) &&
+      job.params.userAgent === (userAgent === "browser" ? "browser" : null));
 
-  // The previous saved snapshot for the origin being crawled — everything
-  // saved *after* this run started (including this run's own persistence)
-  // is excluded, so the "what's new" diff is always against the last crawl
-  // that existed before this one. Full product arrays are only needed once a
-  // crawl FINISHES (for the diff), so this targeted fetch fires then — the
-  // 30s summary poll never downloads catalogues.
-  const prevCrawlQuery = useQuery({
-    queryKey: ["crawl-prev", crawlOrigin.trim(), startedAt || 0],
-    // limit=2: newest-first, so index 0 is this run's own save (excluded by
-    // the startedAt filter below) and index 1 is the previous snapshot — no
-    // need to ship the origin's whole snapshot history for one diff.
+  // The "what's new since the last crawl" diff — built from the ProductEvent
+  // change log this run wrote at ingest (the worker saves BEFORE flipping the
+  // job to done, so the events exist by the time the UI sees the finished
+  // result). `since` = this run's start, so only THIS run's events match
+  // (per-origin jobs are serialized — no concurrent-run noise). This
+  // replaces the old browser-side diff of full snapshot product arrays.
+  const eventsQuery = useQuery({
+    queryKey: ["crawl-events", crawlOrigin.trim(), startedAt || 0],
     queryFn: () =>
-      getCrawlResultsData({ origin: crawlOrigin.trim(), limit: 2 }),
+      getStoreEvents(normalizeOrigin(crawlOrigin.trim()), {
+        since: new Date(startedAt).toISOString(),
+        limit: 200,
+      }),
     enabled: !!result && startedAt > 0,
     staleTime: 5 * 60_000,
   });
-  const prevCrawl = useMemo(() => {
-    if (!startedAt) return undefined;
-    const key = normalizeOrigin(crawlOrigin.trim());
-    return (prevCrawlQuery.data?.data ?? []).find(
-      (c) =>
-        normalizeOrigin(c.origin) === key &&
-        new Date(c.updatedAt).getTime() < startedAt,
-    );
-  }, [prevCrawlQuery.data, crawlOrigin, startedAt]);
+  const diff = useMemo<CrawlDiff<DiffProduct> | null>(() => {
+    if (!result) return null;
+    const events = eventsQuery.data?.data ?? [];
+    return {
+      newProducts: events
+        .filter((e) => e.type === "added")
+        .map((e) => ({
+          name: e.name,
+          url: e.url,
+          price: e.new?.price ?? 0,
+          available: e.new?.available ?? true,
+        })),
+      removedProducts: events
+        .filter((e) => e.type === "removed")
+        .map((e) => ({
+          name: e.name,
+          url: e.url,
+          price: e.old?.price ?? 0,
+          available: e.old?.available ?? false,
+        })),
+      priceChangedCount: events.filter((e) => e.type === "price_changed")
+        .length,
+    };
+  }, [result, eventsQuery.data]);
 
-  const diff = useMemo(
-    () =>
-      result ? computeCrawlDiff(result.products, prevCrawl?.products) : null,
-    [result, prevCrawl],
-  );
-
-  // Unique stores from saved crawl summaries (newest first) — one-click
-  // re-runs. Built from metas, so this list never downloads catalogues.
+  // Unique stores from the D1 store list (newest first) — one-click re-runs.
+  // Metadata only, so this list never downloads catalogues. Snapshots no
+  // longer carry the crawl's `collections` (they were fields on the legacy
+  // snapshot), so re-runs start with an empty collections box.
   const recentDomains = useMemo<RecentCrawl[]>(() => {
-    const seen = new Set<string>();
     const out: RecentCrawl[] = [];
-    for (const c of saved.data?.data ?? []) {
-      const key = normalizeOrigin(c.origin);
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push({
-          _id: c._id,
-          origin: c.origin,
-          collections: c.collections,
-          productCount: c.productCount,
-        });
-        if (out.length >= 6) break;
-      }
+    for (const store of saved.data?.data ?? []) {
+      out.push({
+        _id: store._id,
+        origin: store.origin,
+        collections: [],
+        productCount: store.productCount,
+      });
+      if (out.length >= 6) break;
     }
     return out;
   }, [saved.data]);
@@ -477,30 +501,33 @@ function SourcesPage() {
     setJobId(null);
   };
 
-  // Newest saved snapshot for the domain currently entered — feeds the
-  // compact Store profile card (platform / sitemap / robots.txt detection).
-  // Metas carry the discovery diagnostics, so no catalogue is needed here.
+  // The entered domain's store + its snapshot history (D1 read path). The
+  // newest snapshot feeds the compact Store profile card (platform / sitemap
+  // / robots.txt detection); the newest SHALLOW snapshot feeds the "Last
+  // quick check" strip.
   const profileKey = normalizeOrigin(crawlOrigin.trim());
-  const profileCrawl: SavedCrawlMeta | undefined = useMemo(
-    () =>
-      (saved.data?.data ?? []).find(
-        (c) => normalizeOrigin(c.origin) === profileKey,
-      ),
+  const profileStore = useMemo(
+    () => (saved.data?.data ?? []).find((s) => s.key === profileKey),
     [saved.data, profileKey],
   );
-
-  // Newest shallow (sitemap-only) snapshot for the domain — the "Last quick
-  // check" strip on the Store profile card. Old snapshots without a `type`
-  // are all deep crawls, so they're excluded.
-  const lastShallowCrawl: SavedCrawlMeta | undefined = useMemo(
-    () =>
-      (saved.data?.data ?? []).find(
-        (c) =>
-          crawlType(c) === "shallow" &&
-          normalizeOrigin(c.origin) === profileKey,
-      ),
-    [saved.data, profileKey],
+  const profileSnapshots = useMemo(
+    () => profileStore?.snapshots ?? [],
+    [profileStore],
   );
+  const profileCrawl: StoreProfileCrawl | undefined = useMemo(() => {
+    const latest = profileSnapshots[0];
+    if (!latest) return undefined;
+    return {
+      updatedAt: latest.finishedAt,
+      stats: latest.stats,
+      discovery: latest.discovery ?? undefined,
+    };
+  }, [profileSnapshots]);
+  const lastShallowCrawl: StoreProfileShallow | undefined = useMemo(() => {
+    const shallow = profileSnapshots.find((s) => !s.full);
+    if (!shallow) return undefined;
+    return { updatedAt: shallow.finishedAt, stats: shallow.stats };
+  }, [profileSnapshots]);
 
   const collectionsList = collections
     .split(",")
@@ -510,7 +537,9 @@ function SourcesPage() {
   if (isError) return <ErrorState />;
   if (isLoading || !workspace) return <LoadingState label="Loading crawler…" />;
 
-  const buildCrawlInput = (type: "deep" | "shallow") => ({
+  // Annotated so the "browser" UA literal survives inference (an inferred
+  // return type would widen it to string — contextually typed, it stays).
+  const buildCrawlInput = (type: "deep" | "shallow"): CrawlRunInput => ({
     origin: crawlOrigin.trim(),
     collections: collectionsList,
     delayMs: crawlDelay,
@@ -525,6 +554,8 @@ function SourcesPage() {
     analyze: analyzeStore,
     proxy: proxy.trim() || undefined,
     productUrlPattern: productUrlPattern.trim() || undefined,
+    locale: locale.trim().toLowerCase() || undefined,
+    userAgent: userAgent === "browser" ? "browser" : undefined,
     type,
   });
   const runCrawl = () => {
@@ -555,6 +586,8 @@ function SourcesPage() {
       useBrowser,
       proxy: proxy.trim() || undefined,
       productUrlPattern: productUrlPattern.trim() || undefined,
+      locale: locale.trim().toLowerCase() || undefined,
+      userAgent: userAgent === "browser" ? "browser" : undefined,
     });
 
   return (
@@ -609,10 +642,10 @@ function SourcesPage() {
           crawl={profileCrawl}
           domain={profileKey}
           lastShallow={lastShallowCrawl}
-          productCount={profileCrawl?.productCount}
+          productCount={profileStore?.productCount}
           onSuggestionClick={actionUrl}
           headerAction={
-            (profileCrawl?.productCount ?? 0) > 0 ? (
+            (profileStore?.productCount ?? 0) > 0 ? (
               <Button asChild variant="outline" size="sm" className="h-7">
                 <Link to="/stores/$origin" params={{ origin: profileKey }}>
                   <Eye className="size-3.5" /> View catalogue
@@ -627,11 +660,18 @@ function SourcesPage() {
           <StoreAnalysisPanel
             origin={toOriginUrl(crawlOrigin)}
             proxy={proxy.trim() || undefined}
+            // Probe with the same UA a crawl would use — a WAF that 403s
+            // ParityBot (dawlance) must not hide its real answers here either.
+            userAgent={userAgent === "browser" ? "browser" : undefined}
             onApplyRecommendation={(patch) => {
               // A csr-shell verdict means pages are JS shells — the next crawl
               // must render them to extract prices (sitemap-browser tier).
               setUseBrowser(patch.useBrowser);
             }}
+            // A corporate site that links out to its real store (haier.com →
+            // haiermall.pk): fill the crawler with that domain so the priced
+            // storefront gets crawled instead.
+            onCrawlInstead={actionUrl}
           />
         ) : null}
 
@@ -700,6 +740,16 @@ function SourcesPage() {
             </AlertDescription>
           </Alert>
         ) : null}
+        {/* The run log for a crawl that ended without a result (cancelled /
+            failed) — the reason is in the log: the worker flushes its
+            failure/cancel line atomically with the terminal status, so it's
+            here as soon as the alert shows. Done crawls get theirs inside
+            the results panel instead (no duplicate). */}
+        {job &&
+        (job.status === "cancelled" || job.status === "error") &&
+        job.log.length > 0 ? (
+          <RunLog lines={job.log} defaultOpen title="Run log" />
+        ) : null}
         {progress.isError ? (
           <p className="text-xs text-muted-foreground">
             Progress updates stopped — check your connection. The crawl may
@@ -759,6 +809,10 @@ function SourcesPage() {
           onTestProxy={() => proxyTest.mutate(proxy.trim())}
           productUrlPattern={productUrlPattern}
           onProductUrlPatternChange={(value) => setProductUrlPattern(value)}
+          locale={locale}
+          onLocaleChange={(value) => setLocale(value)}
+          userAgent={userAgent}
+          onUserAgentChange={(value) => setUserAgent(value)}
         />
 
         {/* ── 5. Active schedules ──────────────────────────────────────── */}

@@ -21,12 +21,12 @@
  *   only). Every response below is built from an explicit field list — the
  *   raw doc is never spread, so the URL can never leak to a client.
  */
+const mongoose = require('mongoose');
 const Store = require('../models/Store');
 const Product = require('../models/Product');
 const Snapshot = require('../models/Snapshot');
 const ProductEvent = require('../models/ProductEvent');
-const CrawlResult = require('../models/CrawlResult');
-const { normalizeHost } = require('../utils/identity');
+const CrawlJob = require('../models/CrawlJob');
 const {
   encodeCursor,
   cursorFilter,
@@ -95,9 +95,15 @@ function storeSummary(store) {
  *  grouped aggregation replaces per-store countDocuments. Excludes only the
  *  soft-deleted junk pages whose `lastSeenAt` was reset to the epoch by the
  *  purge (Aug 2026 cleanup) — NOT out-of-stock rows, which are still part of
- *  the catalogue (an out-of-stock-heavy store would otherwise read ~28). */
+ *  the catalogue (an out-of-stock-heavy store would otherwise read ~28).
+ *
+ *  `?withSnapshots=1` embeds each store's snapshot history (metadata only,
+ *  newest first) — the D1 read for the /crawls history page, so it needs no
+ *  N+1 snapshot fetches. */
 const listStores = async (req, res) => {
   try {
+    const withSnapshots =
+      req.query.withSnapshots === '1' || req.query.withSnapshots === 'true';
     const [docs, counts] = await Promise.all([
       Store.find().sort({ updatedAt: -1 }).lean(),
       Product.aggregate([
@@ -106,10 +112,22 @@ const listStores = async (req, res) => {
       ])
     ]);
     const countByKey = new Map(counts.map((r) => [r._id, r.n]));
-    const data = docs.map((s) => ({
+    let data = docs.map((s) => ({
       ...storeSummary(s),
       productCount: countByKey.get(s.key) ?? s.productCount ?? 0
     }));
+    if (withSnapshots && docs.length > 0) {
+      const snaps = await Snapshot.find({ key: { $in: docs.map((s) => s.key) } })
+        .sort({ finishedAt: -1 })
+        .lean();
+      const snapsByKey = new Map();
+      for (const s of snaps) {
+        const arr = snapsByKey.get(s.key) ?? [];
+        arr.push(s);
+        snapsByKey.set(s.key, arr);
+      }
+      data = data.map((d) => ({ ...d, snapshots: snapsByKey.get(d.key) ?? [] }));
+    }
     res.json({ success: true, count: data.length, data });
   } catch (error) {
     console.error('List stores error:', error);
@@ -221,11 +239,10 @@ const listSnapshots = async (req, res) => {
 };
 
 /**
- * DELETE /api/stores/:key — removes a store everywhere: the normalized
- * collections (Store / Product / Snapshot / ProductEvent) plus the legacy
- * `CrawlResult` docs whose origin normalizes to the key, so the store
- * disappears from BOTH read paths (D1 freeze keeps the legacy UI working
- * until every page flips).
+ * DELETE /api/stores/:key — removes a store from the normalized collections
+ * (Store / Product / Snapshot / ProductEvent). The frozen legacy
+ * `crawlresults` collection is intentionally untouched (decision: teardown
+ * code, keep data).
  */
 const deleteStore = async (req, res) => {
   try {
@@ -234,25 +251,12 @@ const deleteStore = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid store key' });
     }
 
-    const store = await Store.findOne({ key }).lean();
-    // Legacy CrawlResult docs store full origins (which may vary http/https
-    // across runs) — collect the ones that normalize to this key. `distinct`
-    // is fine here: origins are bounded and CrawlResult is frozen (D1).
-    const origins = new Set(store?.origin ? [store.origin] : []);
-    const distinct = await CrawlResult.distinct('origin');
-    for (const origin of distinct) {
-      if (normalizeHost(origin) === key) origins.add(origin);
-    }
-
-    const [products, snapshots, events, legacy] = await Promise.all([
+    const [products, snapshots, events] = await Promise.all([
       Product.deleteMany({ key }),
       Snapshot.deleteMany({ key }),
-      ProductEvent.deleteMany({ key }),
-      origins.size > 0
-        ? CrawlResult.deleteMany({ origin: { $in: [...origins] } })
-        : Promise.resolve({ deletedCount: 0 })
+      ProductEvent.deleteMany({ key })
     ]);
-    if (store) await Store.deleteOne({ key });
+    const store = await Store.findOneAndDelete({ key }).lean();
 
     res.json({
       success: true,
@@ -261,13 +265,74 @@ const deleteStore = async (req, res) => {
         deleted: {
           products: products.deletedCount,
           snapshots: snapshots.deletedCount,
-          events: events.deletedCount,
-          legacy: legacy.deletedCount
+          events: events.deletedCount
         }
       }
     });
   } catch (error) {
     console.error('Delete store error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/stores/:key/snapshots/:id — removes ONE snapshot from a
+ * store's history (the D1 replacement for the legacy per-snapshot delete:
+ * the /crawls row's trash button). The catalogue (Product rows) is current
+ * state and is NOT touched — history and catalogue are separate concerns on
+ * the normalized model.
+ */
+const deleteStoreSnapshot = async (req, res) => {
+  try {
+    const key = parseStoreKey(req.params.key);
+    const { id } = req.params;
+    if (!key || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid snapshot id' });
+    }
+    const doc = await Snapshot.findOneAndDelete({ _id: id, key }).lean();
+    if (!doc) {
+      return res.status(404).json({ success: false, message: 'Snapshot not found' });
+    }
+    res.json({ success: true, data: { deleted: true, id, key, origin: doc.origin } });
+  } catch (error) {
+    console.error('Delete snapshot error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/stores/:key/snapshots — clears a store's crawl history (the
+ * D1 replacement for the legacy clear-by-origin). On the normalized model
+ * this deletes the Snapshot metadata only; the current catalogue (Product
+ * rows) is NOT wiped — the store page keeps showing products. Mirrors the
+ * legacy endpoint's side effects for "stop this store": pending jobs are
+ * cancelled and the schedule cadence disabled (the Store doc stays — a
+ * manual re-crawl or re-schedule re-enables it).
+ */
+const clearStoreSnapshots = async (req, res) => {
+  try {
+    const key = parseStoreKey(req.params.key);
+    if (!key) {
+      return res.status(400).json({ success: false, message: 'Invalid store key' });
+    }
+    const store = await Store.findOne({ key }).lean();
+    const origins = new Set(store?.origin ? [store.origin] : []);
+    const result = await Snapshot.deleteMany({ key });
+    if (origins.size > 0) {
+      await Promise.all([
+        CrawlJob.deleteMany({
+          origin: { $in: [...origins] },
+          status: { $in: ['queued', 'claimed', 'retrying'] }
+        }),
+        Store.updateMany({ key }, { $set: { 'cadence.enabled': false } })
+      ]);
+    }
+    res.json({
+      success: true,
+      data: { deleted: true, key, deletedCount: result.deletedCount }
+    });
+  } catch (error) {
+    console.error('Clear store snapshots error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
@@ -306,4 +371,13 @@ const listEvents = async (req, res) => {
   }
 };
 
-module.exports = { listStores, getStore, listProducts, listSnapshots, listEvents, deleteStore };
+module.exports = {
+  listStores,
+  getStore,
+  listProducts,
+  listSnapshots,
+  listEvents,
+  deleteStore,
+  deleteStoreSnapshot,
+  clearStoreSnapshots
+};

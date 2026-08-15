@@ -17,14 +17,14 @@ import { useQuery } from "@tanstack/react-query";
 import {
   getCatalogueData,
   getCompetitorsData,
-  getCrawlResultsData,
   getInsightsData,
   getMatchedProductsData,
+  getMetricsData,
   getPricingData,
   getReportsData,
+  getStores,
   MATCHER_STALE_TIME,
   queryKeys,
-  type SavedCrawlMeta,
 } from "@/api";
 
 function useApiQuery<T>(
@@ -72,21 +72,40 @@ export function useInsights() {
   return useApiQuery(queryKeys.insights, () => getInsightsData());
 }
 
+/**
+ * Crawl-job health snapshot (queue depth, worker liveness, 24h/7d
+ * throughput) — the /metrics dashboard. Polls every 10s so the numbers stay
+ * live without hammering the backend (the response is a handful of
+ * aggregations).
+ */
+export function useMetrics() {
+  const query = useQuery({
+    queryKey: queryKeys.metrics,
+    queryFn: () => getMetricsData(),
+    refetchInterval: 10_000,
+  });
+  return {
+    data: query.data,
+    isLoading: query.isLoading,
+    isError: query.isError,
+  };
+}
+
 export function useReports() {
   return useApiQuery(queryKeys.reports, () => getReportsData());
 }
 
 /**
- * Persisted crawl results (one per origin) from GET /api/data/crawl-results.
- *
- * Polls every 30s so results saved by *scheduled* crawls (which run as
- * internal jobs the page never polls) still show up without a manual
- * reload; on-demand crawls also invalidate this query on persist.
+ * Every crawled store, meta only — the D1 read path (GET /api/stores)
+ * replacing the legacy crawl summaries (`?meta=1`). Polls every 30s so
+ * results saved by *scheduled* crawls (which run as internal jobs the page
+ * never polls) still show up without a manual reload; on-demand crawls also
+ * invalidate this query on persist.
  */
-export function useSavedCrawls() {
+export function useStores() {
   const query = useQuery({
-    queryKey: queryKeys.savedCrawls,
-    queryFn: () => getCrawlResultsData(),
+    queryKey: queryKeys.stores,
+    queryFn: () => getStores(),
     refetchInterval: 30_000,
   });
   return {
@@ -97,14 +116,14 @@ export function useSavedCrawls() {
 }
 
 /**
- * Lightweight crawl summaries (`?meta=1`) — origins, platform, product count
- * and timestamps only, no product catalogues. Ideal for store pickers and
- * competitor lists: a full crawl dump of 45k products (~10 MB) becomes ~10 KB.
+ * Every crawled store WITH its snapshot history embedded (metadata only, no
+ * product catalogues) — the /crawls saved-history page. One request serves
+ * the whole list (D1).
  */
-export function useSavedCrawlMetas() {
+export function useStoresWithSnapshots() {
   const query = useQuery({
-    queryKey: queryKeys.savedCrawlMetas,
-    queryFn: () => getCrawlResultsData<SavedCrawlMeta>({ meta: true }),
+    queryKey: queryKeys.storesWithSnapshots,
+    queryFn: () => getStores({ withSnapshots: true }),
     refetchInterval: 30_000,
   });
   return {

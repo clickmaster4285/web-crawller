@@ -37,7 +37,9 @@ import { analyzeHomepage } from "./homepage.ts";
 import { detectPlatform } from "./platform.ts";
 import {
   fetchSitemapCandidate,
+  robotsSitemaps,
   sitemapCandidates,
+  sitemapMatchesLocale,
   type DiscoveredUrl,
   type SitemapCandidateResult,
 } from "./sitemap.ts";
@@ -216,13 +218,13 @@ export async function discoverProducts(
           message: `The homepage links to ${home.productLinks} product pages — this is a store.`,
         });
       } else if (home.externalStoreLinks.length > 0) {
+        const shop = home.externalStoreLinks[0];
         findings.push({
           level: "info",
-          message:
-            "This looks like a corporate site. It links out to a store — crawl that domain instead.",
+          message: `This looks like a corporate site — it publishes no prices here. It links out to ${shop.host}; crawl that domain instead, the prices live there.`,
           action: {
-            label: `Crawl ${home.externalStoreLinks[0].host}`,
-            url: home.externalStoreLinks[0].url,
+            label: `Crawl ${shop.host}`,
+            url: shop.url,
           },
         });
         log.push(
@@ -269,11 +271,33 @@ export async function discoverProducts(
   }
 
   // ── 2. Sitemap candidates — robots.txt first, then /sitemap.xml, /sitemap_index.xml ──
-  const candidates = sitemapCandidates(config.origin, robots?.body);
+  // `config.locale` (optional region token, P4 — GCC stores publish a
+  // separate sitemap set per country: activefitness `/om/sitemaps/…`,
+  // lifetimefitness `sitemap_om.xml`) filters robots.txt-declared candidates
+  // to the matching region, so a crawl walks ONE country's catalogue (~4×
+  // less work, one currency) instead of every region. The default
+  // `/sitemap.xml` + `/sitemap_index.xml` candidates are never filtered.
+  const locale = config.locale?.trim() || undefined;
+  const candidates = sitemapCandidates(config.origin, robots?.body, locale);
   const candidateResults: SitemapCandidateResult[] = [];
   let sitemapAdded = 0;
   let lastmodCount = 0;
   let sitemapError: string | undefined;
+  // Whether the locale filter dropped ANY robots-declared sitemap (and how
+  // many matched) — surfaced as a finding so a 0-product run explains
+  // itself instead of reading as a broken crawl.
+  let localeMatchedRobots = true;
+  if (locale) {
+    const robotsUrls = robotsSitemaps(robots?.body);
+    const matched = robotsUrls.filter((u) => sitemapMatchesLocale(u, locale));
+    localeMatchedRobots = matched.length > 0;
+    const dropped = robotsUrls.length - matched.length;
+    if (dropped > 0) {
+      log.push(
+        `Locale filter: keeping only "${locale}" sitemaps — ${dropped} other-region sitemap(s) skipped.`,
+      );
+    }
+  }
   // Total URLs stripped by the junk-segment filter across all sitemap
   // candidates — surfaced as a finding after the loop (the live log line is
   // per-candidate and scrolls by; the finding is the persistent, prominent
@@ -282,7 +306,12 @@ export async function discoverProducts(
 
   for (const candidate of candidates) {
     await waitForControl(config.control);
-    const result = await fetchSitemapCandidate(candidate, opts, config.control);
+    const result = await fetchSitemapCandidate(
+      candidate,
+      opts,
+      config.control,
+      locale,
+    );
     candidateResults.push(result);
     if (result.status === "html") {
       log.push(
@@ -362,6 +391,16 @@ export async function discoverProducts(
     ...(sitemapError ? { error: sitemapError } : {}),
     candidates: candidateResults,
   };
+  // The locale filter matched NONE of the store's robots-declared sitemaps
+  // (it may not publish per-country sitemaps, or uses a token this region
+  // isn't). The default candidates still run — but a 0-product result then
+  // means the filter is the likely reason, so say so up front.
+  if (locale && !localeMatchedRobots) {
+    findings.push({
+      level: "warning",
+      message: `Region "${locale}" matched none of this store's sitemaps — crawling the default locations instead (which may redirect or list every region).`,
+    });
+  }
   if (candidateResults.length === 0) {
     log.push("No sitemap locations to try.");
   } else if (sitemapAdded === 0) {

@@ -10,7 +10,8 @@
  * page's "Run analysis" button calls this, renders the profile, and offers
  * to pre-fill the crawl config from the recommendation.
  *
- * The analyzer lives in the frontend package and is loaded here the same way
+ * The analyzer lives in the backend package (backend/crawler/analyze.ts, moved
+ * from the frontend on Aug 10) and is loaded here the same way
  * worker.mjs loads the crawler engine: Node 24 strips TS types on import, so
  * the `.ts` source runs directly. No build step.
  */
@@ -18,15 +19,13 @@ const { pathToFileURL } = require('url');
 const path = require('path');
 
 // The analyzer module path — resolves relative to this file (backend/
-// controllers/), so the sibling frontend package is TWO levels up.
+// controllers/) to the crawler folder in the same package.
 const ANALYZE_MODULE = path.join(
-  __dirname,
-  '../../frontend/src/lib/crawler/analyze.ts'
+  __dirname,      '../crawler/analyze.ts'
 );
 
 let analyzeModulePromise = null;
-/** Loads the type-stripped analyzer once per process (cached like the
- *  backend's other frontend-module imports). */
+/** Loads the type-stripped analyzer once per process (cached). */
 function getAnalyzeModule() {
   analyzeModulePromise ??= import(pathToFileURL(ANALYZE_MODULE).href);
   return analyzeModulePromise;
@@ -42,9 +41,12 @@ function getAnalyzeModule() {
  *   - jobController's analyze-first crawls (the pre-crawl probes that pick
  *     the crawl strategy before a manual deep crawl is enqueued)
  */
-async function runAnalyzer(origin, proxy) {
+async function runAnalyzer(origin, proxy, userAgent) {
   const { analyzeWebsite: run } = await getAnalyzeModule();
-  return run(origin, proxy ? { proxy } : {});
+  const options = {};
+  if (proxy) options.proxy = proxy;
+  if (userAgent === 'browser') options.userAgent = 'browser';
+  return run(origin, options);
 }
 
 /**
@@ -68,7 +70,11 @@ const analyzeWebsite = async (req, res) => {
         .status(400)
         .json({ success: false, message: 'Proxy must be a valid http(s) URL' });
     }
-    const profile = await runAnalyzer(origin, proxy || undefined);
+    // Per-store User-Agent (only the 'browser' sentinel today): probe with the
+    // same UA a crawl would use — a WAF that 403s ParityBot (dawlance) must
+    // not hide its real answers from the analysis.
+    const userAgent = req.body?.userAgent === 'browser' ? 'browser' : null;
+    const profile = await runAnalyzer(origin, proxy || undefined, userAgent);
     res.json({ success: true, data: profile });
   } catch (error) {
     console.error('Analyze error:', error);

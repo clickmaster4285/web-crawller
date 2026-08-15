@@ -1,29 +1,29 @@
 /**
- * saveCrawl — the shared post-crawl persistence pipeline (Phase 2).
+ * saveCrawl — the shared post-crawl persistence pipeline (Phase 2, D1
+ * endgame).
  *
  * Called by the standalone crawl worker (which saves directly, no HTTP
  * round-trip — the old `POST /api/data/crawl-results` entry point was
  * removed):
  *
- *   1. Legacy `CrawlResult` doc (snapshot history, capped — D1 compat layer)
- *   2. Normalized model via `syncNewModel` (Product / Snapshot / ProductEvent)
- *   3. `Store` upsert (platform profile + lastCrawl + productCount) — the
+ *   1. Normalized model via `syncNewModel` (Product / Snapshot / ProductEvent)
+ *   2. `Store` upsert (platform profile + lastCrawl + productCount) — the
  *      scheduler's input (decision D4)
+ *   3. Phase 3: persisted `ProductMatch` reconciliation
  *
- * A dual-write failure is surfaced, never fatal to the crawl; the legacy doc
- * is saved before anything else can fail.
+ * The legacy `CrawlResult` dual-write was REMOVED (Aug 2026, D1): every read
+ * path now serves the normalized collections, and the legacy model/controller
+ * were deleted — only the frozen `crawlresults` collection's data remains
+ * (teardown code, keep data). A dual-write failure is surfaced, never fatal
+ * to the crawl.
  */
-const CrawlResult = require('../models/CrawlResult');
 const Store = require('../models/Store');
 const { syncNewModel } = require('./crawlSync');
 const { reconcileForOrigin } = require('./matchService');
 const { normalizeHost } = require('../utils/identity');
 
-/** Legacy CrawlResult history cap (the normalized Snapshot caps at 10, D3). */
-const SNAPSHOT_LIMIT = 20;
-
 /**
- * Saves a finished crawl through all three layers.
+ * Saves a finished crawl through the normalized pipeline.
  * @param {object} params
  * @param {string} params.origin
  * @param {string[]} [params.collections]
@@ -31,13 +31,16 @@ const SNAPSHOT_LIMIT = 20;
  * @param {Array} [params.products]
  * @param {Array} [params.failures]
  * @param {object|null} [params.discovery]
- * @param {boolean} [params.storeSnapshots] Legacy replace vs history mode.
+ * @param {boolean} [params.storeSnapshots] Legacy replace vs history mode
+ *        (accepted for compatibility; the normalized model always appends
+ *        history capped at 10 per origin).
  * @param {boolean} [params.fullCrawl] True when products are the full catalogue.
  * @param {'shallow'|'deep'} [params.type] Job type (recorded on Store.lastCrawl).
  * @param {Map} [params.httpStateByUrl] Phase B resume state captured by the
  *        engine (URL → {etag, lastmod}); persisted onto Product.httpState so
  *        the next worker (any machine) can skip unchanged products.
- * @returns {Promise<{doc: object, dualWrite: object, store: object|null}>}
+ * @returns {Promise<{doc: null, dualWrite: object, store: object|null}>
+ *           matching: object}>}
  */
 async function saveFinishedCrawl({
   origin,
@@ -46,17 +49,12 @@ async function saveFinishedCrawl({
   products,
   failures,
   discovery,
-  storeSnapshots,
   fullCrawl,
   type = 'deep',
   httpStateByUrl
 }) {
   const payload = {
     origin,
-    // Recorded on the legacy snapshot too so the /crawls history can badge
-    // which runs were sitemap-only checks (default 'deep' covers HTTP posts
-    // and pre-field docs).
-    type,
     collections: Array.isArray(collections) ? collections : [],
     stats: stats || {},
     products: Array.isArray(products) ? products : [],
@@ -64,36 +62,7 @@ async function saveFinishedCrawl({
     discovery: discovery || null
   };
 
-  // 1. Legacy CrawlResult doc — the D1 compat layer (reads keep working).
-  let doc;
-  if (storeSnapshots === false) {
-    // Replace mode — keep only the latest snapshot per origin. The metadata
-    // check guards a rare race: without a unique index, two concurrent
-    // replace-upserts for the same origin can both *insert*; running
-    // deleteMany unconditionally would then let each delete the other's doc.
-    const result = await CrawlResult.findOneAndUpdate(
-      { origin },
-      payload,
-      { upsert: true, new: true, runValidators: true, includeResultMetadata: true }
-    );
-    doc = result.value;
-    if (result.lastErrorObject?.updatedExisting) {
-      await CrawlResult.deleteMany({ origin, _id: { $ne: doc._id } });
-    }
-  } else {
-    // History mode — append a snapshot, then cap history per origin.
-    doc = await CrawlResult.create(payload);
-    const keep = await CrawlResult.find({ origin })
-      .sort({ createdAt: -1 })
-      .limit(SNAPSHOT_LIMIT)
-      .select('_id');
-    await CrawlResult.deleteMany({
-      origin,
-      _id: { $nin: keep.map((d) => d._id) }
-    });
-  }
-
-  // 2. Normalized dual-write — surfaced, never fatal.
+  // 1. Normalized dual-write — surfaced, never fatal.
   let dualWrite;
   try {
     dualWrite = await syncNewModel({
@@ -182,7 +151,9 @@ async function saveFinishedCrawl({
     matching = { ok: true, skipped: true, reason: 'no-changes' };
   }
 
-  return { doc, dualWrite, store, matching };
+  // The legacy CrawlResult doc is gone (D1 teardown) — `doc` is kept as null
+  // for callers that historically read it.
+  return { doc: null, dualWrite, store, matching };
 }
 
-module.exports = { saveFinishedCrawl, SNAPSHOT_LIMIT };
+module.exports = { saveFinishedCrawl };

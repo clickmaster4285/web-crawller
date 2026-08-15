@@ -86,17 +86,6 @@ app.use(errorHandler);
 async function startServer() {
   try {
     await connectDatabase();
-    // The CrawlResult model moved from one-doc-per-origin (unique origin
-    // index) to snapshot history (multiple docs per origin). Drop the legacy
-    // unique index on boot so history inserts don't collide. Best-effort.
-    try {
-      await mongoose.connection
-        .collection('crawlresults')
-        .dropIndex('origin_1');
-      console.log('🧹 Dropped legacy crawlresults unique index');
-    } catch {
-      // Index already absent — nothing to do.
-    }
     await ensureDemoUser();
     app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);

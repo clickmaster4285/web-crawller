@@ -71,6 +71,17 @@ function normalizeCrawlInput(body = {}) {
     body.productUrlPattern != null && String(body.productUrlPattern).trim()
       ? String(body.productUrlPattern).trim().slice(0, 200)
       : null;
+  // Optional region/locale token (trimmed, lowercased, capped) — filters
+  // sitemap candidates to one country for multi-country GCC stores.
+  const locale =
+    body.locale != null && String(body.locale).trim()
+      ? String(body.locale).trim().toLowerCase().slice(0, 10)
+      : null;
+  // Per-store User-Agent: only the 'browser' sentinel is accepted today (the
+  // engine resolves it to a Chrome UA — for WAF stores that 403 ParityBot:
+  // dawlance/prosportsae/athletix). Any other value is ignored → the default
+  // ParityBot UA stays.
+  const userAgent = body.userAgent === 'browser' ? 'browser' : null;
   // Job type: 'shallow' (sitemap-only check) or 'deep' (full crawl) — anything
   // that isn't explicitly shallow is a deep crawl (matches CrawlJob's default).
   const type = body.type === 'shallow' ? 'shallow' : 'deep';
@@ -92,6 +103,8 @@ function normalizeCrawlInput(body = {}) {
     proxy: proxy.length > 0,
     proxyUrl: proxy || null,
     productUrlPattern,
+    locale,
+    userAgent,
     // A shallow check fetches ONLY new products — a partial catalogue must
     // never count as authoritative, or the ingest removal diff would wipe the
     // rest of the store (the worker's removal guard reads this flag).
@@ -125,7 +138,10 @@ async function analyzeBeforeCrawl(params) {
   try {
     const profile = await runAnalyzer(
       params.origin,
-      params.proxyUrl ?? undefined
+      params.proxyUrl ?? undefined,
+      // Probe with the same UA the crawl will use — a WAF that 403s ParityBot
+      // must not hide its real answers from the pre-crawl analysis.
+      params.userAgent ?? undefined
     );
     const applied = [];
     let renderingForced = false;
@@ -242,7 +258,9 @@ function publicSchedule(store) {
       storeSnapshots: p.storeSnapshots !== false,
       useBrowser: !!p.useBrowser,
       proxy: !!p.proxy,
-      productUrlPattern: p.productUrlPattern ?? null
+      productUrlPattern: p.productUrlPattern ?? null,
+      locale: p.locale ?? null,
+      userAgent: p.userAgent ?? null
     },
     lastRunAt,
     nextRunAt: freqMs ? (lastRunAt ?? now) + freqMs : null,
@@ -299,7 +317,12 @@ const upsertSchedule = async (req, res) => {
                 req.body.productUrlPattern != null &&
                 String(req.body.productUrlPattern).trim()
                   ? String(req.body.productUrlPattern).trim().slice(0, 200)
-                  : null
+                  : null,
+              locale:
+                req.body.locale != null && String(req.body.locale).trim()
+                  ? String(req.body.locale).trim().toLowerCase().slice(0, 10)
+                  : null,
+              userAgent: req.body.userAgent === 'browser' ? 'browser' : null
             }
           }
         },

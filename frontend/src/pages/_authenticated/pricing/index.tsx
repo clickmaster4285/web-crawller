@@ -10,10 +10,9 @@ import {
   ErrorState,
   NoRealDataState,
 } from "@/components/common/states";
-import { usePricing, useSavedCrawls } from "@/hooks/useData";
-import type { SavedCrawl } from "@/api";
+import { usePricing } from "@/hooks/useData";
+import type { PriceMovement } from "@/api";
 import { gbp } from "@/utils/formatCurrency";
-import { normalizeOrigin } from "@/utils/crawls";
 import { formatPrice } from "@/utils/format";
 import { cn } from "@/lib/utils";
 
@@ -37,60 +36,16 @@ export const Route = createFileRoute("/_authenticated/pricing/")({
   component: PricingPage,
 });
 
-/** A product whose price moved between the first and latest snapshot of a store. */
-interface PriceMover {
-  origin: string;
-  name: string;
-  url: string;
-  first: number;
-  latest: number;
-  change: number;
-}
-
 function PricingPage() {
   const { data, isLoading, isError } = usePricing();
-  const saved = useSavedCrawls();
 
-  // Biggest price movements — computed from real snapshots: for each store
-  // with 2+ crawls, products whose price differs between the first and latest
-  // snapshot, sorted by absolute change.
-  const movers = useMemo<PriceMover[]>(() => {
-    const byOrigin = new Map<string, SavedCrawl[]>();
-    for (const c of saved.data?.data ?? []) {
-      const key = normalizeOrigin(c.origin);
-      const arr = byOrigin.get(key) ?? [];
-      arr.push(c);
-      byOrigin.set(key, arr);
-    }
-    const out: PriceMover[] = [];
-    for (const [origin, snaps] of byOrigin) {
-      if (snaps.length < 2) continue;
-      const sorted = [...snaps].sort(
-        (a, b) =>
-          new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime(),
-      );
-      const first = sorted[0];
-      const latest = sorted[sorted.length - 1];
-      const firstByUrl = new Map(first.products.map((p) => [p.url, p.price]));
-      const latestByUrl = new Map(latest.products.map((p) => [p.url, p.price]));
-      for (const [url, price] of latestByUrl) {
-        const firstPrice = firstByUrl.get(url);
-        if (firstPrice == null || price == null) continue;
-        const change = price - firstPrice;
-        if (Math.abs(change) < 0.01) continue;
-        const name = latest.products.find((p) => p.url === url)?.name ?? url;
-        out.push({
-          origin,
-          name,
-          url,
-          first: firstPrice,
-          latest: price,
-          change,
-        });
-      }
-    }
-    return out.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
-  }, [saved.data]);
+  // Biggest price movements — derived server-side from the ProductEvent
+  // change log (D1: snapshots no longer carry product arrays to diff in the
+  // browser).
+  const movers: PriceMovement[] = useMemo(
+    () => data?.priceMovements ?? [],
+    [data],
+  );
 
   if (isError) return <ErrorState />;
   if (isLoading || !data) return <LoadingState />;
