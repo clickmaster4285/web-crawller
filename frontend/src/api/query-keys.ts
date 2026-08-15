@@ -12,11 +12,14 @@ export const queryKeys = {
   pricing: ["pricing"] as const,
   catalogue: ["catalogue"] as const,
   insights: ["insights"] as const,
+  // Crawl-job health snapshot (GET /api/data/metrics) — polled by the
+  // /metrics dashboard so queue depth and worker liveness stay live.
+  metrics: ["metrics"] as const,
   alerts: ["alerts"] as const,
   reports: ["reports"] as const,
   myStore: ["my-store"] as const,
-  savedCrawls: ["saved-crawls"] as const,
-  savedCrawlMetas: ["saved-crawls-meta"] as const,
+  // The /crawls history page — every store with its embedded snapshots.
+  storesWithSnapshots: ["stores-with-snapshots"] as const,
   // Server-side persisted matches read by the /competitors ComparePanel
   // (GET /api/match). Keyed queries nest under this prefix so invalidating
   // it refreshes every competitor's comparison at once.
@@ -39,8 +42,7 @@ export const MATCHER_STALE_TIME = 60_000;
 
 /** Every query derived from saved crawl snapshots. */
 const crawlDataKeys = [
-  queryKeys.savedCrawls,
-  queryKeys.savedCrawlMetas,
+  queryKeys.storesWithSnapshots,
   queryKeys.analytics,
   queryKeys.competitors,
   queryKeys.matchedProducts,

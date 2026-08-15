@@ -55,7 +55,14 @@ const crawlParamsSchema = new mongoose.Schema(
     // Optional product-URL filter regex — MUST live in the schema or Mongoose
     // strict mode silently drops it from scheduled-crawl params (the UA
     // lesson from Aug 2026: same trap, same fix).
-    productUrlPattern: { type: String, default: null }
+    productUrlPattern: { type: String, default: null },
+    // Optional region/locale token (sitemap filter for multi-country GCC
+    // stores) — same MUST-live-in-the-schema rule as productUrlPattern.
+    locale: { type: String, default: null },
+    // Per-store User-Agent: "browser" sentinel (engine resolves to a Chrome
+    // UA for WAF stores that 403 ParityBot) or a raw UA string; null = the
+    // default ParityBot UA. MUST live in the schema (same trap, same fix).
+    userAgent: { type: String, default: null }
   },
   { _id: false }
 );

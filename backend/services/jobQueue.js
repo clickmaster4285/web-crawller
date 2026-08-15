@@ -65,6 +65,8 @@ async function enqueueJob({
       proxyUrl: null,
       fullCrawl: type === 'deep',
       productUrlPattern: null,
+      locale: null,
+      userAgent: null,
       ...params
     },
     analysis
@@ -204,11 +206,25 @@ async function heartbeat(jobId, workerId, patch = {}) {
   }
   if (patch.discovery != null) set['progress.discovery'] = patch.discovery;
   if (patch.requests != null) set['progress.requests'] = patch.requests;
-  await CrawlJob.updateOne({ _id: jobId, workerId }, { $set: set });
+  // P4: engine version stamped once, on the worker's first beat after claim.
+  if (patch.crawlerVersion != null) set.crawlerVersion = patch.crawlerVersion;
+  const ops = [{ updateOne: { filter: { _id: jobId, workerId }, update: { $set: set } } }];
+  // Run-log append (Phase 5 observability): `patch.log` is an array of NEW
+  // {at, level, message} lines since the last beat — appended atomically and
+  // capped so a long crawl can't balloon the job doc. $push+$slice in one op
+  // with the $set above (single write, no race between counters and log).
+  const push = logPush(patch.log);
+  if (push) ops[0].updateOne.update.$push = push;
+  await CrawlJob.bulkWrite(ops);
 }
 
-/** Marks a job done with the sanitized crawl result. */
-async function completeJob(jobId, workerId, { result, persisted = false, progress = {} }) {
+/**
+ * Marks a job done with the sanitized crawl result. `log` (optional) is the
+ * worker's remaining buffered run-log lines — flushed atomically with the
+ * status flip so the final lifecycle line survives the heartbeat timers
+ * being torn down.
+ */
+async function completeJob(jobId, workerId, { result, persisted = false, progress = {}, log }) {
   const set = {
     status: 'done',
     finishedAt: new Date(),
@@ -224,48 +240,64 @@ async function completeJob(jobId, workerId, { result, persisted = false, progres
   if (progress.fetchStartedAt != null) {
     set['progress.fetchStartedAt'] = progress.fetchStartedAt;
   }
-  await CrawlJob.updateOne({ _id: jobId, workerId }, { $set: set });
+  const update = { $set: set };
+  const push = logPush(log);
+  if (push) update.$push = push;
+  await CrawlJob.updateOne({ _id: jobId, workerId }, update);
 }
 
 /**
  * Marks a job failed: retries with exponential backoff until maxAttempts,
- * then goes dead. Returns the new status.
+ * then goes dead. Returns the new status. `log` (optional) is the worker's
+ * buffered run-log lines, flushed atomically with the failure write.
  */
-async function failJob(jobId, workerId, error) {
+async function failJob(jobId, workerId, error, log) {
   const job = await CrawlJob.findOne({ _id: jobId }).lean();
   if (!job || job.workerId !== workerId) return 'stale';
   const attempts = (job.attempts ?? 0) + 1;
   if (attempts >= (job.maxAttempts ?? MAX_ATTEMPTS)) {
-    await CrawlJob.updateOne(
-      { _id: jobId, workerId },
-      {
-        $set: {
-          status: 'dead',
-          error: String(error),
-          finishedAt: new Date()
-        },
-        $unset: { heartbeatAt: 1 }
-      }
-    );
+    const update = {
+      $set: {
+        status: 'dead',
+        error: String(error),
+        finishedAt: new Date()
+      },
+      $unset: { heartbeatAt: 1 }
+    };
+    const push = logPush(log);
+    if (push) update.$push = push;
+    await CrawlJob.updateOne({ _id: jobId, workerId }, update);
     console.error(`💥 CrawlJob ${jobId} failed permanently: ${error}`);
     return 'dead';
   }
-  await CrawlJob.updateOne(
-    { _id: jobId, workerId },
-    {
-      $set: {
-        status: 'retrying',
-        attempts,
-        error: String(error),
-        scheduledAt: new Date(Date.now() + backoffFor(attempts))
-      },
-      $unset: { heartbeatAt: 1 }
-    }
-  );
+  const update = {
+    $set: {
+      status: 'retrying',
+      attempts,
+      error: String(error),
+      scheduledAt: new Date(Date.now() + backoffFor(attempts))
+    },
+    $unset: { heartbeatAt: 1 }
+  };
+  const push = logPush(log);
+  if (push) update.$push = push;
+  await CrawlJob.updateOne({ _id: jobId, workerId }, update);
   console.error(
     `💥 CrawlJob ${jobId} failed (attempt ${attempts}/${job.maxAttempts}) — retry in ${backoffFor(attempts) / 1000}s: ${error}`
   );
   return 'retrying';
+}
+
+/**
+ * Builds the `$push` op for a run-log append (Phase 5 observability) — the
+ * same $push+$slice used by `heartbeat`, shared by the terminal writes so a
+ * worker's final lifecycle lines flush atomically with the status flip.
+ * Returns null when there's nothing to append.
+ */
+function logPush(log) {
+  return Array.isArray(log) && log.length > 0
+    ? { 'progress.log': { $each: log, $slice: -CrawlJob.LOG_LIMIT } }
+    : null;
 }
 
 /**
@@ -307,6 +339,12 @@ function publicJob(job, options = {}) {
     origin: job.origin,
     /** Worker that claimed/owns the job (null while queued — debugging). */
     workerId: job.workerId ?? null,
+    /**
+     * P4: deployed engine version that ran this crawl (package version + git
+     * SHA at worker boot) — null while queued. Restarting the backend is how
+     * new engine code deploys.
+     */
+    crawlerVersion: job.crawlerVersion ?? null,
     /** Last worker heartbeat (ms) — null while queued/terminal. */
     heartbeatAt,
     /**
@@ -332,7 +370,11 @@ function publicJob(job, options = {}) {
       useBrowser: !!p.useBrowser,
       // proxy URL never leaves the server — boolean only.
       proxy: !!p.proxy,
-      productUrlPattern: p.productUrlPattern ?? null
+      productUrlPattern: p.productUrlPattern ?? null,
+      locale: p.locale ?? null,
+      // 'browser' (engine resolves to a Chrome UA) or a raw UA string; null =
+      // default ParityBot UA.
+      userAgent: p.userAgent ?? null
     },
     total: pr.total ?? 0,
     processed: pr.processed ?? 0,
@@ -340,6 +382,15 @@ function publicJob(job, options = {}) {
     fetchStartedAt:
       pr.fetchStartedAt instanceof Date ? pr.fetchStartedAt.getTime() : pr.fetchStartedAt ?? null,
     discovery: pr.discovery ?? null,
+    // Structured run log — newest LAST, ms timestamps (the UI appends live
+    // lines as they arrive). Capped server-side at CrawlJob.LOG_LIMIT.
+    log: Array.isArray(pr.log)
+      ? pr.log.map((line) => ({
+          at: line.at instanceof Date ? line.at.getTime() : line.at ?? Date.now(),
+          level: line.level ?? 'info',
+          message: line.message ?? ''
+        }))
+      : [],
     finishedAt: job.finishedAt ? job.finishedAt.getTime() : null,
     // Pre-crawl analysis snapshot (P2 Phase 2) — the strategy the job was
     // started with, already sanitized at enqueue (no proxy URL in it).
@@ -385,15 +436,19 @@ async function setJobControl(jobId, action) {
   return job;
 }
 
-/** Marks a claimed job cancelled (called by the worker after a user cancel). */
-async function cancelJob(jobId, workerId) {
-  await CrawlJob.updateOne(
-    { _id: jobId, workerId },
-    {
-      $set: { status: 'cancelled', finishedAt: new Date() },
-      $unset: { control: 1, heartbeatAt: 1 }
-    }
-  );
+/**
+ * Marks a claimed job cancelled (called by the worker after a user cancel).
+ * `log` (optional) is the worker's buffered run-log lines, flushed with the
+ * status flip so the cancellation reason survives.
+ */
+async function cancelJob(jobId, workerId, log) {
+  const update = {
+    $set: { status: 'cancelled', finishedAt: new Date() },
+    $unset: { control: 1, heartbeatAt: 1 }
+  };
+  const push = logPush(log);
+  if (push) update.$push = push;
+  await CrawlJob.updateOne({ _id: jobId, workerId }, update);
 }
 
 /**

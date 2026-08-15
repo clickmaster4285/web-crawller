@@ -5,9 +5,26 @@
  *   - prefixes `/api` (dev-proxied to the backend at :3000)
  *   - attaches the JWT from localStorage when present
  *   - throws on non-2xx with the backend's `message` when available
+ *
+ * Phase 5 auth: the token is mirrored into a `parity.token` cookie (same
+ * value, non-httpOnly, `path=/` + SameSite=Lax). The browser-side http client
+ * keeps reading localStorage, but TanStack Start SERVER functions run on the
+ * Nitro server and fetch the backend directly — they can only see cookies, so
+ * `getCookie("parity.token")` is how they recover the JWT to forward.
  */
 
 const TOKEN_KEY = "parity.token";
+const TOKEN_COOKIE = "parity.token";
+
+function setTokenCookie(token: string) {
+  if (typeof document === "undefined") return;
+  document.cookie = `${TOKEN_COOKIE}=${encodeURIComponent(token)}; path=/; SameSite=Lax`;
+}
+
+function clearTokenCookie() {
+  if (typeof document === "undefined") return;
+  document.cookie = `${TOKEN_COOKIE}=; path=/; SameSite=Lax; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+}
 
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -16,10 +33,12 @@ export function getToken(): string | null {
 
 export function setToken(token: string) {
   window.localStorage.setItem(TOKEN_KEY, token);
+  setTokenCookie(token);
 }
 
 export function clearToken() {
   window.localStorage.removeItem(TOKEN_KEY);
+  clearTokenCookie();
 }
 
 export class ApiError extends Error {

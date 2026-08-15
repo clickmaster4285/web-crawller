@@ -14,7 +14,7 @@ Verification loop for every change: `npx tsc --noEmit` → `npm run lint` → `n
 
 ## ✅ What we've done so far
 
-### Crawler engine (`frontend/src/lib/crawler/`)
+### Crawler engine (`backend/crawler/` — moved from `frontend/src/lib/crawler/` Aug 10, P6)
 - [x] Generic engine refactor — `core/` (http, queue, politeness, checkpoint),
       `discover/` (sitemap + html-crawl + platform), `extract/` (jsonld,
       microdata, opengraph, html-heuristics, mapper), `adapters/` (shopify).

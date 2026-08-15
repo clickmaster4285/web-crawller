@@ -1,4 +1,4 @@
-import type { SavedCrawl } from "@/api";
+import type { CrawlDiscovery } from "@/api";
 
 /**
  * Ensures an origin input has an http(s) scheme (defaults to https) and is
@@ -54,38 +54,13 @@ export interface CrawlDiff<T extends DiffableProduct> {
 }
 
 /**
- * Diffs a crawl's products against the previous snapshot of the same origin
- * (matched by URL; a price mismatch counts as a change). Returns null when
- * there is no previous snapshot to compare against.
+ * Crawl kind of a normalized snapshot: "shallow" (sitemap-only check —
+ * `full` is false, the run fetched only new pages) or "deep" (full
+ * catalogue crawl — `full` is true). The legacy `type` field was replaced
+ * by `Snapshot.full` on the D1 read path.
  */
-export function computeCrawlDiff<T extends DiffableProduct>(
-  current: T[],
-  previous: T[] | undefined,
-): CrawlDiff<T> | null {
-  if (!previous || previous.length === 0) return null;
-  const prevByUrl = new Map(previous.map((p) => [p.url, p]));
-  const currentUrls = new Set(current.map((p) => p.url));
-  let priceChangedCount = 0;
-  for (const p of current) {
-    const prev = prevByUrl.get(p.url);
-    if (prev && prev.price != null && prev.price !== p.price) {
-      priceChangedCount++;
-    }
-  }
-  return {
-    newProducts: current.filter((p) => !prevByUrl.has(p.url)),
-    removedProducts: previous.filter((p) => !currentUrls.has(p.url)),
-    priceChangedCount,
-  };
-}
-
-/**
- * Crawl kind of a saved crawl: "shallow" = sitemap-only check, "deep" = full
- * catalogue crawl. Snapshots saved before the `type` field existed were all
- * full crawls, so a missing type reads as deep.
- */
-export function crawlType(crawl: { type?: string }): "shallow" | "deep" {
-  return (crawl.type ?? "deep") === "shallow" ? "shallow" : "deep";
+export function snapshotType(snapshot: { full?: boolean }): "shallow" | "deep" {
+  return snapshot.full === false ? "shallow" : "deep";
 }
 
 /** Max-pages select modes: presets, a free "Custom…" input, or unlimited. */
@@ -119,10 +94,8 @@ export function productUrlPattern(url: string): string {
   }
 }
 
-/** robots.txt presence + declared crawl-delay (from a saved crawl's discovery). */
-export function robotsText(
-  r: NonNullable<SavedCrawl["discovery"]>["robots"] | undefined,
-): string {
+/** robots.txt presence + declared crawl-delay (from a snapshot's discovery). */
+export function robotsText(r: CrawlDiscovery["robots"] | undefined): string {
   if (!r) return "—";
   switch (r.status) {
     case "found":

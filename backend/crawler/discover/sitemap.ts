@@ -82,7 +82,25 @@ export function robotsSitemaps(
 
 /** Child sitemap names that never contain product pages (skip in index walks). */
 const NON_PRODUCT_SITEMAP_RE =
-  /(image|images|media|attachment|video|news-sitemap|news)/i;
+  /(?:^|[-_.])(?:image|images|media|attachment|video|news)(?:[-_.]|\d|$)/i;
+
+/**
+ * SAP Commerce / Hybris sitemap-index children (dawlance.com.pk): the
+ * product catalogue lives in a `Product-<locale>-<region>-<id>.xml` file
+ * served under `/medias/`, while the `Homepage-` / `Category-` /
+ * `CategoryLanding-` / `Content-` siblings never hold products. Matched on
+ * the basename (see `sitemapBasename`) so the `/medias/` path can't confuse
+ * them — that path is how Hybris serves EVERY sitemap, including products.
+ */
+const HYBRIS_PRODUCT_SITEMAP_RE = /^products?-[a-z]{2,3}-/i;
+const HYBRIS_NON_PRODUCT_SITEMAP_RE =
+  /^(homepages?|category(?:landing)?s?|contents?|blogs?|faqs?|newsletters?|static)-/i;
+
+/** Last path segment (minus the query string) — what identifies a sitemap file. */
+function sitemapBasename(url: string): string {
+  const noQuery = url.split("?")[0] ?? url;
+  return noQuery.slice(noQuery.lastIndexOf("/") + 1);
+}
 
 /**
  * Children of a WordPress core sitemap index that never hold products — the
@@ -93,9 +111,20 @@ const NON_PRODUCT_SITEMAP_RE =
 const WORDPRESS_NON_PRODUCT_CHILD_RE =
   /wp-sitemap-(posts-(?!product-)|taxonomies-|users-|authors-)/i;
 
-/** True when a sitemap URL looks like a non-product sitemap (images, media…). */
+/**
+ * True when a sitemap URL looks like a non-product sitemap (images, media…).
+ *
+ * Tested against the FILENAME only — a `media` (or `image`) PATH segment must
+ * never disqualify a product sitemap: SAP/Hybris stores serve their product
+ * sitemaps under `/medias/Product-en-*.xml`, and the old whole-URL test
+ * silently dropped dawlance.com.pk's entire catalogue as "media" (Aug 2026).
+ */
 export function isNonProductSitemap(url: string): boolean {
-  return NON_PRODUCT_SITEMAP_RE.test(url);
+  const base = sitemapBasename(url);
+  return (
+    NON_PRODUCT_SITEMAP_RE.test(base) ||
+    HYBRIS_NON_PRODUCT_SITEMAP_RE.test(base)
+  );
 }
 
 /**
@@ -106,23 +135,59 @@ export function isNonProductSitemap(url: string): boolean {
  * permalinks that no generic pattern can safely classify).
  */
 export function isProductSitemap(url: string): boolean {
-  return /wp-sitemap-posts-product-|product-sitemap|products?[-_.]sitemap|sitemap[-_.]products?/i.test(
-    url,
+  return (
+    /wp-sitemap-posts-product-|product-sitemap|products?[-_.]sitemap|sitemap[-_.]products?/i.test(
+      url,
+    ) ||
+    // SAP/Hybris: /medias/Product-<locale>-<region>-<id>.xml — recognized so
+    // the walk trusts its entries wholesale (their /en/<cat>/<slug> URLs
+    // would otherwise be dropped by the flat-taxonomy classifier).
+    HYBRIS_PRODUCT_SITEMAP_RE.test(sitemapBasename(url))
   );
+}
+
+/**
+ * True when a sitemap URL belongs to the given region/locale token.
+ * Multi-country GCC stores publish a SEPARATE sitemap set per country
+ * (activefitnessstore: `/om/sitemaps/en/sitemap.xml` … `/bh/…`; lifetime-
+ * fitnessstore: `sitemap_om.xml` … `sitemap_qa.xml`). A URL matches when the
+ * token appears as a path segment (`/om/…`) OR as a filename suffix
+ * (`sitemap_om.xml`) — both encodings seen in the wild. `locale` is
+ * lowercased/trimmed; empty or whitespace matches everything (callers pass
+ * the raw config value).
+ */
+export function sitemapMatchesLocale(url: string, locale: string): boolean {
+  const l = locale.trim().toLowerCase();
+  if (!l) return true;
+  const path = url.toLowerCase();
+  // Path-segment encoding: /om/sitemaps/en/sitemap.xml → segment "om".
+  if (path.split("/").includes(l)) return true;
+  // Filename-suffix encoding: sitemap_om.xml / sitemap-om.xml. A `_`/`-`
+  // before the token (and a `.`/`/`/`-` after) keeps a word like "omni"
+  // from matching the token "om".
+  return new RegExp(`(?:^|[_-])${l}(?:[._-]|$)`, "i").test(path);
 }
 
 /**
  * Ordered sitemap candidates for an origin: robots.txt-declared sitemaps
  * first (deduped), then `/sitemap.xml`, then `/sitemap_index.xml`.
+ *
+ * `locale` (optional region token — see `sitemapMatchesLocale`) filters the
+ * robots.txt-declared candidates to the matching region, so a GCC store's
+ * crawl walks ONE country's sitemaps instead of all of them. The default
+ * candidates (`/sitemap.xml`, `/sitemap_index.xml`) are never filtered — a
+ * single-region store keeps working unchanged.
  */
 export function sitemapCandidates(
   origin: string,
   robotsBody?: string | null,
+  locale?: string,
 ): SitemapCandidate[] {
   const seen = new Set<string>();
   const out: SitemapCandidate[] = [];
   for (const url of robotsSitemaps(robotsBody)) {
     if (!seen.has(url)) {
+      if (locale && !sitemapMatchesLocale(url, locale)) continue;
       seen.add(url);
       out.push({ url, source: "robots.txt" });
     }
@@ -177,6 +242,7 @@ export async function fetchSitemapUrls(
   depth = 0,
   prefetchedXml?: string,
   control?: CrawlControl,
+  locale?: string,
 ): Promise<SitemapFetchResult> {
   const xml = prefetchedXml ?? (await fetchText(sitemapUrl, options));
   const locs = extractLocs(xml);
@@ -188,9 +254,13 @@ export async function fetchSitemapUrls(
     // Children that can actually hold products — skip images/media/news and
     // WordPress core sitemap files for posts, pages, taxonomies, users… so a
     // product crawl isn't bloated with 100s of irrelevant URLs.
+    // `locale` (region token) additionally keeps only the matching region's
+    // children — a GCC index listing om/bh/qa/kw/sa × en/ar walks just one.
     const retained = locs.filter(
       (loc) =>
-        !isNonProductSitemap(loc) && !WORDPRESS_NON_PRODUCT_CHILD_RE.test(loc),
+        !isNonProductSitemap(loc) &&
+        !WORDPRESS_NON_PRODUCT_CHILD_RE.test(loc) &&
+        (!locale || sitemapMatchesLocale(loc, locale)),
     );
     // Fetch index children in parallel (bounded at 6 in flight — the
     // politeness throttle still gates every request, so this stays polite):
@@ -209,6 +279,7 @@ export async function fetchSitemapUrls(
           depth + 1,
           undefined,
           control,
+          locale,
         );
         nested.push(...child.entries);
       },
@@ -247,6 +318,7 @@ export async function fetchSitemapCandidate(
   candidate: SitemapCandidate,
   options: HttpOptions,
   control?: CrawlControl,
+  locale?: string,
 ): Promise<SitemapCandidateResult> {
   const result: SitemapCandidateResult = {
     url: candidate.url,
@@ -270,7 +342,14 @@ export async function fetchSitemapCandidate(
   let all: SitemapFetchResult;
   try {
     // Pass the body we already fetched — no second request for the candidate.
-    all = await fetchSitemapUrls(candidate.url, options, 0, xml, control);
+    all = await fetchSitemapUrls(
+      candidate.url,
+      options,
+      0,
+      xml,
+      control,
+      locale,
+    );
   } catch (error) {
     result.status = "error";
     result.error = String(error);

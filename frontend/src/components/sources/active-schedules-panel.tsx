@@ -1,5 +1,6 @@
 import { SectionTitle } from "@/components/cards/stat-card";
 import { Button } from "@/components/ui/button";
+import { CardList } from "@/components/ui/card";
 import type { CrawlFrequency, CrawlSchedule } from "@/lib/crawl";
 
 function frequencyLabel(frequency: CrawlFrequency): string {
@@ -47,7 +48,7 @@ export function ActiveSchedulesPanel({
       {schedules.length > 0 ? (
         <section>
           <SectionTitle>Active schedules</SectionTitle>
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {schedules.map((s) => (
               <li
                 key={s.origin}
@@ -75,7 +76,7 @@ export function ActiveSchedulesPanel({
                 </Button>
               </li>
             ))}
-          </ul>
+          </CardList>
         </section>
       ) : null}
     </>

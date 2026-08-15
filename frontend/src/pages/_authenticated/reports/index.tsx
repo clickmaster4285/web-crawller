@@ -4,6 +4,7 @@ import { FileSpreadsheet, FileText, FileDown } from "lucide-react";
 import { PageHeader } from "@/components/layout/app-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -83,7 +84,7 @@ function ReportsPage() {
       />
 
       <div className="grid gap-8 px-6 py-8 lg:grid-cols-3">
-        <div className="border border-border bg-card lg:col-span-2">
+        <Card className="lg:col-span-2">
           <Table>
             <TableHeader>
               <TableRow>
@@ -115,9 +116,9 @@ function ReportsPage() {
               ))}
             </TableBody>
           </Table>
-        </div>
+        </Card>
 
-        <div className="h-fit border border-border bg-card p-5">
+        <Card className="h-fit p-5">
           <h2 className="text-lg">Every report includes</h2>
           <ul className="mt-4 space-y-2.5">
             {contents.map((c) => (
@@ -127,7 +128,7 @@ function ReportsPage() {
               </li>
             ))}
           </ul>
-        </div>
+        </Card>
       </div>
     </div>
   );

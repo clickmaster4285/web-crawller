@@ -41,6 +41,30 @@ const DEFAULT_USER_AGENT =
   "ParityBot/1.0 (+https://parity.app; competitive-intelligence demo crawler)";
 
 /**
+ * Browser-like UA for stores whose WAF rejects the ParityBot UA outright
+ * (dawlance.com.pk 403s EVERY ParityBot request while a Chrome UA gets 200s
+ * from the same IP — verified Aug 2026; same for prosportsae/athletix).
+ * Opt-in per store via the crawl param `userAgent: "browser"`; the sentinel
+ * resolves here so the constant lives in exactly one place (the engine's
+ * HTTP layer). robots.txt parsing still runs for the browser UA token (it's
+ * parsed per `user-agent` directive), so politeness is preserved.
+ */
+export const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+/**
+ * Resolves a crawl's user-agent setting into the header value sent on every
+ * request. The stored setting is either `"browser"` (the sentinel → the
+ * Chrome UA above) or a raw UA string (future custom UAs); null/undefined
+ * keeps the default ParityBot UA.
+ */
+export function resolveUserAgent(
+  userAgent?: string | null,
+): string | undefined {
+  return userAgent === "browser" ? BROWSER_USER_AGENT : userAgent ?? undefined;
+}
+
+/**
  * Tier 2 — shared `ProxyAgent`s, one per proxy URL. Agents are cheap to
  * create but pooling them avoids re-establishing connections on every
  * request. Bounded: a crawl uses one proxy at a time, and a long-lived SSR
@@ -128,6 +152,12 @@ export interface HttpOptions {
    * XML and JSON responses are never re-rendered.
    */
   renderWithBrowser?: (url: string) => Promise<string>;
+  /**
+   * Structured run-log emit (Phase 5 observability) — forwarded from
+   * CrawlConfig.onLog so HTTP-level warnings (rate limits, retries) land on
+   * the job's capped progress.log alongside the engine's lifecycle lines.
+   */
+  onLog?: (level: "info" | "warn" | "error", message: string) => void;
   /**
    * Tier 2 — rotating residential proxy gateway URL (opt-in per crawl). When
    * set, every request goes through undici's `ProxyAgent` (provider-side IP
@@ -250,6 +280,10 @@ export async function fetchWithRetry(
     const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
     if (response.status === 429) {
       options.throttle?.reportRateLimited(retryAfterMs);
+      options.onLog?.(
+        "warn",
+        `HTTP 429 rate-limited for ${url}${retryAfterMs ? ` — Retry-After ${Math.round(retryAfterMs / 1000)}s` : ""}${attempt >= maxRetries ? " — giving up after " + (maxRetries + 1) + " attempts" : ` (attempt ${attempt + 1}/${maxRetries + 1})`}`
+      );
       // With a throttle present it owns the 429 wait — the next loop-top
       // wait() sleeps the elevated, Retry-After-aware delay. Skipping the
       // explicit backoff avoids paying Retry-After twice.
@@ -416,6 +450,7 @@ export function httpOptions(
     maxRetries: config.maxRetries ?? 3,
     userAgent: config.userAgent,
     proxy: config.proxy,
+    onLog: config.onLog,
     ...extra,
   };
 }

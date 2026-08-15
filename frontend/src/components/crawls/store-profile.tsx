@@ -10,21 +10,20 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { SavedCrawl, SavedCrawlProduct } from "@/api";
-import { formatCrawlDate, productUrlPattern, robotsText } from "@/utils/crawls";
+import { Card } from "@/components/ui/card";
+import type { CrawlDiscovery } from "@/api";
+import { formatCrawlDate, robotsText } from "@/utils/crawls";
 import { cn } from "@/lib/utils";
 
 /**
- * Fields the profile card reads from a crawl snapshot — satisfied by both
- * the legacy `SavedCrawl` (full product arrays) and the lightweight
- * `SavedCrawlMeta` (summaries without products), so the read path can feed
- * it directly without shipping catalogues to the browser.
+ * Fields the profile card reads from the newest snapshot — fed by the D1
+ * read path (StoreSnapshot metadata + the store's live product count).
+ * Product arrays are gone; the count and URL pattern arrive as props.
  */
 export interface StoreProfileCrawl {
   updatedAt: string;
   stats: { fetched: number };
-  discovery?: SavedCrawl["discovery"];
-  products?: SavedCrawlProduct[];
+  discovery?: CrawlDiscovery;
 }
 
 /** Fields the quick-check strip reads from the newest shallow snapshot. */
@@ -122,7 +121,7 @@ export function StoreProfile({
   urlPattern?: string | null;
 }) {
   const d = crawl?.discovery;
-  const count = productCount ?? crawl?.products?.length ?? 0;
+  const count = productCount ?? 0;
   const parseRate =
     crawl && crawl.stats.fetched > 0
       ? Math.round((count / crawl.stats.fetched) * 100)
@@ -181,7 +180,7 @@ export function StoreProfile({
   const homepage = d.homepage;
 
   return (
-    <section className="border border-border bg-card">
+    <Card>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
         <div className="flex min-w-0 items-center gap-2.5">
           <Store className="size-4 shrink-0 text-muted-foreground" />
@@ -201,16 +200,7 @@ export function StoreProfile({
         <ProfileCell label="Platform" value={platform} title={platformTitle} />
         <ProfileCell label="Sitemap" value={sitemapSummary} />
         <ProfileCell label="robots.txt" value={robotsText(d.robots)} />
-        <ProfileCell
-          label="URL pattern"
-          value={
-            urlPattern ??
-            (crawl.products?.[0]
-              ? productUrlPattern(crawl.products[0].url)
-              : "—")
-          }
-          mono
-        />
+        <ProfileCell label="URL pattern" value={urlPattern ?? "—"} mono />
         <ProfileCell
           label="Parse rate"
           value={parseRate != null ? `${parseRate}%` : "—"}
@@ -319,6 +309,6 @@ export function StoreProfile({
           ))}
         </ul>
       ) : null}
-    </section>
+    </Card>
   );
 }

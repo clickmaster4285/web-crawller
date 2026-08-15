@@ -4,6 +4,7 @@ import { Download, Search } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -121,7 +122,7 @@ function ProductsPage() {
       </div>
 
       <div className="px-6 py-8">
-        <div className="border border-border bg-card">
+        <Card>
           <Table>
             <TableHeader>
               <TableRow>
@@ -202,7 +203,7 @@ function ProductsPage() {
             onPageChange={pager.setPage}
             onPageSizeChange={pager.setPageSize}
           />
-        </div>
+        </Card>
       </div>
     </div>
   );

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Play, Search } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/app-shell";
+import { EmptyState } from "@/components/common/empty-state";
 import { StatCard } from "@/components/cards/stat-card";
 import {
   CrawlTypeToggle,
@@ -21,15 +22,16 @@ import {
   LoadingState,
   StateCard,
 } from "@/components/common/states";
-import { useSavedCrawls } from "@/hooks/useData";
+import { useStoresWithSnapshots } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import {
-  deleteCrawlResult,
-  deleteCrawlResultsByOrigin,
+  deleteStoreSnapshot,
+  deleteStoreSnapshots,
   invalidateCrawlData,
-  type SavedCrawl,
+  type StoreSnapshot,
+  type StoreSummary,
 } from "@/api";
-import { crawlType, normalizeOrigin } from "@/utils/crawls";
+import { normalizeOrigin, snapshotType } from "@/utils/crawls";
 
 export const Route = createFileRoute("/_authenticated/crawls/")({
   head: () => ({
@@ -46,8 +48,11 @@ export const Route = createFileRoute("/_authenticated/crawls/")({
   component: CrawlsPage,
 });
 
+/** One snapshot plus the store it belongs to (the D1 read-path shape). */
+type CrawlEntry = { store: StoreSummary; snapshot: StoreSnapshot };
+
 function CrawlsPage() {
-  const saved = useSavedCrawls();
+  const saved = useStoresWithSnapshots();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
@@ -58,8 +63,8 @@ function CrawlsPage() {
   const [confirm, setConfirm] = useState<ConfirmTarget | null>(null);
   // Job-type filter — "all" shows every snapshot; "shallow"/"deep" focus on
   // the sitemap-only checks (or full crawls) only. Persisted like the rest of
-  // the page state so a refresh keeps the view. Old snapshots without a `type`
-  // field were all deep crawls, so they count as deep.
+  // the page state so a refresh keeps the view. Snapshot.full is the
+  // normalized equivalent of the legacy `type` field (false = shallow).
   const [typeFilter, setTypeFilter] = useLocalStorageState<TypeFilter>(
     "parity.crawls.typeFilter",
     "all",
@@ -70,20 +75,32 @@ function CrawlsPage() {
   const toggleGroup = (key: string) =>
     setOpenGroups((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  const allCrawls = useMemo(() => saved.data?.data ?? [], [saved.data]);
-  // Type-filtered snapshot list (before grouping) — stores with no matching
+  const allStores = useMemo(() => saved.data?.data ?? [], [saved.data]);
+  // Flatten to (store, snapshot) entries — stores with no snapshots (e.g.
+  // the catalogue survives but history was cleared) don't appear on /crawls.
+  const allEntries = useMemo<CrawlEntry[]>(
+    () =>
+      allStores.flatMap((store) =>
+        (store.snapshots ?? []).map((snapshot) => ({ store, snapshot })),
+      ),
+    [allStores],
+  );
+  // Type-filtered entries (before grouping) — stores with no matching
   // snapshots disappear, and the stat cards reflect only what's shown.
-  const crawls = useMemo(
+  const entries = useMemo(
     () =>
       typeFilter === "all"
-        ? allCrawls
-        : allCrawls.filter((c) => crawlType(c) === typeFilter),
-    [allCrawls, typeFilter],
+        ? allEntries
+        : allEntries.filter(
+            ({ snapshot }) => snapshotType(snapshot) === typeFilter,
+          ),
+    [allEntries, typeFilter],
   );
 
   const closeConfirm = () => setConfirm(null);
   const deleteOne = useMutation({
-    mutationFn: (id: string) => deleteCrawlResult(id),
+    mutationFn: ({ key, id }: { key: string; id: string }) =>
+      deleteStoreSnapshot(key, id),
     onSuccess: () => {
       invalidateCrawlData(queryClient);
       setConfirm(null);
@@ -91,7 +108,7 @@ function CrawlsPage() {
     onError: closeConfirm,
   });
   const clearOrigin = useMutation({
-    mutationFn: (origin: string) => deleteCrawlResultsByOrigin(origin),
+    mutationFn: (key: string) => deleteStoreSnapshots(key),
     onSuccess: () => {
       invalidateCrawlData(queryClient);
       setConfirm(null);
@@ -101,22 +118,21 @@ function CrawlsPage() {
   const deleting =
     confirm?.kind === "id" ? deleteOne.isPending : clearOrigin.isPending;
 
-  // Snapshots grouped per store (normalized origin), newest first within each
-  // group; groups sorted by their newest snapshot.
+  // Snapshots grouped per store (newest first within each group — the server
+  // returns them sorted); groups sorted by their newest snapshot.
   const groups = useMemo(() => {
-    const map = new Map<string, SavedCrawl[]>();
-    for (const c of crawls) {
-      const key = normalizeOrigin(c.origin);
-      const arr = map.get(key);
-      if (arr) arr.push(c);
-      else map.set(key, [c]);
+    const map = new Map<string, CrawlEntry[]>();
+    for (const e of entries) {
+      const arr = map.get(e.store.key);
+      if (arr) arr.push(e);
+      else map.set(e.store.key, [e]);
     }
     return [...map.entries()].sort(
       (a, b) =>
-        new Date(b[1][0].updatedAt).getTime() -
-        new Date(a[1][0].updatedAt).getTime(),
+        new Date(b[1][0].snapshot.finishedAt).getTime() -
+        new Date(a[1][0].snapshot.finishedAt).getTime(),
     );
-  }, [crawls]);
+  }, [entries]);
 
   // Prune the open set when a store's history disappears (e.g. cleared) so a
   // re-crawled store comes back collapsed, not auto-opened.
@@ -132,63 +148,55 @@ function CrawlsPage() {
     });
   }, [groups]);
 
-  // The snapshot that precedes each crawl (the previous run of the same
-  // store) — used to show "+N new products" history badges.
-  const prevById = useMemo(() => {
-    const map = new Map<string, SavedCrawl>();
-    for (const [, group] of groups) {
-      for (let i = 0; i < group.length - 1; i++) {
-        map.set(group[i]._id, group[i + 1]);
-      }
-    }
-    return map;
-  }, [groups]);
-
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return groups;
-    return groups.filter(([, group]) =>
+    return groups.filter(([key, group]) =>
       group.some(
-        (c) =>
-          c.origin.toLowerCase().includes(q) ||
-          normalizeOrigin(c.origin).includes(q),
+        (e) => e.store.origin.toLowerCase().includes(q) || key.includes(q),
       ),
     );
   }, [groups, query]);
 
-  // The store's CURRENT catalogue size = the LATEST snapshot per store,
-  // summed across stores. Summing every snapshot double-counts products that
-  // appear in multiple runs (4 × 5,086 ≠ 5,086) — same for the URL hint.
-  // Failures stay a true historical total (retried next crawl).
+  // The store's CURRENT catalogue size = the live product count per store
+  // (the latest snapshot's own count is also valid; store.productCount is the
+  // products-collection truth). Failures stay a true historical total.
   const totals = useMemo(() => {
     const latestPerStore = groups.map(([, group]) => group[0]);
     return {
-      products: latestPerStore.reduce((n, c) => n + c.products.length, 0),
-      failures: crawls.reduce((n, c) => n + c.failures.length, 0),
-      urls: latestPerStore.reduce((n, c) => n + c.stats.discovered, 0),
+      products: latestPerStore.reduce((n, e) => n + e.store.productCount, 0),
+      failures: entries.reduce((n, e) => n + e.snapshot.failures.length, 0),
+      urls: latestPerStore.reduce(
+        (n, e) => n + (e.snapshot.stats.discovered ?? 0),
+        0,
+      ),
     };
-  }, [groups, crawls]);
+  }, [groups, entries]);
 
   // Per-type counts over ALL snapshots (unfiltered) — the toggle shows real
   // numbers even while a filter is active.
   const typeCounts = useMemo(
     () => ({
-      shallow: allCrawls.filter((c) => crawlType(c) === "shallow").length,
-      deep: allCrawls.filter((c) => crawlType(c) === "deep").length,
+      shallow: allEntries.filter(
+        ({ snapshot }) => snapshotType(snapshot) === "shallow",
+      ).length,
+      deep: allEntries.filter(
+        ({ snapshot }) => snapshotType(snapshot) === "deep",
+      ).length,
     }),
-    [allCrawls],
+    [allEntries],
   );
 
   /** Prefills the crawler page (it reads these localStorage keys on mount). */
-  const recrawl = (crawl: SavedCrawl) => {
+  const recrawl = (entry: CrawlEntry) => {
     try {
       window.localStorage.setItem(
         "parity.sources.origin",
-        JSON.stringify(crawl.origin),
+        JSON.stringify(entry.store.origin),
       );
       window.localStorage.setItem(
         "parity.sources.collections",
-        JSON.stringify(crawl.collections.join(", ")),
+        JSON.stringify(""),
       );
     } catch {
       // Storage unavailable — the crawler page keeps its last values.
@@ -198,8 +206,12 @@ function CrawlsPage() {
 
   const handleConfirm = () => {
     if (!confirm) return;
-    if (confirm.kind === "id") deleteOne.mutate(confirm.id);
-    else clearOrigin.mutate(confirm.origin);
+    if (confirm.kind === "id") {
+      const key = normalizeOrigin(confirm.origin);
+      deleteOne.mutate({ key, id: confirm.id });
+    } else {
+      clearOrigin.mutate(normalizeOrigin(confirm.origin));
+    }
   };
 
   if (saved.isError) {
@@ -229,7 +241,7 @@ function CrawlsPage() {
       <div className="grid gap-4 px-6 py-8 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           label="Saved snapshots"
-          value={crawls.length.toLocaleString()}
+          value={entries.length.toLocaleString()}
           hint="newest first"
         />
         <StatCard
@@ -250,7 +262,7 @@ function CrawlsPage() {
         />
       </div>
 
-      {crawls.length === 0 ? (
+      {entries.length === 0 ? (
         <StateCard
           className="mx-6 mb-8"
           title="No saved crawls yet"
@@ -283,30 +295,42 @@ function CrawlsPage() {
           </div>
 
           {filtered.length === 0 ? (
-            <p className="border border-border bg-card p-8 text-center text-sm text-muted-foreground">
-              {query.trim()
-                ? `No saved crawls match “${query}”.`
-                : typeFilter === "all"
-                  ? "No saved crawls yet."
-                  : typeFilter === "shallow"
-                    ? "No shallow checks saved — run a Quick check on /sources to spot new products between deep crawls."
-                    : "No deep crawls saved — run a full crawl on /sources to build the catalogue."}
-            </p>
+            <EmptyState
+              icon={Play}
+              title={
+                query.trim()
+                  ? `No saved crawls match “${query}”`
+                  : "No saved crawls yet"
+              }
+              description={
+                typeFilter === "shallow"
+                  ? "Run a Quick check on /sources to spot new products between deep crawls."
+                  : typeFilter === "deep"
+                    ? "Run a full crawl on /sources to build the catalogue."
+                    : undefined
+              }
+            />
           ) : (
             <div className="space-y-8">
               {filtered.map(([key, group]) => (
                 <StoreGroup
                   key={key}
                   storeKey={key}
-                  group={group}
+                  origin={group[0].store.origin}
+                  storeCount={group[0].store.productCount}
+                  group={group.map((e) => e.snapshot)}
                   typeFilter={typeFilter}
                   open={isGroupOpen(key)}
                   onToggleOpen={() => toggleGroup(key)}
-                  onRecrawl={recrawl}
+                  onRecrawl={(snapshot) => {
+                    const entry = group.find(
+                      (e) => e.snapshot._id === snapshot._id,
+                    );
+                    if (entry) recrawl(entry);
+                  }}
                   onClearHistory={(origin, count) =>
                     setConfirm({ kind: "origin", origin, count })
                   }
-                  prevById={prevById}
                   expandedId={expandedId}
                   onToggleRow={(id) =>
                     setExpandedId(expandedId === id ? null : id)

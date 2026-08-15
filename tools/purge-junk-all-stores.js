@@ -1,18 +1,21 @@
 // Purge junk-segment rows from EVERY store (blog/policy/collection/landing
 // pages that slipped in before the discovery+ingest fixes). Same classifier
 // as the crawler's hasJunkSegment — imported from the SINGLE source of truth
-// (frontend/src/lib/crawler/discover/junk-segments.ts) so this tool can never
+// (backend/crawler/discover/junk-segments.ts) so this tool can never
 // drift from the crawler/ingest guard. Dry-run by default; --apply to commit.
 const path = require("path");
 const { pathToFileURL } = require("url");
 const { createRequire } = require("module");
-const req = createRequire(path.join(process.cwd(), "backend", "x.js"));
-req("dotenv").config({ path: path.join(process.cwd(), ".env") });
+// Script-relative (works from any cwd): tools/ sits at the repo root, so
+// backend/ is one level up. Backend deps (mongoose, dotenv) resolve through
+// this require base; the crawler TS module is loaded by file URL below.
+const req = createRequire(path.join(__dirname, "..", "backend", "x.js"));
+req("dotenv").config({ path: path.join(__dirname, "..", "backend", ".env") });
 
 const APPLY = process.argv.includes("--apply");
 
 const junkModuleUrl = pathToFileURL(
-  path.join(process.cwd(), "../frontend/src/lib/crawler/discover/junk-segments.ts")
+  path.join(__dirname, "..", "backend", "crawler", "discover", "junk-segments.ts")
 ).href;
 
 (async () => {

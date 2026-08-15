@@ -1,9 +1,10 @@
 /**
- * Data controller — serves ONLY real data derived from the persisted crawl
- * results (`CrawlResult` collection, written when a crawl finishes).
+ * Data controller — serves ONLY real data derived from the persisted
+ * normalized collections (Store / Product / Snapshot / ProductEvent — the
+ * D1 endgame: the legacy crawlresults collection is no longer read or
+ * written, only its frozen data remains).
  *
- * The old demo dataset (`data/demo-data.json`) has been deleted. Every
- * handler below is either:
+ * Every handler below is either:
  *
  *   - **real** — computed from actual saved crawls (competitors, products,
  *     aggregate stats), or
@@ -22,7 +23,10 @@
  *   - insights/alerts/reports → need analysis/alert/report engines
  */
 
-const CrawlResult = require('../models/CrawlResult');
+const Store = require('../models/Store');
+const Product = require('../models/Product');
+const Snapshot = require('../models/Snapshot');
+const ProductEvent = require('../models/ProductEvent');
 const Competitor = require('../models/Competitor');
 const MyStore = require('../models/MyStore');
 const { matchCatalogues } = require('../utils/matcher');
@@ -67,28 +71,91 @@ function avgPrice(products) {
 }
 
 /**
- * Builds the market price time-series from every saved snapshot. Each
- * `CrawlResult` doc is one store's catalogue at one point in time; events are
- * walked oldest → newest and at each event the latest known average for every
- * store contributes to the market average / cheapest lines — the series
- * reflects what was known at that moment. `you` is the user's own store
- * average (when their store has been crawled), otherwise null. Same-date
- * events coalesce into a single point.
+ * Loads the normalized data plane in three reads:
+ *   - `Store` docs (one per crawled origin — the competitor list source)
+ *   - `Snapshot` docs (metadata-only crawl history, newest first)
+ *   - active `Product` docs (projection — current catalogue, per store)
+ *
+ * The epoch-lastSeenAt filter excludes the soft-deleted junk pages from the
+ * Aug 2026 purge (NOT out-of-stock rows, which are still catalogue). The
+ * legacy loader pulled every snapshot's full product arrays; this pulls the
+ * current state once — orders of magnitude lighter at 100+ stores.
  */
-function computePriceHistory(rows, myStoreHost) {
-  const events = rows
-    .map((row) => ({
-      t: new Date(row.createdAt).getTime(),
-      host: originHost(row.origin),
-      row,
-    }))
-    .filter((e) => Number.isFinite(e.t) && avgPrice(e.row.products) != null)
-    .sort((a, b) => a.t - b.t);
+const ACTIVE_PRODUCT_FILTER = { lastSeenAt: { $gt: new Date(0) } };
+const PRODUCT_PROJECTION =
+  'key origin name brand price sku gtin available url currency priceUsd lastSeenAt priceHistory';
+
+async function loadNormalizedData() {
+  const [stores, snapshots, products] = await Promise.all([
+    Store.find().sort({ updatedAt: -1 }).lean(),
+    Snapshot.find().sort({ finishedAt: -1 }).lean(),
+    Product.find(ACTIVE_PRODUCT_FILTER).select(PRODUCT_PROJECTION).lean()
+  ]);
+  const byKey = new Map();
+  for (const p of products) {
+    const arr = byKey.get(p.key) ?? [];
+    arr.push(p);
+    byKey.set(p.key, arr);
+  }
+  // The newest snapshot per store (for status + stats where the live Store
+  // record isn't authoritative) — snapshots are already newest-first.
+  const latestSnapshotByKey = new Map();
+  for (const s of snapshots) {
+    if (!latestSnapshotByKey.has(s.key)) latestSnapshotByKey.set(s.key, s);
+  }
+  return { stores, snapshots, byKey, latestSnapshotByKey };
+}
+
+/**
+ * Builds the market price time-series from the normalized history. Each
+ * `Snapshot` is one store's crawl at one point in time; a store's average at
+ * that time is computed from its CURRENT products' `priceHistory` (the latest
+ * point at or before the snapshot's finish time — the capped series on each
+ * product). Events are walked oldest → newest and at each event the latest
+ * known average for every store contributes to the market average / cheapest
+ * lines — the series reflects what was known at that moment. `you` is the
+ * user's own store average (when their store has been crawled), otherwise
+ * null. Same-date events coalesce into a single point.
+ *
+ * Note: products soft-removed from the current catalogue no longer carry
+ * their history here, so a store's earliest averages may be slightly higher
+ * than the legacy (frozen-snapshot) series — an accepted approximation; the
+ * shape and semantics are identical.
+ */
+function computePriceHistory(snapshots, byKey, myStoreHost) {
+  const events = [];
+  for (const snap of snapshots) {
+    const host = originHost(snap.origin);
+    const products = byKey.get(snap.key) ?? [];
+    const t = new Date(snap.finishedAt).getTime();
+    if (!Number.isFinite(t)) continue;
+    const prices = [];
+    for (const p of products) {
+      const pts = p.priceHistory ?? [];
+      let price = null;
+      // priceHistory is appended in time order — walk backwards for the
+      // latest point known at snapshot time.
+      for (let i = pts.length - 1; i >= 0; i--) {
+        const ptT = new Date(pts[i].t).getTime();
+        if (ptT <= t) {
+          price = pts[i].price;
+          break;
+        }
+      }
+      if (price != null && Number.isFinite(price) && price > 0) prices.push(price);
+    }
+    if (prices.length === 0) continue;
+    events.push({
+      t,
+      host,
+      avg: prices.reduce((a, b) => a + b, 0) / prices.length
+    });
+  }
+  events.sort((a, b) => a.t - b.t);
   const latestAvg = new Map();
   const points = [];
   for (const ev of events) {
-    const avg = avgPrice(ev.row.products);
-    latestAvg.set(ev.host, avg);
+    latestAvg.set(ev.host, ev.avg);
     const values = [...latestAvg.values()];
     const round2 = (n) => Math.round(n * 100) / 100;
     const point = {
@@ -111,24 +178,11 @@ function computePriceHistory(rows, myStoreHost) {
 }
 
 /**
- * Loads every saved crawl, grouped per origin, keeping the latest snapshot
- * per origin. Returns `{ latest: Map<origin, doc>, rows: CrawlResult[] }`.
- */
-async function loadLatestPerOrigin() {
-  const rows = await CrawlResult.find({}).sort({ createdAt: -1 });
-  const latest = new Map();
-  for (const row of rows) {
-    if (!latest.has(row.origin)) latest.set(row.origin, row);
-  }
-  return { latest, rows };
-}
-
-/**
- * Computes competitor rows: one per crawled origin, merged with the
+ * Computes competitor rows: one per crawled `Store`, merged with the
  * manually-added `Competitor` docs (which may not have been crawled yet) and
  * the user's own store (a special "my store" row, `isMine: true`).
  */
-function computeCompetitors(latest, manual, myStore) {
+function computeCompetitors(stores, byKey, latestSnapshotByKey, manual, myStore) {
   const manualByHost = new Map();
   for (const m of manual) {
     manualByHost.set(originHost(m.origin), m);
@@ -139,18 +193,19 @@ function computeCompetitors(latest, manual, myStore) {
   // Market-relative price index: each crawled store's average product price
   // vs the average of every crawled store (index 100 = at market level).
   const storeAvg = new Map();
-  for (const [origin, doc] of latest) {
-    const a = avgPrice(doc.products);
-    if (a != null) storeAvg.set(originHost(origin), a);
+  for (const store of stores) {
+    const a = avgPrice(byKey.get(store.key) ?? []);
+    if (a != null) storeAvg.set(originHost(store.origin), a);
   }
   const marketAvg =
     storeAvg.size > 0
       ? [...storeAvg.values()].reduce((a, b) => a + b, 0) / storeAvg.size
       : 0;
-  for (const [origin, doc] of latest) {
-    const host = originHost(origin);
+  for (const store of stores) {
+    const host = originHost(store.origin);
     crawledHosts.add(host);
-    const products = doc.products || [];
+    const products = byKey.get(store.key) ?? [];
+    const latest = latestSnapshotByKey.get(store.key);
     const manualDoc = manualByHost.get(host);
     const isMine = !!myStoreHost && host === myStoreHost;
     const avgPriceIndex =
@@ -163,8 +218,8 @@ function computeCompetitors(latest, manual, myStore) {
         ? myStore.name || 'My store'
         : manualDoc
           ? manualDoc.name
-          : originName(origin),
-      origin,
+          : originName(store.origin),
+      origin: store.origin,
       manual: isMine ? false : !!manualDoc,
       isMine,
       website: host,
@@ -173,10 +228,11 @@ function computeCompetitors(latest, manual, myStore) {
       language: '—',
       industry: 'E-commerce',
       platform:
-        (doc.discovery && doc.discovery.platform && doc.discovery.platform.platform) ||
-        'Unknown',
-      status: doc.stats && doc.stats.fetched > 0 ? 'active' : 'error',
-      lastCrawl: relativeTime(doc.createdAt),
+        (store.platform && store.platform.platform) || 'Unknown',
+      // A store whose last run fetched nothing (WAF-blocked) reads 'error'.
+      status:
+        latest && (latest.stats?.fetched ?? 0) > 0 ? 'active' : 'error',
+      lastCrawl: relativeTime(store.lastCrawl?.at ?? store.updatedAt),
       products: products.length,
       newToday: 0,
       priceChanges: 0,
@@ -240,13 +296,13 @@ function computeCompetitors(latest, manual, myStore) {
 /**
  * The real product-matching layer (GTIN > SKU > URL slug > fuzzy name).
  *
- * Compares the user's own catalogue (their store's latest crawl) against
- * every competitor's catalogue via `utils/matcher.js`, and returns the flat
+ * Compares the user's own catalogue (their store's current products) against
+ * every competitor's via `utils/matcher.js`, and returns the flat
  * MatchedProduct row list plus aggregate counts. Honestly empty (rows: [])
  * when no my-store is set or their store hasn't been crawled yet — the page
  * renders its "no real data" state instead of fabricated matches.
  */
-function computeMatching(latest, manual, myStore) {
+function computeMatching(stores, byKey, manual, myStore) {
   const result = {
     rows: [],
     yourProducts: 0,
@@ -258,14 +314,11 @@ function computeMatching(latest, manual, myStore) {
   };
   const myStoreHost =
     myStore && myStore.origin ? originHost(myStore.origin) : null;
-  const mineDoc = myStoreHost
-    ? [...latest.values()].find(
-        (doc) => originHost(doc.origin) === myStoreHost
-      )
-    : null;
-  if (!mineDoc) return result;
-
-  const mine = mineDoc.products || [];
+  const productsByHost = new Map();
+  for (const store of stores) {
+    productsByHost.set(originHost(store.origin), byKey.get(store.key) ?? []);
+  }
+  const mine = myStoreHost ? productsByHost.get(myStoreHost) ?? [] : [];
   result.yourProducts = mine.length;
   const matchedMine = new Set();
   const gaps = [];
@@ -285,14 +338,12 @@ function computeMatching(latest, manual, myStore) {
     reviews: 0,
   });
 
-  for (const [origin, doc] of latest) {
-    const host = originHost(origin);
+  for (const [host, theirs] of productsByHost) {
     if (host === myStoreHost) continue;
-    const theirs = doc.products || [];
     if (theirs.length === 0) continue;
     const competitorName = manualByHost.has(host)
       ? manualByHost.get(host).name
-      : originName(origin);
+      : originName(host);
 
     const { matched, onlyTheirs } = matchCatalogues(mine, theirs);
     for (const pair of matched) {
@@ -355,18 +406,18 @@ function emptyMatching() {
  * Flattens every competitor's (non-my-store) products for market stats —
  * market averages are independent of whether the user's store is set yet.
  */
-function computeMarketProducts(latest, manual, myStoreHost) {
+function computeMarketProducts(stores, byKey, manual, myStoreHost) {
   const manualByHost = new Map(
     manual.map((m) => [originHost(m.origin), m])
   );
   const out = [];
-  for (const [origin, doc] of latest) {
-    const host = originHost(origin);
+  for (const store of stores) {
+    const host = originHost(store.origin);
     if (myStoreHost && host === myStoreHost) continue;
     const name = manualByHost.has(host)
       ? manualByHost.get(host).name
-      : originName(origin);
-    for (const p of doc.products || []) {
+      : originName(host);
+    for (const p of byKey.get(store.key) ?? []) {
       out.push({ name: p.name, competitor: name, competitorPrice: p.price || 0 });
     }
   }
@@ -416,6 +467,36 @@ function computeDashboardStats(competitors, matching, marketProducts) {
   };
 }
 
+/**
+ * "Biggest price movements" for the Pricing page — the price_changed change
+ * log (ProductEvent), newest first, mapped to {origin, name, url, first,
+ * latest, change} and sorted by absolute change. This replaces the old
+ * client-side computation over full snapshot product arrays (D1: snapshots
+ * no longer carry products).
+ */
+async function loadPriceMovements() {
+  const events = await ProductEvent.find({ type: 'price_changed' })
+    .sort({ at: -1 })
+    .limit(500)
+    .select('origin name url old new')
+    .lean();
+  const out = [];
+  for (const e of events) {
+    const first = e.old?.price;
+    const latest = e.new?.price;
+    if (typeof first !== 'number' || typeof latest !== 'number') continue;
+    out.push({
+      origin: e.origin,
+      name: e.name,
+      url: e.url,
+      first,
+      latest,
+      change: latest - first,
+    });
+  }
+  return out.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+}
+
 /** Manually-added competitor docs, newest first. */
 async function loadManualCompetitors() {
   return Competitor.find({}).sort({ createdAt: -1 });
@@ -424,6 +505,13 @@ async function loadManualCompetitors() {
 /** The user's own store doc (single document), or null when unset. */
 async function loadMyStore() {
   return MyStore.findById(MyStore.MY_STORE_ID);
+}
+
+/** The user's own store's average price (null when unset / not crawled). */
+function yourAvgPrice(stores, byKey, myStoreHost) {
+  if (!myStoreHost) return null;
+  const mine = stores.find((s) => originHost(s.origin) === myStoreHost);
+  return mine ? avgPrice(byKey.get(mine.key) ?? []) : null;
 }
 
 /** Every route handler below. */
@@ -448,23 +536,25 @@ const dataController = {
   },
 
   async analytics(req, res) {
-    const { latest, rows } = await loadLatestPerOrigin();
+    const { stores, snapshots, byKey, latestSnapshotByKey } =
+      await loadNormalizedData();
     const myStore = await loadMyStore();
     const manual = await loadManualCompetitors();
     const myStoreHost =
       myStore && myStore.origin ? originHost(myStore.origin) : null;
-    const matching = computeMatching(latest, manual, myStore);
-    const competitors = computeCompetitors(latest, manual, myStore);
-    const marketProducts = computeMarketProducts(latest, manual, myStoreHost);
+    const matching = computeMatching(stores, byKey, manual, myStore);
+    const competitors = computeCompetitors(
+      stores,
+      byKey,
+      latestSnapshotByKey,
+      manual,
+      myStore
+    );
+    const marketProducts = computeMarketProducts(stores, byKey, manual, myStoreHost);
     const stats = computeDashboardStats(competitors, matching, marketProducts);
     // Real "your price" — the user's own store's average product price.
-    if (myStoreHost) {
-      const mine = [...latest.values()].find(
-        (doc) => originHost(doc.origin) === myStoreHost
-      );
-      const a = mine ? avgPrice(mine.products) : null;
-      if (a != null) stats.yourAvgPrice = Math.round(a * 100) / 100;
-    }
+    const mineAvg = yourAvgPrice(stores, byKey, myStoreHost);
+    if (mineAvg != null) stats.yourAvgPrice = Math.round(mineAvg * 100) / 100;
     res.json({
       hasData: competitors.length > 0,
       stats: {
@@ -495,17 +585,19 @@ const dataController = {
         yourPrice: p.yourPrice,
         gap: p.yourPrice === null ? null : p.competitorPrice - p.yourPrice,
       })),
-      priceHistory: computePriceHistory(rows, myStoreHost),
+      priceHistory: computePriceHistory(snapshots, byKey, myStoreHost),
       categoryGaps: [], // needs your catalogue + matching
       brandGaps: [], // needs your catalogue + matching
     });
   },
 
   async competitors(req, res) {
-    const { latest } = await loadLatestPerOrigin();
+    const { stores, byKey, latestSnapshotByKey } = await loadNormalizedData();
     res.json(
       computeCompetitors(
-        latest,
+        stores,
+        byKey,
+        latestSnapshotByKey,
         await loadManualCompetitors(),
         await loadMyStore()
       )
@@ -513,10 +605,11 @@ const dataController = {
   },
 
   async matchedProducts(req, res) {
-    const { latest } = await loadLatestPerOrigin();
+    const { stores, byKey } = await loadNormalizedData();
     res.json(
       computeMatching(
-        latest,
+        stores,
+        byKey,
         await loadManualCompetitors(),
         await loadMyStore()
       ).rows
@@ -524,39 +617,50 @@ const dataController = {
   },
 
   async pricing(req, res) {
-    const { latest, rows } = await loadLatestPerOrigin();
+    const { stores, snapshots, byKey, latestSnapshotByKey } =
+      await loadNormalizedData();
     const myStore = await loadMyStore();
     const manual = await loadManualCompetitors();
     const myStoreHost =
       myStore && myStore.origin ? originHost(myStore.origin) : null;
-    const matching = computeMatching(latest, manual, myStore);
-    const competitors = computeCompetitors(latest, manual, myStore);
-    const marketProducts = computeMarketProducts(latest, manual, myStoreHost);
+    const matching = computeMatching(stores, byKey, manual, myStore);
+    const competitors = computeCompetitors(
+      stores,
+      byKey,
+      latestSnapshotByKey,
+      manual,
+      myStore
+    );
+    const marketProducts = computeMarketProducts(stores, byKey, manual, myStoreHost);
     const stats = computeDashboardStats(competitors, matching, marketProducts);
     // Real "your price" — the user's own store's average product price.
-    if (myStoreHost) {
-      const mine = [...latest.values()].find(
-        (doc) => originHost(doc.origin) === myStoreHost
-      );
-      const a = mine ? avgPrice(mine.products) : null;
-      if (a != null) stats.yourAvgPrice = Math.round(a * 100) / 100;
-    }
+    const mineAvg = yourAvgPrice(stores, byKey, myStoreHost);
+    if (mineAvg != null) stats.yourAvgPrice = Math.round(mineAvg * 100) / 100;
     res.json({
       competitors,
       matchedProducts: matching.rows,
-      priceHistory: computePriceHistory(rows, myStoreHost),
+      priceHistory: computePriceHistory(snapshots, byKey, myStoreHost),
+      // D1: the page's "biggest price movements" now comes from the change
+      // log instead of diffing full snapshot product arrays client-side.
+      priceMovements: await loadPriceMovements(),
       stats,
     });
   },
 
   async catalogue(req, res) {
-    const { latest } = await loadLatestPerOrigin();
+    const { stores, byKey, latestSnapshotByKey } = await loadNormalizedData();
     const myStore = await loadMyStore();
     const manual = await loadManualCompetitors();
     const myStoreHost =
       myStore && myStore.origin ? originHost(myStore.origin) : null;
-    const competitors = computeCompetitors(latest, manual, myStore);
-    const marketProducts = computeMarketProducts(latest, manual, myStoreHost);
+    const competitors = computeCompetitors(
+      stores,
+      byKey,
+      latestSnapshotByKey,
+      manual,
+      myStore
+    );
+    const marketProducts = computeMarketProducts(stores, byKey, manual, myStoreHost);
     res.json({
       categoryGaps: [], // needs your catalogue + matching
       brandGaps: [], // needs your catalogue + matching

@@ -5,15 +5,15 @@ import { PageHeader } from "@/components/layout/app-shell";
 import { SectionTitle, StatCard } from "@/components/cards/stat-card";
 import { MarketTrendChart } from "@/components/common/market-trend-chart";
 import { Badge } from "@/components/ui/badge";
+import { CardList } from "@/components/ui/card";
 import {
   LoadingState,
   ErrorState,
   NoRealDataState,
 } from "@/components/common/states";
-import { usePricing, useSavedCrawls } from "@/hooks/useData";
-import type { SavedCrawl } from "@/api";
+import { usePricing } from "@/hooks/useData";
+import type { PriceMovement } from "@/api";
 import { gbp } from "@/utils/formatCurrency";
-import { normalizeOrigin } from "@/utils/crawls";
 import { formatPrice } from "@/utils/format";
 import { cn } from "@/lib/utils";
 
@@ -37,60 +37,16 @@ export const Route = createFileRoute("/_authenticated/pricing/")({
   component: PricingPage,
 });
 
-/** A product whose price moved between the first and latest snapshot of a store. */
-interface PriceMover {
-  origin: string;
-  name: string;
-  url: string;
-  first: number;
-  latest: number;
-  change: number;
-}
-
 function PricingPage() {
   const { data, isLoading, isError } = usePricing();
-  const saved = useSavedCrawls();
 
-  // Biggest price movements — computed from real snapshots: for each store
-  // with 2+ crawls, products whose price differs between the first and latest
-  // snapshot, sorted by absolute change.
-  const movers = useMemo<PriceMover[]>(() => {
-    const byOrigin = new Map<string, SavedCrawl[]>();
-    for (const c of saved.data?.data ?? []) {
-      const key = normalizeOrigin(c.origin);
-      const arr = byOrigin.get(key) ?? [];
-      arr.push(c);
-      byOrigin.set(key, arr);
-    }
-    const out: PriceMover[] = [];
-    for (const [origin, snaps] of byOrigin) {
-      if (snaps.length < 2) continue;
-      const sorted = [...snaps].sort(
-        (a, b) =>
-          new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime(),
-      );
-      const first = sorted[0];
-      const latest = sorted[sorted.length - 1];
-      const firstByUrl = new Map(first.products.map((p) => [p.url, p.price]));
-      const latestByUrl = new Map(latest.products.map((p) => [p.url, p.price]));
-      for (const [url, price] of latestByUrl) {
-        const firstPrice = firstByUrl.get(url);
-        if (firstPrice == null || price == null) continue;
-        const change = price - firstPrice;
-        if (Math.abs(change) < 0.01) continue;
-        const name = latest.products.find((p) => p.url === url)?.name ?? url;
-        out.push({
-          origin,
-          name,
-          url,
-          first: firstPrice,
-          latest: price,
-          change,
-        });
-      }
-    }
-    return out.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
-  }, [saved.data]);
+  // Biggest price movements — derived server-side from the ProductEvent
+  // change log (D1: snapshots no longer carry product arrays to diff in the
+  // browser).
+  const movers: PriceMovement[] = useMemo(
+    () => data?.priceMovements ?? [],
+    [data],
+  );
 
   if (isError) return <ErrorState />;
   if (isLoading || !data) return <LoadingState />;
@@ -170,7 +126,7 @@ function PricingPage() {
       <div className="grid gap-8 border-t border-border px-6 py-8 lg:grid-cols-2">
         <div>
           <SectionTitle>Biggest pricing gaps against you</SectionTitle>
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {gaps.slice(0, 5).map((p) => (
               <li
                 key={p.id}
@@ -200,12 +156,12 @@ function PricingPage() {
                 each competitor's.
               </li>
             ) : null}
-          </ul>
+          </CardList>
         </div>
 
         <div>
           <SectionTitle>Competitor positioning</SectionTitle>
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {competitors.map((c) => (
               <li key={c.id} className="p-4">
                 <div className="flex items-center justify-between gap-3">
@@ -239,7 +195,7 @@ function PricingPage() {
                 </div>
               </li>
             ))}
-          </ul>
+          </CardList>
           <p className="mt-2 text-xs text-muted-foreground">
             Index 100 = at the market average of crawled stores; below 100 means
             cheaper than market.
@@ -263,7 +219,7 @@ function PricingPage() {
             price changed between the runs will appear here.
           </p>
         ) : (
-          <ul className="divide-y divide-border border border-border bg-card">
+          <CardList>
             {movers.slice(0, 8).map((m) => (
               <li
                 key={`${m.origin}-${m.url}`}
@@ -301,7 +257,7 @@ function PricingPage() {
                 </div>
               </li>
             ))}
-          </ul>
+          </CardList>
         )}
       </div>
     </div>

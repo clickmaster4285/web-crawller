@@ -4,7 +4,7 @@
 // in a handful of polite requests, BEFORE a crawl starts — the pre-flight
 // tool that prevents the "10k fetched / 0 priced" class of failure.
 //
-// Runs the 5 probes from frontend/src/lib/crawler/analyze.ts via Node 24's
+// Runs the 5 probes from backend/crawler/analyze.ts via Node 24's
 // native type-stripping (`import()` of a .ts module — the same mechanism the
 // worker uses for the crawler engine). No build step, no bundler, no Chrome.
 //
@@ -34,7 +34,7 @@ let origin = urlArg.trim();
 if (!/^https?:\/\//i.test(origin)) origin = `https://${origin}`;
 
 const { analyzeWebsite } = await import(
-  new URL("../frontend/src/lib/crawler/analyze.ts", import.meta.url).href
+  new URL("../backend/crawler/analyze.ts", import.meta.url).href
 );
 
 const started = Date.now();

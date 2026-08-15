@@ -4,36 +4,44 @@ import { ChevronDown, ChevronUp, Globe, RefreshCw, Trash2 } from "lucide-react";
 import { CrawlRow } from "./crawl-row";
 import type { TypeFilter } from "./crawl-type-toggle";
 import { Button } from "@/components/ui/button";
-import type { SavedCrawl } from "@/api";
+import { Card } from "@/components/ui/card";
+import type { StoreSnapshot } from "@/api";
 import { formatCrawlDate } from "@/utils/crawls";
 
 /**
  * One store's snapshot history on /crawls: a header (domain, count, actions)
- * and either the collapsed hint or the expanded list of CrawlRows.
+ * and either the collapsed hint or the expanded list of CrawlRows. Reads the
+ * D1 read path — each row is a Snapshot doc (metadata + ingest-time change
+ * counts), never a full product dump.
  */
 export function StoreGroup({
   storeKey,
+  origin,
+  storeCount,
   group,
   typeFilter,
   open,
   onToggleOpen,
   onRecrawl,
   onClearHistory,
-  prevById,
   expandedId,
   onToggleRow,
   onDeleteRow,
 }: {
+  /** Normalized host (route param for the store link). */
   storeKey: string;
-  group: SavedCrawl[];
+  /** Store origin URL (recrawl prefill + clear-history label). */
+  origin: string;
+  /** Current catalogue size — the store's live product count. */
+  storeCount: number;
+  /** Snapshots for this store, newest first. */
+  group: StoreSnapshot[];
   /** Active type filter — shown in the subtitle when not "all". */
   typeFilter: TypeFilter;
   open: boolean;
   onToggleOpen: () => void;
-  onRecrawl: (crawl: SavedCrawl) => void;
+  onRecrawl: (snapshot: StoreSnapshot) => void;
   onClearHistory: (origin: string, count: number) => void;
-  /** Snapshot that precedes each crawl (for "+N new" badges). */
-  prevById: Map<string, SavedCrawl>;
   expandedId: string | null;
   onToggleRow: (id: string) => void;
   onDeleteRow: (id: string, origin: string) => void;
@@ -58,12 +66,8 @@ export function StoreGroup({
               {group.length} snapshot
               {group.length > 1 ? "s" : ""}
               {typeFilter === "all" ? "" : ` (${typeFilter})`} ·{" "}
-              {/* The store's current catalogue size = the LATEST snapshot's
-                  capture. Summing every snapshot double-counts products that
-                  appear in multiple runs (e.g. 4 snapshots × 5,086 ≠ 20,340).
-                  Each individual CrawlRow below still shows its own count. */}
-              {latest.products.length.toLocaleString()} products · last{" "}
-              {formatCrawlDate(latest.updatedAt)}
+              {latest.productCount.toLocaleString()} products in the latest run
+              · last {formatCrawlDate(latest.finishedAt)}
             </p>
           </div>
         </div>
@@ -88,7 +92,7 @@ export function StoreGroup({
             variant="ghost"
             size="sm"
             className="text-muted-foreground hover:text-destructive"
-            onClick={() => onClearHistory(latest.origin, group.length)}
+            onClick={() => onClearHistory(origin, group.length)}
           >
             <Trash2 className="size-3.5" /> Clear history
           </Button>
@@ -96,19 +100,22 @@ export function StoreGroup({
       </div>
 
       {open ? (
-        <div className="divide-y divide-border border border-border bg-card">
-          {group.map((crawl) => (
+        <Card className="divide-y divide-border">
+          {group.map((snapshot, i) => (
             <CrawlRow
-              key={crawl._id}
-              crawl={crawl}
-              previous={prevById.get(crawl._id)}
-              expanded={expandedId === crawl._id}
-              onToggle={() => onToggleRow(crawl._id)}
-              onRecrawl={() => onRecrawl(crawl)}
-              onDelete={() => onDeleteRow(crawl._id, crawl.origin)}
+              key={snapshot._id}
+              snapshot={snapshot}
+              origin={origin}
+              storeKey={storeKey}
+              storeCount={storeCount}
+              hasPrevious={i < group.length - 1}
+              expanded={expandedId === snapshot._id}
+              onToggle={() => onToggleRow(snapshot._id)}
+              onRecrawl={() => onRecrawl(snapshot)}
+              onDelete={() => onDeleteRow(snapshot._id, origin)}
             />
           ))}
-        </div>
+        </Card>
       ) : (
         <p className="border border-dashed border-border bg-card px-4 py-6 text-center text-xs text-muted-foreground">
           {group.length} snapshot

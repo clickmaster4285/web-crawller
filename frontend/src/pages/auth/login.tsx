@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { AuthLayout } from "@/layouts/AuthLayout";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ROUTES } from "@/constants";
@@ -53,7 +54,7 @@ function LoginPage() {
 
   return (
     <AuthLayout>
-      <div className="border border-border bg-card p-6">
+      <Card className="p-6">
         <p className="label-caps">Parity</p>
         <h1 className="display-xl mt-2 text-3xl">Sign in</h1>
         <p className="mt-2 text-sm text-muted-foreground">
@@ -101,7 +102,7 @@ function LoginPage() {
             {busy ? "Signing in…" : "Sign in"}
           </Button>
         </form>
-      </div>
+      </Card>
     </AuthLayout>
   );
 }

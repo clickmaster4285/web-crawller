@@ -47,7 +47,21 @@ const crawlParamsSchema = new mongoose.Schema(
      * discovered URLs matching it are crawled. Kept on the job so the live
      * progress panel can show which filter a run used.
      */
-    productUrlPattern: { type: String, default: null }
+    productUrlPattern: { type: String, default: null },
+    /**
+     * Optional region/locale token (engine discoverProducts sitemap filter):
+     * only sitemaps matching this region are crawled — one country's
+     * catalogue for multi-country GCC stores (~4× less work, one currency).
+     * Kept on the job so the live progress panel can show which region ran.
+     */
+    locale: { type: String, default: null },
+    /**
+     * Per-store User-Agent: `"browser"` (sentinel — the engine resolves it
+     * to a Chrome UA for WAF-blocked stores that 403 the ParityBot UA) or a
+     * raw UA string; null = default ParityBot UA. MUST live in the schema or
+     * Mongoose strict mode silently drops it (the Aug 2026 lesson).
+     */
+    userAgent: { type: String, default: null }
   },
   { _id: false }
 );
@@ -61,7 +75,29 @@ const progressSchema = new mongoose.Schema(
     /** Live discovery diagnostics while the discovery phase runs. */
     discovery: { type: mongoose.Schema.Types.Mixed, default: null },
     /** Live HTTP-request count (debug — Active crawls page). */
-    requests: { type: Number, default: 0 }
+    requests: { type: Number, default: 0 },
+    /**
+     * Structured run log (Phase 5 observability) — capped at
+     * LOG_LIMIT entries. The engine emits lifecycle lines via its onLog
+     * callback and the worker appends them here (throttled with the other
+     * heartbeat patches); HTTP-level warnings (429 rate limits) flow through
+     * the same path. Kept on the job so a crawl's story survives the worker
+     * process — the UI reads it live, and it rides the job's existing TTL.
+     */
+    log: {
+      type: [
+        {
+          at: { type: Date, default: Date.now },
+          level: {
+            type: String,
+            enum: ['info', 'warn', 'error'],
+            default: 'info'
+          },
+          message: { type: String, default: '' }
+        }
+      ],
+      default: []
+    }
   },
   { _id: false }
 );
@@ -102,6 +138,12 @@ const crawlJobSchema = new mongoose.Schema(
     startedAt: Date,
     finishedAt: Date,
     workerId: String,
+    /**
+     * P4: deployed engine version that ran this crawl (backend package
+     * version + git SHA at worker boot). Restarting the backend IS the
+     * deploy step — this makes a stale worker visible instead of a mystery.
+     */
+    crawlerVersion: String,
     /** Last worker heartbeat — stale claims are released and requeued. */
     heartbeatAt: Date,
     params: { type: crawlParamsSchema, default: () => ({}) },
@@ -120,7 +162,7 @@ const crawlJobSchema = new mongoose.Schema(
      * The sanitized crawl result (stats, failures, discovery, products) —
      * written on completion so the final poll can render the result without
      * an extra read. Transient: the TTL index on finishedAt removes the doc
-     * ~1h after the run ends (products live on in CrawlResult / Product).
+     * ~1h after the run ends (products live on in the Product collection).
      */
     result: { type: mongoose.Schema.Types.Mixed, default: null },
     /** True when the finished result was saved to the data store. */
@@ -129,6 +171,9 @@ const crawlJobSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+/** Cap on `progress.log` entries kept per job (run-log observability). */
+crawlJobSchema.statics.LOG_LIMIT = 200;
 
 // Architecture §3.3 — queue claim order.
 crawlJobSchema.index({ status: 1, scheduledAt: 1 });

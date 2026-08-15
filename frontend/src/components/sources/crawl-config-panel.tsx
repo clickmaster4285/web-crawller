@@ -9,6 +9,7 @@ import {
 import { SectionTitle } from "@/components/cards/stat-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -50,6 +51,12 @@ export function CrawlConfigPanel({
   onTestProxy,
   productUrlPattern,
   onProductUrlPatternChange,
+  locale,
+  onLocaleChange,
+  // Per-store User-Agent: "browser" sends a Chrome UA on every request (WAF
+  // stores that 403 the ParityBot UA); "default" keeps ParityBot.
+  userAgent,
+  onUserAgentChange,
 }: {
   maxPagesMode: MaxPagesMode;
   onMaxPagesModeChange: (mode: MaxPagesMode) => void;
@@ -85,6 +92,15 @@ export function CrawlConfigPanel({
   /** Optional product-URL filter regex (empty = every discovered URL). */
   productUrlPattern: string;
   onProductUrlPatternChange: (value: string) => void;
+  /**
+   * Optional region/locale token (empty = all regions). Multi-country GCC
+   * stores publish a separate sitemap set per country — picking one crawls
+   * a single country's catalogue (~4× less work, one currency).
+   */
+  locale: string;
+  onLocaleChange: (value: string) => void;
+  userAgent: "browser" | "default";
+  onUserAgentChange: (value: "browser" | "default") => void;
 }) {
   return (
     <section>
@@ -97,7 +113,7 @@ export function CrawlConfigPanel({
       >
         Configuration
       </SectionTitle>
-      <div className="grid gap-6 border border-border bg-card p-6 lg:grid-cols-2">
+      <Card className="grid gap-6 p-6 lg:grid-cols-2">
         <div className="grid gap-2">
           <Label>Maximum pages per crawl</Label>
           <Select
@@ -190,6 +206,36 @@ export function CrawlConfigPanel({
               <SelectItem value="2000">2s</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+
+        <div className="grid gap-2">
+          <Label>User agent</Label>
+          <Select
+            value={userAgent}
+            onValueChange={(v) =>
+              onUserAgentChange(v === "browser" ? "browser" : "default")
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default">
+                ParityBot (honest crawler identity)
+              </SelectItem>
+              <SelectItem value="browser">
+                Browser (Chrome) — for WAF-blocked stores
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Some firewalls reject the ParityBot user-agent outright —{" "}
+            <code>dawlance.com.pk</code>, <code>prosportsae.com</code> and{" "}
+            <code>athletix.ae</code> return HTTP 403 to it while a browser UA
+            gets 200s from the same IP. Switch to the browser identity for those
+            stores only; keep ParityBot everywhere else (it's the honest choice
+            and robots.txt is still respected either way).
+          </p>
         </div>
 
         <div className="flex items-center justify-between gap-4">
@@ -345,6 +391,38 @@ export function CrawlConfigPanel({
           </p>
         </div>
 
+        <div className="grid gap-2">
+          <Label>Region / locale (optional)</Label>
+          <Select
+            value={locale}
+            onValueChange={(v) => onLocaleChange(v === "all" ? "" : v)}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="All regions (crawl every sitemap)" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All regions (default)</SelectItem>
+              <SelectItem value="ae">UAE (AED) — ae</SelectItem>
+              <SelectItem value="om">Oman (OMR) — om</SelectItem>
+              <SelectItem value="sa">Saudi Arabia (SAR) — sa</SelectItem>
+              <SelectItem value="qa">Qatar (QAR) — qa</SelectItem>
+              <SelectItem value="kw">Kuwait (KWD) — kw</SelectItem>
+              <SelectItem value="bh">Bahrain (BHD) — bh</SelectItem>
+            </SelectContent>
+          </Select>{" "}
+          <p className="text-xs text-muted-foreground">
+            Multi-country GCC stores publish a separate sitemap set per country
+            — the same products in different currencies (e.g.{" "}
+            activefitnessstore.com: <code>/om/sitemaps/…</code>,{" "}
+            <code>/bh/…</code>; lifetimefitnessstore.com:{" "}
+            <code>sitemap_om.xml</code>). Pick one region to crawl a single
+            country's catalogue — ~4× less work and one consistent currency. The
+            field is a raw token, so a language code (<code>en</code> or{" "}
+            <code>ar</code>) filters to that language across regions. Leave on
+            all regions for single-country stores.
+          </p>
+        </div>
+
         <div className="lg:col-span-2">
           <Label htmlFor="url-pattern">Product URL pattern (optional)</Label>
           <Input
@@ -364,7 +442,7 @@ export function CrawlConfigPanel({
             crawl every discovered URL.
           </p>
         </div>
-      </div>
+      </Card>
     </section>
   );
 }

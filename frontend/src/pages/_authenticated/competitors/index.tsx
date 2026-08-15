@@ -24,12 +24,12 @@ import {
 } from "@/components/competitors/store-picker-dialog";
 import { StorePill } from "@/components/competitors/store-pill";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { ErrorState, LoadingState } from "@/components/common/states";
-import { useSavedCrawlMetas } from "@/hooks/useData";
+import { useStores } from "@/hooks/useData";
 import { useLocalStorageState } from "@/hooks/useLocalStorage";
 import {
   getMyStoreData,
-  getStores,
   invalidateMatchingData,
   queryKeys,
   setMyStoreData,
@@ -68,44 +68,20 @@ function CompetitorsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  // Lightweight crawl summaries (origin, platform, product count, timestamp —
-  // no product arrays). Full catalogues are fetched lazily below, only for
-  // the stores actually selected, so this page never downloads every store's
-  // products at once (tens of thousands of products ≈ 10 MB).
-  const { data: saved, isLoading, isError } = useSavedCrawlMetas();
-  // The REAL catalogue sizes (Store/productCount computed live from the
-  // products collection). The crawl summaries above report what the LAST
-  // SNAPSHOT captured — a WAF-blocked run saves a 0-product snapshot even
-  // though the catalogue is intact (prosportsae: 441 products, snapshot 0).
-  // Prefer the live count so the picker never misleads; fall back to the
-  // snapshot count for origins without a normalized Store row.
-  const storeSummariesQuery = useQuery({
-    queryKey: queryKeys.stores,
-    queryFn: () => getStores(),
-  });
-  const realCountByKey = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const s of storeSummariesQuery.data?.data ?? []) {
-      m.set(s.key, s.productCount);
-    }
-    return m;
-  }, [storeSummariesQuery.data]);
+  // Every crawled store (D1 read path — meta only, no product arrays). The
+  // live product counts come from the products collection, so a WAF-blocked
+  // 0-product snapshot can never mislead the picker (prosportsae: 441
+  // products in the catalogue, 0 in its blocked snapshot).
+  const { data: saved, isLoading, isError } = useStores();
   const stores = useMemo<StoreOption[]>(() => {
-    const latest = new Map<string, StoreOption>();
-    for (const c of saved?.data ?? []) {
-      const key = normalizeOrigin(c.origin);
-      if (!latest.has(key)) {
-        latest.set(key, {
-          key,
-          origin: c.origin,
-          productCount: realCountByKey.get(key) ?? c.productCount,
-          platform: c.platform,
-          updatedAt: c.updatedAt,
-        });
-      }
-    }
-    return [...latest.values()];
-  }, [saved, realCountByKey]);
+    return (saved?.data ?? []).map((s) => ({
+      key: s.key,
+      origin: s.origin,
+      productCount: s.productCount,
+      platform: s.platform?.platform ?? null,
+      updatedAt: s.updatedAt ?? "",
+    }));
+  }, [saved]);
 
   // Your website — a single persisted selection, used as store A everywhere.
   const myStoreQuery = useQuery({
@@ -437,10 +413,7 @@ function CompetitorsPage() {
               <EmptyStateCard message="Select a competitor card above to see the comparison." />
             ) : (
               filledSlots.map((slot) => (
-                <section
-                  key={slot.key}
-                  className="border border-border bg-card"
-                >
+                <Card key={slot.key}>
                   <div className="border-b border-border px-5 py-3.5">
                     <CompareSectionHeading labelA={myLabel} labelB={slot.key} />
                   </div>
@@ -453,7 +426,7 @@ function CompetitorsPage() {
                       />
                     ) : null}
                   </div>
-                </section>
+                </Card>
               ))
             )}
           </div>

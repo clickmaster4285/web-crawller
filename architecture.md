@@ -31,7 +31,7 @@
 Hard constraints from the existing codebase:
 
 - **Stack is TypeScript + Express + MongoDB, end to end.** The crawler
-  (`frontend/src/lib/crawler/`) is already Node-only TS, battle-tested across
+  (`backend/crawler/`) is already Node-only TS, battle-tested across
   8 build steps (tiered extraction, sitemap taxonomies, Woo/BigCommerce
   adapters, politeness, proxies, checkpointing). We do **not** rewrite it in
   Go; we extract it into worker processes (see §7 "Language decision").

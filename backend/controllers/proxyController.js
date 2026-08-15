@@ -13,13 +13,14 @@
 const path = require('path');
 const { pathToFileURL } = require('url');
 
-// undici ships with the frontend package (the crawler's HTTP layer uses its
-// ProxyAgent); resolve it from there so the backend never needs its own copy.
+// undici ships with the backend package (the crawler's HTTP layer uses its
+// ProxyAgent); resolve it from there (the crawler moved to backend/crawler on
+// Aug 10 — the frontend no longer carries crawler deps).
 // undici's own fetch is used (not the global one): Node's global fetch is a
 // different undici copy and rejects this package's ProxyAgent ("invalid
 // onRequestStart method" — undici 8.x agent under Node 24's global fetch).
 const { ProxyAgent, fetch: undiciFetch } = require(
-  require.resolve('undici', { paths: [path.join(__dirname, '../../frontend')] })
+  require.resolve('undici', { paths: [path.join(__dirname, '..')] })
 );
 
 const IP_ECHO_URL =
@@ -42,7 +43,7 @@ function loadSharedRedact() {
         const moduleUrl = pathToFileURL(
           path.join(
             __dirname,
-            '../../frontend/src/lib/crawler/core/http.ts'
+            '../crawler/core/http.ts'
           )
         ).href;
         const mod = await import(moduleUrl);

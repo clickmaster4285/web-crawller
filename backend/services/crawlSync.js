@@ -1,7 +1,6 @@
 /**
- * crawlSync — Phase 1 dual-write pipeline (architecture §9.5 step 3, decision
- * D1). Runs AFTER the legacy `CrawlResult` doc is saved and mirrors the same
- * crawl into the normalized model:
+ * crawlSync — the ingest pipeline (architecture §9.5 step 3, decision D1) —
+ * mirrors a finished crawl into the normalized model:
  *
  *   - `Product`       — current state, one doc per (origin, identityKey),
  *                       bulk-upserted; soft-deleted products keep their old
@@ -10,9 +9,6 @@
  *                       computed once at ingest via an identity-set diff.
  *   - `Snapshot`      — metadata + counts + capped key lists; history capped
  *                       at `SNAPSHOT_LIMIT` per origin (decision D3).
- *
- * Reads still come from the legacy `CrawlResult` until the new endpoints land
- * (Phase 3); this module only mirrors writes.
  */
 const Product = require('../models/Product');
 const Snapshot = require('../models/Snapshot');
@@ -28,7 +24,8 @@ const {
 } = require('../utils/matcher');
 
 // The non-product URL classifier — SINGLE source of truth, shared with the
-// crawler (frontend/src/lib/crawler/discover/junk-segments.ts) and the
+// crawler (backend/crawler/discover/junk-segments.ts — P6 moved the crawler
+// into the backend package) and the
 // tools/ ops scripts (junk purge/check). Node 24 strips TS types on import,
 // so a CJS file
 // loads it the same way worker.mjs loads the crawler engine. Cached so each
@@ -42,8 +39,7 @@ const {
 // depth so locale prefixes (/uae-en/, /om/) can't hide it.
 let junkFilterPromise = null;
 function getJunkFilter() {
-  junkFilterPromise ??= import(
-    '../../frontend/src/lib/crawler/discover/junk-segments.ts'
+  junkFilterPromise ??= import(      '../crawler/discover/junk-segments.ts'
   ).then((m) => m);
   return junkFilterPromise;
 }

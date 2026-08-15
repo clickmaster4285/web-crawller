@@ -23,6 +23,7 @@
  * credentials never reach the client (same rule as the old in-memory path).
  */
 import { createServerFn } from "@tanstack/react-start";
+import { getCookie } from "@tanstack/react-start/server";
 
 export interface CrawlRunInput {
   origin: string;
@@ -75,6 +76,24 @@ export interface CrawlRunInput {
    */
   productUrlPattern?: string;
   /**
+   * Optional region/locale token ("om", "ae", "sa", "en", "ar"…). Multi-
+   * country GCC stores publish a separate sitemap set per country (active-
+   * fitnessstore: `/om/sitemaps/…`; lifetimefitnessstore: `sitemap_om.xml`)
+   * — same products, different currencies. Discovery keeps only the matching
+   * region's sitemaps, so the crawl walks ONE country's catalogue (~4× less
+   * work, one currency). Empty = all regions.
+   */
+  locale?: string;
+  /**
+   * Per-store User-Agent: `"browser"` makes every request use a Chrome UA
+   * instead of the default ParityBot one — for WAF-blocked stores whose
+   * firewall 403s the ParityBot UA outright (dawlance.com.pk, prosportsae,
+   * athletix) while a browser UA gets 200s from the same IP. Default (omit)
+   * keeps the honest ParityBot identity everywhere else. Sent as a sentinel;
+   * the engine resolves it to the actual UA string.
+   */
+  userAgent?: "browser" | null;
+  /**
    * Analyze-first (P2 Phase 2): probe the store (~5–15s) before a manual
    * deep crawl starts and fold the recommendation into the job's params
    * (default true). Set false for instant re-crawls of already-known stores.
@@ -92,7 +111,13 @@ export interface CrawlRunResult {
     /** Total HTTP requests made this run (debug; absent on old results). */
     requests?: number;
   };
-  failures: Array<{ url: string; error: string }>;
+  failures: Array<{
+    url: string;
+    error: string;
+    /** P4: 'extraction' = page loaded but nothing parsed; 'http' = fetch
+     *  failed (blocked/rate-limited/network). Absent on legacy results. */
+    kind?: "extraction" | "http";
+  }>;
   products: Array<{
     name: string;
     brand: string;
@@ -214,6 +239,17 @@ export interface CrawlJobParams {
    * the live progress panel so you can verify which filter a run used.
    */
   productUrlPattern: string | null;
+  /**
+   * Region/locale token (null = all regions). Only sitemaps matching this
+   * region are crawled (GCC stores: one sitemap set per country). Shown on
+   * the live progress panel like the URL pattern.
+   */
+  locale: string | null;
+  /**
+   * Per-store User-Agent: `"browser"` (Chrome UA for WAF stores) or a raw
+   * UA string; null = default ParityBot UA. Shown on the live progress panel.
+   */
+  userAgent: string | null;
 }
 
 export type CrawlFrequency = "1h" | "6h" | "daily" | "weekly";
@@ -259,6 +295,24 @@ export interface ScheduleCrawlInput {
   proxy?: string;
   /** Optional product-URL filter regex (see CrawlRunInput.productUrlPattern). */
   productUrlPattern?: string;
+  /** Optional region/locale token (see CrawlRunInput.locale). */
+  locale?: string;
+  /** Per-store User-Agent (see CrawlRunInput.userAgent) — "browser" sentinel. */
+  userAgent?: "browser" | null;
+}
+
+/**
+ * One structured run-log line (Phase 5 observability) — the engine's onLog
+ * emissions (lifecycle + HTTP warnings like rate limits) and the worker's
+ * own lines (claimed → crawling → finished/cancelled/failed). Newest LAST;
+ * capped server-side at 200 lines per job.
+ */
+export interface CrawlLogLine {
+  /** Epoch ms when the line was emitted. */
+  at: number;
+  /** info / warn / error — drives the tint in the log view. */
+  level: "info" | "warn" | "error";
+  message: string;
 }
 
 /** Live snapshot of a crawl job, returned by `getCrawlProgress`. */
@@ -280,6 +334,13 @@ export interface CrawlJob {
    * while the job is still queued.
    */
   workerId: string | null;
+  /**
+   * P4: deployed engine version that ran this crawl (backend package version
+   * + git SHA at worker boot) — null while queued. Restarting the backend is
+   * how new engine code deploys, so a job running an old version is expected
+   * until the next restart.
+   */
+  crawlerVersion: string | null;
   /**
    * Last worker heartbeat (ms) — null while queued/terminal (never
    * heartbeated, or released after a crash).
@@ -320,6 +381,12 @@ export interface CrawlJob {
   fetchStartedAt: number | null;
   /** Live discovery counts while the discovery phase runs (null after). */
   discovery: CrawlJobDiscovery | null;
+  /**
+   * Structured run log — the crawl's story: engine lifecycle lines, HTTP
+   * warnings (429 rate limits), and the worker's own lines. Newest LAST,
+   * appended live as they arrive (polled with the job). Empty while queued.
+   */
+  log: CrawlLogLine[];
   finishedAt: number | null;
   /**
    * Pre-crawl analysis snapshot for manual deep crawls (null for shallow
@@ -339,15 +406,29 @@ export interface CrawlJob {
 const backendUrl = () =>
   process.env.PARITY_BACKEND_URL ?? "http://localhost:3000";
 
-// The WebsiteProfile type lives with the analyzer itself (frontend/src/lib/
-// crawler/analyze.ts) — imported type-only (erased at compile time, zero
-// runtime coupling) so the API boundary and the crawler can never drift apart
-// (the project's single-source-of-truth rule). Re-exported for callers.
+/**
+ * Phase 5 auth: these handlers run on the Nitro server and call the Express
+ * backend directly, so the browser's localStorage JWT is invisible here. The
+ * login flow mirrors the token into a `parity.token` cookie (`lib/http.ts`),
+ * which the browser sends with every same-origin request — recover it and
+ * forward it as the Authorization header the backend's auth middleware
+ * expects. Returns {} when no token is present (the backend 401s).
+ */
+function backendAuthHeaders(): Record<string, string> {
+  const token = getCookie("parity.token");
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+// The WebsiteProfile type lives with the analyzer itself (backend/crawler/
+// analyze.ts — P6 moved the server-side crawler into the backend package) —
+// imported type-only (erased at compile time, zero runtime coupling) so the
+// API boundary and the crawler can never drift apart (the project's
+// single-source-of-truth rule). Re-exported for callers.
 import type {
   WebsiteProfile,
   RecommendationTier,
   RenderVerdict,
-} from "@/lib/crawler/analyze";
+} from "../../../backend/crawler/analyze";
 
 export type { WebsiteProfile };
 
@@ -393,17 +474,29 @@ export interface CrawlJobAnalysis {
  * Sources store profile calls this from its "Run analysis" button.
  */
 export const analyzeWebsite = createServerFn({ method: "POST" })
-  .validator((input: { origin: string; proxy?: string }) => {
-    const origin = input.origin.trim();
-    if (!/^https?:\/\/\S+/i.test(origin)) {
-      throw new Error("Origin must be a valid http(s) URL");
-    }
-    return { ...input, origin, proxy: normalizeProxy(input.proxy) };
-  })
+  .validator(
+    (input: {
+      origin: string;
+      proxy?: string;
+      /** Probe with the browser UA when the store WAF-blocks ParityBot. */
+      userAgent?: "browser" | null;
+    }) => {
+      const origin = input.origin.trim();
+      if (!/^https?:\/\/\S+/i.test(origin)) {
+        throw new Error("Origin must be a valid http(s) URL");
+      }
+      return {
+        ...input,
+        origin,
+        proxy: normalizeProxy(input.proxy),
+        userAgent: normalizeUserAgent(input.userAgent),
+      };
+    },
+  )
   .handler(async ({ data }): Promise<WebsiteProfile> => {
     const res = await fetch(`${backendUrl()}/api/analyze`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...backendAuthHeaders() },
       body: JSON.stringify(data),
     });
     if (!res.ok) throw await backendError(res);
@@ -444,7 +537,7 @@ export const testProxy = createServerFn({ method: "POST" })
   .handler(async ({ data: proxy }): Promise<ProxyTestResult> => {
     const res = await fetch(`${backendUrl()}/api/proxy/test`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...backendAuthHeaders() },
       body: JSON.stringify({ proxy }),
     });
     if (!res.ok) throw await backendError(res);
@@ -480,6 +573,19 @@ function normalizeUrlPattern(pattern: string | undefined): string | undefined {
   return trimmed?.slice(0, 200) || undefined;
 }
 
+/** Trims + lowercases the optional region/locale token (empty → undefined). */
+function normalizeLocale(locale: string | undefined): string | undefined {
+  const trimmed = locale?.trim().toLowerCase() || undefined;
+  return trimmed?.slice(0, 10) || undefined;
+}
+
+/** Only the "browser" sentinel is accepted today (anything else → default UA). */
+function normalizeUserAgent(
+  userAgent: "browser" | null | undefined,
+): "browser" | undefined {
+  return userAgent === "browser" ? "browser" : undefined;
+}
+
 /** Light client-side validation (the backend clamps + re-validates). */
 function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
   const origin = input.origin.trim();
@@ -492,6 +598,8 @@ function validateCrawlInput(input: CrawlRunInput): CrawlRunInput {
     type: input.type === "shallow" ? "shallow" : "deep",
     proxy: normalizeProxy(input.proxy),
     productUrlPattern: normalizeUrlPattern(input.productUrlPattern),
+    locale: normalizeLocale(input.locale),
+    userAgent: normalizeUserAgent(input.userAgent),
   };
 }
 
@@ -514,7 +622,10 @@ export const startCrawl = createServerFn({ method: "POST" })
     }): Promise<{ jobId: string; analysis: CrawlJobAnalysis | null }> => {
       const res = await fetch(`${backendUrl()}/api/crawl-jobs`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...backendAuthHeaders(),
+        },
         body: JSON.stringify(data),
       });
       if (!res.ok) throw await backendError(res);
@@ -532,6 +643,7 @@ export const getCrawlProgress = createServerFn({ method: "POST" })
   .handler(async ({ data: jobId }): Promise<CrawlJob | null> => {
     const res = await fetch(
       `${backendUrl()}/api/crawl-jobs/${encodeURIComponent(jobId)}`,
+      { headers: backendAuthHeaders() },
     );
     if (res.status === 404) return null;
     if (!res.ok) throw await backendError(res);
@@ -555,6 +667,8 @@ function validateScheduleInput(input: ScheduleCrawlInput): ScheduleCrawlInput {
     origin,
     proxy: normalizeProxy(input.proxy),
     productUrlPattern: normalizeUrlPattern(input.productUrlPattern),
+    locale: normalizeLocale(input.locale),
+    userAgent: normalizeUserAgent(input.userAgent),
   };
 }
 
@@ -568,7 +682,10 @@ export const scheduleCrawl = createServerFn({ method: "POST" })
   .handler(async ({ data }): Promise<CrawlSchedule> => {
     const res = await fetch(`${backendUrl()}/api/crawl-jobs/schedules`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...backendAuthHeaders(),
+      },
       body: JSON.stringify(data),
     });
     if (!res.ok) throw await backendError(res);
@@ -582,7 +699,9 @@ export const scheduleCrawl = createServerFn({ method: "POST" })
 /** Lists the active recurring crawls (most recently updated first). */
 export const getCrawlSchedules = createServerFn({ method: "POST" }).handler(
   async (): Promise<CrawlSchedule[]> => {
-    const res = await fetch(`${backendUrl()}/api/crawl-jobs/schedules`);
+    const res = await fetch(`${backendUrl()}/api/crawl-jobs/schedules`, {
+      headers: backendAuthHeaders(),
+    });
     if (!res.ok) throw await backendError(res);
     const body = (await res.json()) as {
       success: boolean;
@@ -598,7 +717,7 @@ export const cancelCrawlSchedule = createServerFn({ method: "POST" })
   .handler(async ({ data: origin }): Promise<{ cancelled: boolean }> => {
     const res = await fetch(
       `${backendUrl()}/api/crawl-jobs/schedules/${encodeURIComponent(origin)}`,
-      { method: "DELETE" },
+      { method: "DELETE", headers: backendAuthHeaders() },
     );
     if (!res.ok) throw await backendError(res);
     return { cancelled: true };
@@ -611,7 +730,9 @@ export const cancelCrawlSchedule = createServerFn({ method: "POST" })
  */
 export const listActiveCrawlJobs = createServerFn({ method: "POST" }).handler(
   async (): Promise<{ active: CrawlJob[]; recent: CrawlJob[] }> => {
-    const res = await fetch(`${backendUrl()}/api/crawl-jobs/active`);
+    const res = await fetch(`${backendUrl()}/api/crawl-jobs/active`, {
+      headers: backendAuthHeaders(),
+    });
     if (!res.ok) throw await backendError(res);
     const body = (await res.json()) as {
       success: boolean;
@@ -627,7 +748,7 @@ export const pauseCrawlJob = createServerFn({ method: "POST" })
   .handler(async ({ data: jobId }): Promise<{ id: string }> => {
     const res = await fetch(
       `${backendUrl()}/api/crawl-jobs/${encodeURIComponent(jobId)}/pause`,
-      { method: "POST" },
+      { method: "POST", headers: backendAuthHeaders() },
     );
     if (!res.ok) throw await backendError(res);
     const body = (await res.json()) as {
@@ -643,7 +764,7 @@ export const resumeCrawlJob = createServerFn({ method: "POST" })
   .handler(async ({ data: jobId }): Promise<{ id: string }> => {
     const res = await fetch(
       `${backendUrl()}/api/crawl-jobs/${encodeURIComponent(jobId)}/resume`,
-      { method: "POST" },
+      { method: "POST", headers: backendAuthHeaders() },
     );
     if (!res.ok) throw await backendError(res);
     const body = (await res.json()) as {
@@ -662,7 +783,7 @@ export const cancelCrawlJob = createServerFn({ method: "POST" })
   .handler(async ({ data: jobId }): Promise<{ id: string }> => {
     const res = await fetch(
       `${backendUrl()}/api/crawl-jobs/${encodeURIComponent(jobId)}/cancel`,
-      { method: "POST" },
+      { method: "POST", headers: backendAuthHeaders() },
     );
     if (!res.ok) throw await backendError(res);
     const body = (await res.json()) as {

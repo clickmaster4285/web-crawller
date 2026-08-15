@@ -1,6 +1,7 @@
 import { CalendarClock, Globe, Loader2, Play, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -64,7 +65,7 @@ export function CrawlSetupPanel({
   const canStart = !startPending && !running && crawlOrigin.trim().length > 0;
 
   return (
-    <section className="border border-border bg-card">
+    <Card>
       <div className="flex items-center gap-2 border-b border-border px-6 py-4">
         <Globe className="size-4 text-muted-foreground" />
         <h2 className="font-display text-xl">Start a crawl</h2>
@@ -180,6 +181,6 @@ export function CrawlSetupPanel({
           origin replaces its existing schedule.
         </p>
       </div>
-    </section>
+    </Card>
   );
 }

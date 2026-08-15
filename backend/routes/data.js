@@ -1,12 +1,17 @@
 const express = require("express");
 const dataController = require("../controllers/dataController");
-const crawlController = require("../controllers/crawlController");
 const competitorController = require("../controllers/competitorController");
 const myStoreController = require("../controllers/myStoreController");
 const alertsController = require("../controllers/alertsController");
+const metricsController = require("../controllers/metricsController");
 const auth = require("../middleware/auth");
 
 const router = express.Router();
+
+// Phase 5 — the whole data API is auth-protected. The frontend attaches the
+// JWT on every request (`lib/http.ts`) and redirects to login on 401; only
+// /api/auth/* stays open (login/register).
+router.use(auth);
 
 router.get("/workspace", dataController.workspace);
 router.get("/my-store", myStoreController.getMyStore);
@@ -21,15 +26,14 @@ router.get("/catalogue", dataController.catalogue);
 router.get("/insights", dataController.insights);
 router.get("/reports", dataController.reports);
 
-// Phase 4 — alerts feed + per-user read/dismiss state (auth-protected).
-router.get("/alerts", auth, alertsController.list);
-router.post("/alerts/read", auth, alertsController.markRead);
-router.post("/alerts/read-all", auth, alertsController.markAllRead);
-router.post("/alerts/dismiss", auth, alertsController.dismiss);
+// Phase 5 — observability: crawl-job health snapshot (queue, workers,
+// throughput, durations — all derived live from CrawlJob).
+router.get("/metrics", metricsController.getMetrics);
 
-// Saved crawl results (persisted by the worker's dual-write after a crawl).
-router.get("/crawl-results", crawlController.getCrawlResults);
-router.delete("/crawl-results", crawlController.deleteCrawlResultsByOrigin);
-router.delete("/crawl-results/:id", crawlController.deleteCrawlResult);
+// Phase 4 — alerts feed + per-user read/dismiss state (auth via router.use).
+router.get("/alerts", alertsController.list);
+router.post("/alerts/read", alertsController.markRead);
+router.post("/alerts/read-all", alertsController.markAllRead);
+router.post("/alerts/dismiss", alertsController.dismiss);
 
 module.exports = router;

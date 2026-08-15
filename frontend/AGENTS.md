@@ -591,6 +591,15 @@ includes `'fuzzy'`); the enum values match end to end.**
 
 # Crawler — generic e-commerce crawler
 
+**Location note (Aug 10):** the crawler engine moved from `src/lib/crawler/`
+to **`backend/crawler/`** — it is server-side-only code (runs inside backend
+workers, backend controllers, ingest, and `tools/`), and its runtime deps
+(`undici`, `robots-parser`, `playwright`, `better-sqlite3`) now live in
+`backend/package.json`. The frontend imports nothing from it except
+**types** (`crawl.ts` → `../../backend/crawler/analyze.ts`, type-only,
+erased at compile time). This section's `src/lib/crawler/...` paths are
+historical — read them as `backend/crawler/...`.
+
 The crawler started Shopify-only (hardcoded `/products/{handle}.json`), but
 build steps 1–5 below are done: it is now a **generic engine** with a Shopify
 native adapter, JSON-LD/microdata/OG/HTML extraction, sitemap + HTML-crawl
@@ -608,26 +617,19 @@ current state of the work so anyone (human or agent) can pick it up.
 
 ## What we have today (state at start of plan)
 
-- `src/lib/crawler/http.ts` — `fetchWithRetry`, `fetchText`, `fetchJson`,
+- `backend/crawler/core/http.ts` — `fetchWithRetry`, `fetchText`, `fetchJson`,
   `parseRetryAfter`, `httpOptions`. Global `fetch`, configurable delay + retries
   + UA. Exponential backoff honoring `Retry-After`.
-- `src/lib/crawler/discover.ts` — `fetchSitemapUrls` (sitemap + sitemapindex,
-  depth ≤ 3), `extractLocs`, `discoverCollectionHandles` (Shopify collection
-  page pagination, extracts `/products/{handle}`). *(Removed in a later
-  cleanup — the refactor moved this into `discover/sitemap.ts` and
-  `adapters/shopify-discover.ts`.)*
-- `src/lib/crawler/parse.ts` — `parseShopifyProduct`, `RawProduct`,
-  `RawVariant`. Only knows the Shopify `{ product: { ... } }` envelope.
-  *(Removed in a later cleanup — lives in `adapters/shopify-parse.ts`.)*
-- `src/lib/crawler/normalize.ts` — `toMatchedProduct`, `stockStatus`. Bridge
-  from `CrawledProduct` to app `MatchedProduct`. *(Removed in a later
-  cleanup — the CrawledProduct-based engine never imported it; the API
-  layer maps between the two shapes.)*
-- `src/lib/crawler/types.ts` — `CrawledProduct`, `CrawledVariant`,
+- `backend/crawler/discover/sitemap.ts` — `fetchSitemapUrls` (sitemap +
+  sitemapindex, depth ≤ 3), `extractLocs`, `discoverCollectionHandles`
+  (Shopify collection page pagination, extracts `/products/{handle}`).
+- `backend/crawler/adapters/shopify-parse.ts` — `parseShopifyProduct`,
+  `RawProduct`, `RawVariant`. Only knows the Shopify `{ product: { ... } }`
+  envelope.
+- `backend/crawler/core/types.ts` — `CrawledProduct`, `CrawledVariant`,
   `CrawlConfig`, `CrawlStats`, `CrawlResult`, `CrawlFailure`.
-- `src/lib/crawler/index.ts` — `runCrawl` (collection-scoped) and
-  `runSitemapCrawl` (full catalogue via sitemap). Sequential per-product
-  fetches, no persistence, no dedupe, no concurrency control.
+- `backend/crawler/index.ts` — `runCrawl` (collection-scoped),
+  `runSitemapCrawl` (full catalogue via sitemap) and `runCrawlCollections`.
 - `scripts/crawl-obdesigns.ts` — thin wrapper that calls `runCrawl` for the
   OB Designs store and writes JSON.
 
@@ -758,7 +760,7 @@ Puppeteer (Playwright supersedes).
 ## Target architecture
 
 ```
-src/lib/crawler/
+backend/crawler/            # lives in the backend package — server-side only
 ├── core/                      # engine — same for every site
 │   ├── queue.ts               # bounded concurrency per host
 │   ├── politeness.ts          # robots.txt + per-host adaptive throttle
@@ -813,10 +815,11 @@ step, pause and confirm before moving on.
 ## Current state
 
 - **2026-08 hardening (non-product junk filter):** the classifier lives ONCE
-  in `discover/junk-segments.ts` (`JUNK_SEGMENT_RE` + `hasJunkSegment` +
-  `pathSegments` + `PRODUCT_BASE_RE` + `isProductUrl`) — the crawler imports
-  it directly, and `backend/services/crawlSync.js` (ingest guard) + the
-  `tools/` ops scripts load it via `await import()` (Node 24 type-stripping).
+  in `backend/crawler/discover/junk-segments.ts` (`JUNK_SEGMENT_RE` +
+  `hasJunkSegment` + `pathSegments` + `PRODUCT_BASE_RE` + `isProductUrl`) —
+  the crawler imports it directly, and `backend/services/crawlSync.js`
+  (ingest guard) + the `tools/` ops scripts load it via `await import()`
+  (Node 24 type-stripping).
   `discover/index.ts` strips junk segments at ANY path depth from every
   sitemap source and drops non-base URLs when a firm 60%+ majority sits
   under `/product(s)/`; a run that filtered junk reports the count as a

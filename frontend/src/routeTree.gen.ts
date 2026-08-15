@@ -19,6 +19,7 @@ import { Route as AuthenticatedCompetitorsIndexRouteImport } from './pages/_auth
 import { Route as AuthenticatedCrawlerIndexRouteImport } from './pages/_authenticated/crawler/index'
 import { Route as AuthenticatedCrawlsIndexRouteImport } from './pages/_authenticated/crawls/index'
 import { Route as AuthenticatedInsightsIndexRouteImport } from './pages/_authenticated/insights/index'
+import { Route as AuthenticatedMetricsIndexRouteImport } from './pages/_authenticated/metrics/index'
 import { Route as AuthenticatedPricingIndexRouteImport } from './pages/_authenticated/pricing/index'
 import { Route as AuthenticatedProductsIndexRouteImport } from './pages/_authenticated/products/index'
 import { Route as AuthenticatedReportsIndexRouteImport } from './pages/_authenticated/reports/index'
@@ -80,6 +81,12 @@ const AuthenticatedInsightsIndexRoute =
     path: '/insights/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedMetricsIndexRoute =
+  AuthenticatedMetricsIndexRouteImport.update({
+    id: '/metrics/',
+    path: '/metrics/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedPricingIndexRoute =
   AuthenticatedPricingIndexRouteImport.update({
     id: '/pricing/',
@@ -122,6 +129,7 @@ export interface FileRoutesByFullPath {
   '/crawler/': typeof AuthenticatedCrawlerIndexRoute
   '/crawls/': typeof AuthenticatedCrawlsIndexRoute
   '/insights/': typeof AuthenticatedInsightsIndexRoute
+  '/metrics/': typeof AuthenticatedMetricsIndexRoute
   '/pricing/': typeof AuthenticatedPricingIndexRoute
   '/products/': typeof AuthenticatedProductsIndexRoute
   '/reports/': typeof AuthenticatedReportsIndexRoute
@@ -138,6 +146,7 @@ export interface FileRoutesByTo {
   '/crawler': typeof AuthenticatedCrawlerIndexRoute
   '/crawls': typeof AuthenticatedCrawlsIndexRoute
   '/insights': typeof AuthenticatedInsightsIndexRoute
+  '/metrics': typeof AuthenticatedMetricsIndexRoute
   '/pricing': typeof AuthenticatedPricingIndexRoute
   '/products': typeof AuthenticatedProductsIndexRoute
   '/reports': typeof AuthenticatedReportsIndexRoute
@@ -156,6 +165,7 @@ export interface FileRoutesById {
   '/_authenticated/crawler/': typeof AuthenticatedCrawlerIndexRoute
   '/_authenticated/crawls/': typeof AuthenticatedCrawlsIndexRoute
   '/_authenticated/insights/': typeof AuthenticatedInsightsIndexRoute
+  '/_authenticated/metrics/': typeof AuthenticatedMetricsIndexRoute
   '/_authenticated/pricing/': typeof AuthenticatedPricingIndexRoute
   '/_authenticated/products/': typeof AuthenticatedProductsIndexRoute
   '/_authenticated/reports/': typeof AuthenticatedReportsIndexRoute
@@ -174,6 +184,7 @@ export interface FileRouteTypes {
     | '/crawler/'
     | '/crawls/'
     | '/insights/'
+    | '/metrics/'
     | '/pricing/'
     | '/products/'
     | '/reports/'
@@ -190,6 +201,7 @@ export interface FileRouteTypes {
     | '/crawler'
     | '/crawls'
     | '/insights'
+    | '/metrics'
     | '/pricing'
     | '/products'
     | '/reports'
@@ -207,6 +219,7 @@ export interface FileRouteTypes {
     | '/_authenticated/crawler/'
     | '/_authenticated/crawls/'
     | '/_authenticated/insights/'
+    | '/_authenticated/metrics/'
     | '/_authenticated/pricing/'
     | '/_authenticated/products/'
     | '/_authenticated/reports/'
@@ -291,6 +304,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedInsightsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/metrics/': {
+      id: '/_authenticated/metrics/'
+      path: '/metrics'
+      fullPath: '/metrics/'
+      preLoaderRoute: typeof AuthenticatedMetricsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/pricing/': {
       id: '/_authenticated/pricing/'
       path: '/pricing'
@@ -338,6 +358,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedCrawlerIndexRoute: typeof AuthenticatedCrawlerIndexRoute
   AuthenticatedCrawlsIndexRoute: typeof AuthenticatedCrawlsIndexRoute
   AuthenticatedInsightsIndexRoute: typeof AuthenticatedInsightsIndexRoute
+  AuthenticatedMetricsIndexRoute: typeof AuthenticatedMetricsIndexRoute
   AuthenticatedPricingIndexRoute: typeof AuthenticatedPricingIndexRoute
   AuthenticatedProductsIndexRoute: typeof AuthenticatedProductsIndexRoute
   AuthenticatedReportsIndexRoute: typeof AuthenticatedReportsIndexRoute
@@ -353,6 +374,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedCrawlerIndexRoute: AuthenticatedCrawlerIndexRoute,
   AuthenticatedCrawlsIndexRoute: AuthenticatedCrawlsIndexRoute,
   AuthenticatedInsightsIndexRoute: AuthenticatedInsightsIndexRoute,
+  AuthenticatedMetricsIndexRoute: AuthenticatedMetricsIndexRoute,
   AuthenticatedPricingIndexRoute: AuthenticatedPricingIndexRoute,
   AuthenticatedProductsIndexRoute: AuthenticatedProductsIndexRoute,
   AuthenticatedReportsIndexRoute: AuthenticatedReportsIndexRoute,

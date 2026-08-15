@@ -3,9 +3,81 @@ import { http } from "@/lib/http";
 /**
  * REST client for the Phase 5 store read path (`/api/stores`, architecture
  * §6) — backed by the normalized collections (Store / Product / Snapshot /
- * ProductEvent) so the UI can leave the legacy `CrawlResult` dumps (decision
- * D1). `:key` is the normalized host (matches `normalizeOrigin`).
+ * ProductEvent). The legacy crawlresults collection is no longer read
+ * (decision D1). `:key` is the normalized host (matches `normalizeOrigin`).
  */
+
+/** Per-strategy discovery diagnostics captured during a crawl run (shared
+ *  by the legacy SavedCrawl shape and the normalized Snapshot — D1). */
+export interface CrawlDiscovery {
+  collections: Array<{ collection: string; handles: number; error?: string }>;
+  sitemap: {
+    urls: number;
+    lastmod: number;
+    error?: string;
+    /** Sitemap candidates tried (robots.txt-declared first), with outcomes. */
+    candidates?: Array<{
+      url: string;
+      source: "robots.txt" | "default";
+      status: "ok" | "html" | "error";
+      urls: number;
+      productUrls: number;
+      error?: string;
+    }>;
+  };
+  htmlCrawl: {
+    urls: number;
+    pagesVisited: number;
+    truncated: boolean;
+    error?: string;
+  };
+  /** Detected store platform (Shopify/WooCommerce/…) plus the signal used. */
+  platform?: {
+    platform: string;
+    signal: string;
+    kind?: "store" | "corporate" | "unknown";
+    cms?: string;
+    builder?: string;
+    seoPlugin?: string;
+    server?: string;
+    generator?: string;
+  };
+  /** robots.txt presence + declared crawl-delay (absent for old crawls). */
+  robots?: {
+    status: "found" | "absent" | "unreachable" | "skipped";
+    crawlDelayMs: number | null;
+  };
+  /** Homepage analysis (store vs corporate, external store links). */
+  homepage?: {
+    productLinks: number;
+    categoryLinks: number;
+    looksLikeStore: boolean;
+    externalStoreLinks: Array<{ url: string; host: string; label: string }>;
+    note: string;
+  };
+  /** WooCommerce native REST API outcome (Tier 3), when probed. */
+  wooCommerce?: {
+    status: "public" | "auth-required" | "unavailable";
+    total: number | null;
+    urls: number;
+    message?: string;
+  };
+  /** BigCommerce Storefront API outcome (Tier 3), when probed. */
+  bigCommerce?: {
+    status: "public" | "auth-required" | "unavailable";
+    total: number | null;
+    urls: number;
+    message?: string;
+  };
+  /** Human-readable findings/suggestions surfaced to the user. */
+  findings?: Array<{
+    level: "info" | "warning" | "success";
+    message: string;
+    action?: { label: string; url: string };
+  }>;
+  /** Verbose discovery log (what the crawler did, in order). */
+  log?: string[];
+}
 
 /** Meta-only summary of one crawled store. */
 export interface StoreSummary {
@@ -32,6 +104,11 @@ export interface StoreSummary {
   scheduledFrequency: "1h" | "6h" | "daily" | "weekly" | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /**
+   * Snapshot history (metadata only, newest first) — present only when the
+   * list was fetched with `withSnapshots: true` (the /crawls history page).
+   */
+  snapshots?: StoreSnapshot[];
 }
 
 /** One row of the product catalogue (never full docs). */
@@ -60,7 +137,8 @@ export interface StoreProduct {
   priceHistory: Array<{ t: string; price: number; available: boolean }>;
 }
 
-/** Metadata-only snapshot (no product arrays). */
+/** Metadata-only snapshot (no product arrays — the catalogue lives in
+ *  Product; history is this doc plus ProductEvent rows). */
 export interface StoreSnapshot {
   _id: string;
   origin: string;
@@ -84,7 +162,7 @@ export interface StoreSnapshot {
   stockChangedCount: number;
   addedKeys: string[];
   removedKeys: string[];
-  discovery: unknown | null;
+  discovery: CrawlDiscovery | null;
   failures: Array<{ url: string; error: string }>;
 }
 
@@ -130,15 +208,23 @@ export interface StoreEventsParams {
   cursor?: string;
 }
 
-/** Lists every crawled store (meta only). */
-export const getStores = () =>
-  http.get<{ success: boolean; count: number; data: StoreSummary[] }>(
-    "/stores",
+/**
+ * Lists every crawled store (meta only). Pass `withSnapshots: true` to also
+ * embed each store's snapshot history (the /crawls page's one-shot read).
+ */
+export const getStores = (params: { withSnapshots?: boolean } = {}) => {
+  const qs = new URLSearchParams();
+  if (params.withSnapshots) qs.set("withSnapshots", "1");
+  const query = qs.toString();
+  return http.get<{ success: boolean; count: number; data: StoreSummary[] }>(
+    `/stores${query ? `?${query}` : ""}`,
   );
+};
 
 /**
- * Deletes a store everywhere (normalized collections + legacy CrawlResult) —
- * the D1 read-path delete.
+ * Deletes a store from the normalized collections (Store / Product /
+ * Snapshot / ProductEvent). The frozen legacy crawlresults collection is
+ * intentionally left untouched.
  */
 export const deleteStore = (key: string) =>
   http.del<{
@@ -149,7 +235,6 @@ export const deleteStore = (key: string) =>
         products: number;
         snapshots: number;
         events: number;
-        legacy: number;
       };
     };
   }>(`/stores/${encodeURIComponent(key)}`);
@@ -187,6 +272,26 @@ export const getStoreSnapshots = (
     `/stores/${encodeURIComponent(key)}/snapshots${query ? `?${query}` : ""}`,
   );
 };
+
+/**
+ * Deletes ONE snapshot from a store's history (the /crawls row's trash
+ * button) — D1 replacement for the legacy per-snapshot delete.
+ */
+export const deleteStoreSnapshot = (key: string, id: string) =>
+  http.del<{
+    success: boolean;
+    data: { deleted: boolean; id: string; key: string; origin: string };
+  }>(`/stores/${encodeURIComponent(key)}/snapshots/${encodeURIComponent(id)}`);
+
+/**
+ * Clears a store's crawl history (snapshots only — the current catalogue is
+ * untouched) — D1 replacement for the legacy clear-by-origin endpoint.
+ */
+export const deleteStoreSnapshots = (key: string) =>
+  http.del<{
+    success: boolean;
+    data: { deleted: boolean; key: string; deletedCount: number };
+  }>(`/stores/${encodeURIComponent(key)}/snapshots`);
 
 /** Change-log events for a store ("what's new"), with since/type filters. */
 export const getStoreEvents = (key: string, params: StoreEventsParams = {}) => {

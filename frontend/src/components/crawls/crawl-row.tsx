@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import {
   ArrowUpRight,
   ChevronDown,
@@ -10,49 +11,110 @@ import {
   Zap,
 } from "lucide-react";
 
-import { CrawlDiffSummary } from "@/components/cards/crawl-diff-summary";
+import {
+  CrawlDiffSummary,
+  type DiffProduct,
+} from "@/components/cards/crawl-diff-summary";
 import { CrawlStatsGrid } from "@/components/cards/crawl-stats-grid";
 import { ProductCell } from "@/components/common/product-cell";
 import { StockBadge } from "@/components/common/stock-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { SavedCrawl } from "@/api";
+import { CardList } from "@/components/ui/card";
 import {
-  computeCrawlDiff,
-  crawlType,
+  getStoreEvents,
+  getStoreProducts,
+  type StoreProduct,
+  type StoreSnapshot,
+} from "@/api";
+import {
   formatCrawlDate,
   normalizeOrigin,
   productUrlPattern,
   robotsText,
+  snapshotType,
 } from "@/utils/crawls";
 import { formatPrice } from "@/utils/format";
 
-/** One expandable snapshot row in a store's history on /crawls. */
+/**
+ * One expandable snapshot row in a store's history on /crawls — reads the
+ * D1 read path: the Snapshot doc carries stats/discovery/failures and the
+ * ingest-time change counts; the new-products list comes from the store's
+ * ProductEvent change log (filtered to this snapshot); the preview shows the
+ * CURRENT catalogue (snapshots no longer embed product arrays).
+ */
 export function CrawlRow({
-  crawl,
-  previous,
+  snapshot,
+  origin,
+  storeKey,
+  storeCount,
+  hasPrevious,
   expanded,
   onToggle,
   onRecrawl,
   onDelete,
 }: {
-  crawl: SavedCrawl;
-  previous: SavedCrawl | undefined;
+  snapshot: StoreSnapshot;
+  /** Store origin URL (for recrawl prefill + links). */
+  origin: string;
+  /** Normalized host (for the read-path API calls). */
+  storeKey: string;
+  /** Current catalogue size — the "View all N" link target. */
+  storeCount: number;
+  /** True when an older snapshot exists (badge reads "no change" vs "first"). */
+  hasPrevious: boolean;
   expanded: boolean;
   onToggle: () => void;
   onRecrawl: () => void;
   onDelete: () => void;
 }) {
-  const diff = computeCrawlDiff(crawl.products, previous?.products);
-  const d = crawl.discovery;
+  const d = snapshot.discovery;
   // Shallow runs are sitemap-only checks — they fetch just new products, so
-  // their results are partial (never a full catalogue). Missing type on old
-  // snapshots = deep (they were all full crawls before the field landed).
-  const shallow = crawlType(crawl) === "shallow";
+  // their results are partial (never a full catalogue). Snapshot.full is the
+  // normalized equivalent of the legacy `type` field.
+  const shallow = snapshotType(snapshot) === "shallow";
   const parseRate =
-    crawl.stats.fetched > 0
-      ? Math.round((crawl.products.length / crawl.stats.fetched) * 100)
+    snapshot.stats.fetched > 0
+      ? Math.round((snapshot.productCount / snapshot.stats.fetched) * 100)
       : null;
+
+  // The new-products list — the ingest-time change log for THIS snapshot
+  // (added events carry name/url/price, which the snapshot's key lists lack).
+  // Fetched only when the row is expanded.
+  const eventsQuery = useQuery({
+    queryKey: ["crawl-row-events", storeKey, snapshot._id],
+    queryFn: () => getStoreEvents(storeKey, { limit: 100 }),
+    enabled: expanded,
+  });
+  const addedProducts = (eventsQuery.data?.data ?? [])
+    .filter((e) => e.snapshotId === snapshot._id && e.type === "added")
+    .map((e): DiffProduct => ({
+      name: e.name,
+      url: e.url,
+      price: e.new?.price ?? 0,
+      available: e.new?.available ?? true,
+    }));
+
+  // Product preview — the CURRENT catalogue (snapshots carry no products on
+  // the normalized model). Fetched only when the row is expanded.
+  const previewQuery = useQuery({
+    queryKey: ["store-products-preview", storeKey],
+    queryFn: () => getStoreProducts(storeKey, { limit: 8 }),
+    enabled: expanded,
+  });
+  const previewProducts: StoreProduct[] = previewQuery.data?.data ?? [];
+  const firstUrl = previewProducts[0]?.url;
+
+  const badge = hasPrevious
+    ? snapshot.addedCount > 0
+      ? { tone: "success" as const, text: `+${snapshot.addedCount} new` }
+      : snapshot.removedCount > 0 || snapshot.priceChangedCount > 0
+        ? {
+            tone: "default" as const,
+            text: `${snapshot.removedCount} removed · ${snapshot.priceChangedCount} price changed`,
+          }
+        : { tone: "default" as const, text: "no change" }
+    : null;
 
   return (
     <div>
@@ -66,15 +128,15 @@ export function CrawlRow({
           <span className="min-w-0">
             <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
               <span className="numeric text-xs">
-                {formatCrawlDate(crawl.updatedAt)}
+                {formatCrawlDate(snapshot.finishedAt)}
               </span>
               <span className="text-muted-foreground">·</span>
-              <span>{crawl.products.length} products</span>
-              {crawl.failures.length > 0 ? (
+              <span>{snapshot.productCount} products</span>
+              {snapshot.failures.length > 0 ? (
                 <>
                   <span className="text-muted-foreground">·</span>
                   <span className="text-destructive">
-                    {crawl.failures.length} failed
+                    {snapshot.failures.length} failed
                   </span>
                 </>
               ) : null}
@@ -82,24 +144,18 @@ export function CrawlRow({
           </span>
         </button>
 
-        {diff ? (
-          diff.newProducts.length > 0 ? (
-            <Badge
-              variant="secondary"
-              className="gap-1 border-success/40 font-normal text-success"
-            >
-              <ArrowUpRight className="size-3" /> +{diff.newProducts.length} new
-            </Badge>
-          ) : diff.removedProducts.length > 0 || diff.priceChangedCount > 0 ? (
-            <Badge variant="secondary" className="font-normal">
-              {diff.removedProducts.length} removed · {diff.priceChangedCount}{" "}
-              price changed
-            </Badge>
-          ) : (
-            <Badge variant="secondary" className="font-normal">
-              no change
-            </Badge>
-          )
+        {badge ? (
+          <Badge
+            variant="secondary"
+            className={`gap-1 font-normal ${
+              badge.tone === "success" ? "border-success/40 text-success" : ""
+            }`}
+          >
+            {badge.tone === "success" ? (
+              <ArrowUpRight className="size-3" />
+            ) : null}
+            {badge.text}
+          </Badge>
         ) : (
           <Badge variant="secondary" className="font-normal">
             first snapshot
@@ -149,16 +205,16 @@ export function CrawlRow({
 
       {expanded ? (
         <div className="space-y-5 border-t border-border bg-muted/30 px-4 py-4 sm:px-5">
-          <CrawlStatsGrid stats={crawl.stats} />
+          <CrawlStatsGrid stats={snapshot.stats} />
 
-          {diff ? (
+          {hasPrevious ? (
             <div>
               <p className="label-caps mb-2">Changes since previous crawl</p>
               <CrawlDiffSummary
-                newCount={diff.newProducts.length}
-                removedCount={diff.removedProducts.length}
-                priceChangedCount={diff.priceChangedCount}
-                products={diff.newProducts}
+                newCount={snapshot.addedCount}
+                removedCount={snapshot.removedCount}
+                priceChangedCount={snapshot.priceChangedCount}
+                products={addedProducts}
                 listTitle="New products found this run"
               />
             </div>
@@ -167,7 +223,7 @@ export function CrawlRow({
           {d ? (
             <div>
               <p className="label-caps mb-2">Discovery</p>
-              <ul className="divide-y divide-border border border-border bg-card text-sm">
+              <CardList className="text-sm">
                 <li className="flex items-center justify-between gap-4 p-3">
                   <span>Platform</span>
                   <span className="text-xs text-muted-foreground">
@@ -193,9 +249,7 @@ export function CrawlRow({
                 <li className="flex items-center justify-between gap-4 p-3">
                   <span>Product URL pattern</span>
                   <span className="numeric text-xs text-muted-foreground">
-                    {crawl.products[0]
-                      ? productUrlPattern(crawl.products[0].url)
-                      : "—"}
+                    {firstUrl ? productUrlPattern(firstUrl) : "—"}
                   </span>
                 </li>
                 <li className="flex items-center justify-between gap-4 p-3">
@@ -212,29 +266,29 @@ export function CrawlRow({
                     </span>
                   </li>
                 ) : null}
-              </ul>
+              </CardList>
             </div>
           ) : null}
 
-          {crawl.products.length > 0 ? (
+          {previewProducts.length > 0 ? (
             <div>
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <p className="label-caps">
-                  Products ({crawl.products.length}) — first{" "}
-                  {Math.min(crawl.products.length, 8)}
+                  Products ({snapshot.productCount.toLocaleString()}) — current
+                  catalogue, first {Math.min(previewProducts.length, 8)}
                 </p>
                 <Button asChild variant="outline" size="sm">
                   <Link
                     to="/stores/$origin"
-                    params={{ origin: normalizeOrigin(crawl.origin) }}
+                    params={{ origin: normalizeOrigin(origin) }}
                   >
                     <Eye className="size-3.5" /> View all{" "}
-                    {crawl.products.length.toLocaleString()}
+                    {storeCount.toLocaleString()}
                   </Link>
                 </Button>
               </div>
-              <ul className="divide-y divide-border border border-border bg-card">
-                {crawl.products.slice(0, 8).map((p) => (
+              <CardList>
+                {previewProducts.map((p) => (
                   <li
                     key={p.url}
                     className="flex items-center justify-between gap-3 p-3 text-sm"
@@ -243,12 +297,12 @@ export function CrawlRow({
                     <span className="flex shrink-0 items-center gap-3">
                       <StockBadge available={p.available} />
                       <span className="numeric text-right">
-                        {formatPrice(p.price)}
+                        {formatPrice(p.price ?? 0)}
                       </span>
                     </span>
                   </li>
                 ))}
-              </ul>
+              </CardList>
             </div>
           ) : shallow ? (
             <p className="text-sm text-muted-foreground">
@@ -262,13 +316,13 @@ export function CrawlRow({
             </p>
           )}
 
-          {crawl.failures.length > 0 ? (
+          {snapshot.failures.length > 0 ? (
             <div>
               <p className="label-caps mb-2">
-                Failures ({crawl.failures.length})
+                Failures ({snapshot.failures.length})
               </p>
               <ul className="max-h-40 space-y-1 overflow-auto text-xs">
-                {crawl.failures.slice(0, 12).map((f) => (
+                {snapshot.failures.slice(0, 12).map((f) => (
                   <li key={f.url} className="flex justify-between gap-3">
                     <span className="truncate font-mono text-muted-foreground">
                       {f.url}
