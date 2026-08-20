@@ -11,7 +11,7 @@ import { renderErrorPage } from "./lib/error-page";
  * (`lib/crawl.ts`) use the same env var to call the backend directly.
  */
 const backendUrl = () =>
-  process.env.PARITY_BACKEND_URL ?? "http://localhost:3000";
+  process.env.PARITY_BACKEND_URL ?? "http://localhost:3011";
 
 type ServerEntry = {
   fetch: (

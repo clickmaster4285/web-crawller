@@ -2,7 +2,7 @@
  * Auth — real JWT session against the Parity Express backend.
  *
  * Replaces the old localStorage-only mock auth. `signIn` calls
- * `POST /api/auth/login` on the backend (dev-proxied to :3000); the returned
+ * `POST /api/auth/login` on the backend (dev-proxied to :3011); the returned
  * JWT is stored under `parity.token` and the user profile under
  * `parity.session` so the existing `getUser()`-based route guard keeps
  * working unchanged.

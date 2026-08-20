@@ -853,9 +853,19 @@ export function filterProductSitemapEntries(
     ) {
       return true;
     }
+    const seg = segments.get(u.loc) ?? [];
+    // GCC retailer SEO landing pages — per-product-type × city slugs ending
+    // in "-in-<place>" (treadmills-in-al-qusais, yoga-strap-in-abu-dhabi).
+    // These are category×location pages, NOT products: a whole sitemap can be
+    // built from them (lifetimefitnessstore — 37,264 of its 39,427 classified
+    // URLs were landing pages that extracted nothing; the crawl burned ~14k
+    // requests fetching them). The explicit product-base patterns above
+    // always win; this guards only the heuristic flat rule. Aug 2026.
+    if (/-in-[a-z0-9-]+$/i.test(seg[seg.length - 1] ?? "")) {
+      return false;
+    }
     // Non-base URL in a base-dominant sitemap = junk (blog/category page).
     if (baseDominant) return false;
-    const seg = segments.get(u.loc) ?? [];
     return (
       seg.length >= 2 &&
       !NON_PRODUCT_SECTION_RE.test(seg[0]) &&

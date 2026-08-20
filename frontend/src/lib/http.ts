@@ -2,7 +2,7 @@
  * HTTP client for the Parity Express backend.
  *
  * Thin wrapper around fetch that:
- *   - prefixes `/api` (dev-proxied to the backend at :3000)
+ *   - prefixes `/api` (dev-proxied to the backend at :3011)
  *   - attaches the JWT from localStorage when present
  *   - throws on non-2xx with the backend's `message` when available
  *

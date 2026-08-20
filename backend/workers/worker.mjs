@@ -413,8 +413,11 @@ async function processJob(job) {
     // torn down in `finally`, so this is the last chance to persist the
     // buffered story (a beat after completeJob would race the status flip).
     // P4: the failed count splits extraction-miss vs http (same as the
-    // engine's finish line) so a 0-priced run reads honestly.
-    const failedList = sanitized.stats.failures ?? [];
+    // engine's finish line) so a 0-priced run reads honestly. The capped
+    // failure list lives at `sanitized.failures` (top level) — stats only
+    // carries the count, so `sanitized.stats.failures` is always empty and
+    // the split would read 0/0 (Aug 2026).
+    const failedList = sanitized.failures ?? [];
     const extractionMisses = failedList.filter(
       (f) => f.kind === 'extraction'
     ).length;

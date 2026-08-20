@@ -21,14 +21,16 @@ export default defineConfig({
     tsconfigPaths: true,
   },
   server: {
-    host: true,
-    port: 8080,
+    host: "0.0.0.0",
+    port: 3012,
     strictPort: true,
-    // Proxy API calls to the Express backend (port 3000). The frontend
+    allowedHosts: ["pricefinderai.clickmasters.pk"],
+    // Proxy API calls to the Express backend (port 3011 — keep in sync with
+    // backend/.env PORT and lib/crawl.ts + server.ts fallbacks). The frontend
     // always talks to `/api/*` same-origin; Vite forwards to the backend.
     proxy: {
       "/api": {
-        target: "http://localhost:3000",
+        target: "http://127.0.0.1:3011",
         changeOrigin: true,
       },
     },
