@@ -12,8 +12,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import type { CrawlDiscovery } from "@/api";
+import type { StoreHealth } from "@/lib/crawl";
 import { formatCrawlDate, robotsText } from "@/utils/crawls";
 import { cn } from "@/lib/utils";
+import { HealthChip } from "@/components/sources/health-chip";
 
 /**
  * Fields the profile card reads from the newest snapshot — fed by the D1
@@ -97,6 +99,7 @@ export function StoreProfile({
   lastShallow,
   productCount,
   urlPattern,
+  health,
 }: {
   /** Newest saved snapshot for the domain being crawled (or undefined). */
   crawl: StoreProfileCrawl | undefined;
@@ -119,6 +122,11 @@ export function StoreProfile({
    * unknown).
    */
   urlPattern?: string | null;
+  /**
+   * P4 store-health pass — the last pre-flight verdict for this store, so
+   * a 0-product store is flagged without running a fresh analysis.
+   */
+  health?: StoreHealth | null;
 }) {
   const d = crawl?.discovery;
   const count = productCount ?? 0;
@@ -190,6 +198,9 @@ export function StoreProfile({
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {health?.verdict ? (
+            <HealthChip verdict={health.verdict} score={health.score} />
+          ) : null}
           <Badge variant="secondary" className="font-normal">
             Last crawled {formatCrawlDate(crawl.updatedAt)}
           </Badge>

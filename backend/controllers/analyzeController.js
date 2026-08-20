@@ -17,6 +17,8 @@
  */
 const { pathToFileURL } = require('url');
 const path = require('path');
+const Store = require('../models/Store');
+const { normalizeHost } = require('../utils/identity');
 
 // The analyzer module path — resolves relative to this file (backend/
 // controllers/) to the crawler folder in the same package.
@@ -50,11 +52,30 @@ async function runAnalyzer(origin, proxy, userAgent) {
 }
 
 /**
+ * Persists the store-health verdict from a fresh analysis (P4 store-health
+ * pass). Fire-and-forget: a failed persist must never fail the analysis it
+ * rode in on. The Store may not exist yet (analysis before first crawl) —
+ * then nothing is written; the verdict still rides on the response.
+ */
+async function persistStoreHealth(origin, health) {
+  if (!health?.verdict) return;
+  try {
+    await Store.updateOne(
+      { key: normalizeHost(origin) },
+      { $set: { health: { verdict: health.verdict, score: health.score, flags: health.flags, analyzedAt: health.analyzedAt } } }
+    );
+  } catch (error) {
+    console.warn(`Store health persist failed for ${origin}:`, error.message);
+  }
+}
+
+/**
  * POST /api/analyze — runs the analyzer probes against `origin` and returns
- * the WebsiteProfile. `proxy` (optional Tier-2 residential gateway) routes
- * every probe request through the proxy, exactly like a crawl would — so a
- * store that 429s this machine can be analyzed through the same proxy the
- * crawl will use. The proxy URL is never persisted or logged.
+ * the WebsiteProfile (which now carries the P4 store-health verdict).
+ * `proxy` (optional Tier-2 residential gateway) routes every probe request
+ * through the proxy, exactly like a crawl would — so a store that 429s this
+ * machine can be analyzed through the same proxy the crawl will use. The
+ * proxy URL is never persisted or logged.
  */
 const analyzeWebsite = async (req, res) => {
   try {
@@ -75,6 +96,9 @@ const analyzeWebsite = async (req, res) => {
     // not hide its real answers from the analysis.
     const userAgent = req.body?.userAgent === 'browser' ? 'browser' : null;
     const profile = await runAnalyzer(origin, proxy || undefined, userAgent);
+    // P4 store-health: persist the verdict so the Sources profile / /crawls
+    // list flag 0-product stores without re-analyzing.
+    await persistStoreHealth(origin, profile.health);
     res.json({ success: true, data: profile });
   } catch (error) {
     console.error('Analyze error:', error);
@@ -85,4 +109,4 @@ const analyzeWebsite = async (req, res) => {
   }
 };
 
-module.exports = { analyzeWebsite, runAnalyzer, getAnalyzeModule };
+module.exports = { analyzeWebsite, runAnalyzer, getAnalyzeModule, persistStoreHealth };

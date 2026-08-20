@@ -1,4 +1,4 @@
-# Parity — Improvement Plan (Aug 7, 2026)
+# PriceFinderAI — Improvement Plan (Aug 7, 2026)
 
 How we take things now, how we add new things, and how we improve —
 so every change has a stated reason and a way to verify it.
@@ -277,7 +277,7 @@ interface WebsiteProfile {
   analyzedAt: string;
   platform: { name: string; kind: "store" | "corporate" | "unknown"; signal: string };
   server: string | null;
-  api: { shopifyProductsJson: "public" | "unavailable"; graphql: "public" | "auth-required" | "unavailable" };
+  api: { shopifyProductsJson: "public" | "unavailable"; graphql: "public" | "auth-required" | "unavailable"; storefront: "public" | "unavailable" };
   jsonLd: { blocks: number; productOnHomepage: boolean; productOnProductPage: boolean; hasPrice: boolean };
   protection: { provider: "cloudflare" | "akamai" | "rate-limited" | "none" | "unknown"; evidence: string };
   rendering: { verdict: "ssr" | "csr-shell" | "ssg" | "unknown"; framework: "next" | "nuxt" | "gatsby" | "plain" | "unknown" };
@@ -290,9 +290,11 @@ interface WebsiteProfile {
 #### Recommendation rule (mirrors how the engine already behaves)
 
 1. **API-first** — Shopify `products.json` public, or WooCommerce/BigCommerce
-   API public (reuse the existing adapter probe outcomes)
+   API public, or the **native storefront API** (`/api/fetchPage` → catalogue
+   → batched `get-price`) — the activefitness class, probed only when the
+   pages are JS shells and every standard store API failed
 2. **sitemap-HTTP** — product sitemap + content-rich pages (no render): the fast path
-3. **sitemap-browser** — JS shell detected (the activefitness class): sitemap + `useBrowser: true`
+3. **sitemap-browser** — JS shell detected (no storefront API): sitemap + `useBrowser: true`
 4. **HTML-BFS** — no sitemap → HTML link-graph crawl fallback
 5. **manual** — WAF present → proxy + slower concurrency + `productUrlPattern`, or skip
 

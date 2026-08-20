@@ -32,6 +32,7 @@ const {
   sleep
 } = require('../services/jobQueue.js');
 const CrawlJob = require('../models/CrawlJob.js');
+const CrawlCheckpoint = require('../models/CrawlCheckpoint.js');
 const { saveFinishedCrawl } = require('../services/saveCrawl.js');
 const Product = require('../models/Product.js');
 
@@ -157,6 +158,41 @@ function gcNow() {
   } catch {
     // --expose-gc missing — nothing to do.
   }
+}
+
+/**
+ * Redacts the proxy gateway URL (with embedded credentials) from a mid-crawl
+ * checkpoint blob before it's persisted — same boundary net as
+ * `sanitizeResult`, applied to the throttled resume snapshots so a failure
+ * string captured mid-run can't leak credentials into the checkpoint.
+ */
+function redactBlob(blob, proxyUrl) {
+  if (!proxyUrl) return blob;
+  const redact = (text) => sanitizeProxyFromMessage(text, proxyUrl);
+  const out = { ...blob };
+  if (Array.isArray(blob?.failures)) {
+    out.failures = blob.failures.map((f) => ({
+      ...f,
+      error: redact(f.error)
+    }));
+  }
+  if (blob?.discovery) {
+    out.discovery = {
+      ...blob.discovery,
+      ...(Array.isArray(blob.discovery.findings)
+        ? {
+            findings: blob.discovery.findings.map((f) => ({
+              ...f,
+              message: redact(f.message)
+            }))
+          }
+        : {}),
+      ...(Array.isArray(blob.discovery.log)
+        ? { log: blob.discovery.log.map((line) => redact(line)) }
+        : {})
+    };
+  }
+  return out;
 }
 
 /**
@@ -293,6 +329,32 @@ async function processJob(job) {
 
   try {
     const isShallow = type === 'shallow';
+    // Mid-crawl checkpoint (Step 4): a previous run of this job (before a
+    // backend restart / worker crash / failed attempt) may have left a
+    // resume snapshot — hand it to the engine so it skips discovery and
+    // continues the fetch phase where the dead run stopped instead of
+    // starting from zero. The checkpoint row is keyed by jobId and survives
+    // the job's requeue (claim → stale → retrying → re-claimed).
+    let resumeCheckpoint = null;
+    try {
+      const cp = await CrawlCheckpoint.findOne({ jobId })
+        .select('blob')
+        .lean();
+      if (cp?.blob) resumeCheckpoint = cp.blob;
+    } catch {
+      // Transient DB error — resume from scratch.
+    }
+    if (resumeCheckpoint) {
+      const cpProducts = resumeCheckpoint.products?.length ?? 0;
+      const cpDone = resumeCheckpoint.done?.length ?? 0;
+      console.log(
+        `♻️  ${workerId} resuming ${origin} from checkpoint (${cpProducts} products, ${cpDone} URLs done)`
+      );
+      logLine(
+        'info',
+        `${workerId}: resuming ${origin} from checkpoint — ${cpProducts.toLocaleString()} products, ${cpDone.toLocaleString()} URLs already processed`
+      );
+    }
     // Phase B: load the origin's durable resume state ONCE per job (one
     // indexed projection — at 10k products a few MB, fine). The engine skips
     // unchanged products from it, so ANY worker resumes where another
@@ -337,6 +399,38 @@ async function processJob(job) {
       userAgent: p.userAgent ?? undefined,
       proxy: p.proxyUrl ?? undefined,
       maxRetries: 1,
+      // Mid-crawl resume (Step 4): skip discovery + already-processed URLs
+      // when a previous run of this job left a checkpoint.
+      resumeCheckpoint,
+      // Mid-crawl checkpoint (Step 4): the engine emits a throttled snapshot
+      // every ~15s; persist it (redacted — proxy URL must never land in the
+      // blob) so a crash/restart resumes here. Fire-and-forget: a failing
+      // checkpoint write must never break the crawl.
+      onCheckpoint: (checkpoint) => {
+        // Deep-snapshot NOW: the engine keeps mutating the arrays it handed
+        // us (products/failures/done are live references), so a JSON round-
+        // trip freezes the state at emission time — otherwise the driver's
+        // (async) BSON serialization could capture a half-mutated blob.
+        let frozen;
+        try {
+          frozen = JSON.parse(
+            JSON.stringify(redactBlob(checkpoint, p.proxyUrl))
+          );
+        } catch {
+          return; // Unserializable blob — skip this write.
+        }
+        CrawlCheckpoint.updateOne(
+          { jobId },
+          {
+            $set: {
+              origin,
+              blob: frozen,
+              updatedAt: new Date()
+            }
+          },
+          { upsert: true }
+        ).catch(() => {});
+      },
       onProgress: (processed, total) => {
         const patch = { processed, total };
         // First tick with a known URL count marks the end of discovery —
@@ -413,8 +507,11 @@ async function processJob(job) {
     // torn down in `finally`, so this is the last chance to persist the
     // buffered story (a beat after completeJob would race the status flip).
     // P4: the failed count splits extraction-miss vs http (same as the
-    // engine's finish line) so a 0-priced run reads honestly.
-    const failedList = sanitized.stats.failures ?? [];
+    // engine's finish line) so a 0-priced run reads honestly. The capped
+    // failure list lives at `sanitized.failures` (top level) — stats only
+    // carries the count, so `sanitized.stats.failures` is always empty and
+    // the split would read 0/0 (Aug 2026).
+    const failedList = sanitized.failures ?? [];
     const extractionMisses = failedList.filter(
       (f) => f.kind === 'extraction'
     ).length;
@@ -444,6 +541,10 @@ async function processJob(job) {
       },
       log: logBuffer.splice(0, logBuffer.length)
     });
+    // The job is done — the checkpoint's job is over (the full result is on
+    // the job doc now). Drop it so it can't be misread as a live resume
+    // point by a later retry.
+    CrawlCheckpoint.deleteOne({ jobId }).catch(() => {});
     if (autoBrowserFollowup) {
       await enqueueJob({
         origin,
@@ -472,6 +573,7 @@ async function processJob(job) {
         workerId,
         logBuffer.splice(0, logBuffer.length)
       );
+      CrawlCheckpoint.deleteOne({ jobId }).catch(() => {});
       console.log(`🗑️  ${workerId} cancelled crawl for ${origin}`);
       return;
     }
@@ -480,12 +582,18 @@ async function processJob(job) {
     // ternary chain is unnecessary.
     const message = sanitizeProxyFromMessage(error, p.proxyUrl);
     logLine('error', `${workerId}: crawl failed — ${message}`);
-    await failJob(
+    const failStatus = await failJob(
       jobId,
       workerId,
       message,
       logBuffer.splice(0, logBuffer.length)
     );
+    // The job is terminal for this attempt — but it retries, so the
+    // checkpoint must SURVIVE (that's how the retry resumes). Only drop it
+    // when the job went dead (attempts exhausted — nothing left to resume).
+    if (failStatus === 'dead') {
+      CrawlCheckpoint.deleteOne({ jobId }).catch(() => {});
+    }
   } finally {
     clearInterval(beatTimer);
     clearInterval(controlTimer);

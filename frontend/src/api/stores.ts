@@ -1,4 +1,5 @@
 import { http } from "@/lib/http";
+import type { StoreHealth } from "@/lib/crawl";
 
 /**
  * REST client for the Phase 5 store read path (`/api/stores`, architecture
@@ -102,6 +103,13 @@ export interface StoreSummary {
   lastDeepAt: string | null;
   cadence: { enabled: boolean; shallowHours: number; deepHours: number };
   scheduledFrequency: "1h" | "6h" | "daily" | "weekly" | null;
+  /**
+   * P4 store-health pass: last pre-flight verdict (healthy / no-products /
+   * blocked / corporate / unclear) — flags 0-product stores on the Sources
+   * profile and /crawls list without a fresh analysis. Null when never
+   * analyzed.
+   */
+  health: StoreHealth | null;
   createdAt: string | null;
   updatedAt: string | null;
   /**

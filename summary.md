@@ -1,7 +1,51 @@
-# Parity — Project Summary
+# PriceFinderAI — Project Summary
 
 A condensed status snapshot: where the plan stands, the bug fixed this session,
 and how the architecture changed from "before" to "now".
+
+---
+
+## 🐛 Bug fixed this session — discovery misclassified 37k SEO landing pages as products
+
+**Symptom:** `lifetimefitnessstore.com` deep crawl sat at **0 / 31,419
+products** through ~14,500 requests across two runs (engine `eb33dfc` then
+`f94d88b` — the second run was the versioning feature doing its job: backend
+restarted, stale heartbeat released the job, a new worker re-claimed it with
+the new engine). Heartbeats fresh, requests climbing, zero products — it
+looked healthy and was doomed.
+
+**Root cause:** the store's sitemap (`sitemap_ae.xml`) is ~94% GCC-style SEO
+landing pages — per-product-type × city slugs ending in `-in-<place>`
+("treadmills-in-al-qusais", "yoga-strap-in-abu-dhabi"). The flat
+`filterProductSitemapEntries` rule classified **39,427** of 50,597 URLs as
+products; the HTML extractor correctly returned **null on every one** — these
+pages carry no `Product`/`ItemList` JSON-LD (audited: only
+`WebSite`/`Organization`/`SportingGoodsStore` storefront schema), and the store
+has no product sitemap (`wp-sitemap-posts-product-*`, `product-sitemap.xml`
+→ 404), no `/shop/`, no public WooCommerce API. So the fetch loop dutifully
+burned ~1.9 req/s × 1–3 MB pages on a queue where nothing could ever parse;
+a full run would have finished ~6h later with 0 products and ~39k
+extraction-miss failures.
+
+**Fix:** `crawler/discover/index.ts` — `filterProductSitemapEntries` now
+rejects slugs whose last segment ends `-in-<place>` (explicit product-base
+URLs `/products/`, `/dp/`, `/item/`, `/shop/<cat>/<prod>` still win). Verified
+with the engine's own code against the live sitemap: **39,427 → 43** classified
+URLs, zero landing pages left. The 43 survivors also extract null — this store
+genuiely exposes no parseable catalogue, so a re-crawl will end fast and honest.
+
+**Verified:** crawler typecheck ✅ · engine's own classifier + extractor probe ✅
+
+> **Deployed + confirmed (Aug 15):** backend restarted with the fix; a live
+> re-crawl of lifetimefitnessstore now discovers **43** URLs (was 31,419) and
+> finishes in **22–52 s** — `0 products, 43 failed [43 extraction-miss · 0
+> http]`, the honest answer: the store loads fine but exposes no product
+> schema anywhere. Also fixed the worker's completion line (it read the
+> capped failure list from `sanitized.stats.failures` — always empty — so its
+> split read 0/0; it now reads `sanitized.failures` and matches the engine's
+> line). The mid-run observability gap this exposed (fetched/failed counters
+> only persist at completion, so a doomed crawl looks healthy for hours) is a
+> known follow-up.
 
 ---
 
@@ -371,6 +415,45 @@ was already intentional):**
    products` endpoints; `/data/pricing` + `/data/matched-products` are
    server-side aggregates over metadata + persisted `ProductMatch` rows
    (never full product arrays).
+
+## 🩺 This session — store-health pass (Aug 15)
+
+Flags the stores that will return ~0 products BEFORE a crawl burns worker
+hours (the lifetimefitnessstore lesson: 39k classified landing pages, 6h of
+fetching, 0 products). The analyzer already gathered every signal — health is
+a pure function over the probed profile:
+
+1. **`assessStoreHealth(profile)`** (`crawler/analyze.ts`) — a verdict +
+   0–100 score + human-readable flags over the probe signals: public store
+   API (strongest), Product schema with prices on a sampled product page
+   (the decisive extraction signal), product sitemap size (post-classifier,
+   honest), WAF blocking (dawlance class — "blocked", not "no-products":
+   fixable with a proxy/browser UA), corporate-vs-store (haier class), and
+   csr-shell rendering (no server schema ≠ no products — the browser render
+   would reveal them). Verdict priority: API > blocked > corporate >
+   no-products > unclear. Attached to every `WebsiteProfile`.
+2. **Persisted on the Store** — new `Store.health` subdocument written by
+   `POST /api/analyze` AND the pre-crawl gate (`analyzeBeforeCrawl`), so the
+   Sources profile + /crawls list flag 0-product stores without re-analyzing.
+   Exposed via `storeSummary` (`GET /api/stores`).
+3. **Pre-crawl warning** — a `no-products` / `corporate` verdict now sets the
+   job's `analysis.warning` (like the WAF warning) + a `healthVerdict` on the
+   analysis snapshot, so a doomed crawl is flagged in the progress panel
+   before it starts.
+4. **UI** — shared `HealthChip` (verdict-colored): banner atop the analysis
+   results (verdict + score + reasons), chip on the Sources store profile,
+   chip next to each domain on /crawls, chip beside the strategy tier in the
+   progress panel's analyze-first row.
+
+**Live-verified against real stores:** lifetimefitnessstore → **no-products /
+15** (43 landing-page URLs, no schema — exactly the doomed case);
+marshalfitness → **healthy / 70** (priced Product schema + 1,312 sitemap
+URLs); activefitnessstore → **healthy / 25** (11,209 URLs, HTML-extractable);
+dawlance → **no-products / 0** (no schema, no sitemap, WAF-gated — the honest
+answer for the default-UA probe). Verdicts persisted to the store list.
+Backend typecheck ✅ · jest 30/30 ✅ · frontend tsc ✅ · lint ✅ · build ✅.
+
+---
 
 ## 📍 Where we are in the plan
 

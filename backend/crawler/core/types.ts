@@ -1,4 +1,8 @@
 import type { CrawlControl } from "./control.ts";
+import type {
+  StorefrontPrice,
+  StorefrontUrlInfo,
+} from "../adapters/storefront.ts";
 
 /**
  * Crawler domain types.
@@ -95,6 +99,18 @@ export interface CrawlConfig {
    */
   maxPages?: number;
   /**
+   * Render-miss circuit breaker (default 25): when a crawl runs with browser
+   * rendering ON (auto JS rendering) and N CONSECUTIVE rendered pages extract
+   * no product, the fetch loop stops early. A page that was genuinely
+   * rendered and still yielded nothing is a strong "this store loads its
+   * prices via a client-side API the crawler can't see" signal (observed Aug
+   * 2026: activefitnessstore.com rendered 11k pages to extract 16 products).
+   * The partial result is kept, `capped` is set so the ingest diff doesn't
+   * read the skipped URLs as removals, and a finding explains the stop. Set
+   * to 0/negative to disable.
+   */
+  renderMissBreaker?: number;
+  /**
    * Whether to fetch and enforce robots.txt for the origin (default true).
    * The adaptive throttle still runs either way — only the robots gate and
    * crawl-delay are skipped when false.
@@ -182,6 +198,62 @@ export interface CrawlConfig {
    * The worker surfaces it on the crawl job for the Active crawls page.
    */
   onRequestCount?: (count: number) => void;
+  /**
+   * Mid-crawl checkpoint (Step 4, Aug 2026): a JSON-serializable snapshot of
+   * the run's fetch-phase state emitted periodically while the crawl runs
+   * (throttled to ~every CHECKPOINT_INTERVAL_MS). The worker persists it on
+   * the job so a backend restart / worker crash re-claims the job and
+   * RESUMES — discovery is skipped, already-processed URLs are not re-fetched
+   * (the storefront fetchPage walk + price batches included) — instead of
+   * re-running everything from zero. `resumeCheckpoint` is the same shape
+   * fed back in on a resumed run. Omit both to run as before.
+   */
+  onCheckpoint?: (checkpoint: CrawlCheckpoint) => void;
+  /**
+   * A checkpoint captured by an earlier (possibly dead) run of this job — see
+   * `onCheckpoint`. When present (and `v` matches), the engine skips
+   * discovery entirely, seeds the products/failures/counters captured so far,
+   * and skips the URLs in `done` instead of re-fetching them.
+   */
+  resumeCheckpoint?: CrawlCheckpoint | null;
+}
+
+/**
+ * Mid-crawl resume snapshot (Step 4, Aug 2026) — everything the fetch phase
+ * needs to continue where a dead run stopped. JSON-safe (no Maps/Sets — maps
+ * are entry arrays); stored on the CrawlCheckpoint collection keyed by jobId
+ * so a re-claimed job resumes without re-running discovery or re-fetching
+ * finished URLs. Versioned so an old engine never misreads a new shape.
+ */
+export interface CrawlCheckpoint {
+  /** Shape version — engines reject checkpoints they don't understand. */
+  v: 1;
+  /** The fetch-phase URL list (post maxPages cap + stratified sampling). */
+  urls: string[];
+  /** Sitemap lastmod per URL (discovery's `lastmod` map), for the resume fast-path. */
+  lastmod: Array<[string, string]>;
+  /** BigCommerce discovery URL→id map (only when that API is public). */
+  productIds: Array<[string, number]>;
+  /** URLs already fully processed this run (product, cached-skip, or failure). */
+  done: string[];
+  /** Products extracted so far, in run order. */
+  products: CrawledProduct[];
+  /** Failures so far. */
+  failures: CrawlFailure[];
+  /** Freshly-fetched count so far. */
+  fetchedCount: number;
+  /** Cache-reused count so far. */
+  skippedUnchanged: number;
+  /** Full discovery URL count (pre-cap) — `stats.discovered` must report it. */
+  discoveredCount: number;
+  /** Discovery diagnostics — reused verbatim so the resumed result is complete. */
+  discovery: DiscoveryDiagnostics;
+  /** httpState captured so far (url → etag/lastmod). */
+  httpState: Array<[string, { etag: string | null; lastmod: number | null }]>;
+  /** Storefront index (url → product id + catalogue URL), when the Tier-4 API is active. */
+  storefrontByUrl?: Array<[string, StorefrontUrlInfo]>;
+  /** Storefront prices (product id → price), when the Tier-4 API is active. */
+  storefrontPrices?: Array<[number, StorefrontPrice]>;
 }
 
 /** Live snapshot of the discovery phase, emitted via `onDiscoveryProgress`. */
@@ -359,6 +431,40 @@ export interface BigCommerceDiagnostics {
   message?: string;
 }
 
+/**
+ * Headless storefront native API outcome (Tier 4 adapter).
+ *
+ * A class of JS-shell storefronts (activefitnessstore.com and friends)
+ * render no server-side prices AND load them via a late XHR, so even
+ * Playwright renders extract nothing — but the store's own JSON API
+ * (`/api/fetchPage` → catalogue JSON → batched `POST /api/get-price`)
+ * returns everything over plain HTTP. When this probe is public, the fetch
+ * loop uses the native API instead of the HTML/render chain: ~2 requests
+ * per product + 1 per ~100 for prices, no browser, ~100% extraction.
+ */
+export interface StorefrontApiDiagnostics {
+  /**
+   * "public" — fetchPage pattern detected (recipe usable by the fetch
+   * loop); "unavailable" — no storefront API (probe failed / not a
+   * JS-shell storefront).
+   */
+  status: "public" | "unavailable";
+  /** Product URLs this adapter contributed to discovery (always 0 — the
+   * storefront API adds prices/data, not URLs; the sitemap has the URLs). */
+  urls: number;
+  /** Human-readable detail (probe failure or what was found). */
+  message?: string;
+  /** The detected recipe (endpoints + tokens) the fetch loop uses. */
+  recipe?: {
+    origin: string;
+    country: string | null;
+    lang: string;
+    fetchPagePath: string;
+    priceApiUrl: string | null;
+    catalogueBaseUrl: string | null;
+  };
+}
+
 /** A human-readable finding/suggestion surfaced to the user after a crawl. */
 export interface CrawlFinding {
   level: "info" | "warning" | "success";
@@ -421,6 +527,8 @@ export interface DiscoveryDiagnostics {
   bigCommerce?: BigCommerceDiagnostics;
   /** Shopify products.json outcome (Tier 3 adapter), when probed. */
   shopifyApi?: ShopifyDiagnostics;
+  /** Headless storefront native API outcome (Tier 4 adapter), when probed. */
+  storefrontApi?: StorefrontApiDiagnostics;
   /** Human-readable findings/suggestions surfaced to the user. */
   findings: CrawlFinding[];
   /** Verbose discovery log (what the crawler did, in order). */

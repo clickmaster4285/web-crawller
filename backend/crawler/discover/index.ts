@@ -22,6 +22,7 @@ import {
   discoverBigCommerceProducts,
   probeBigCommerceApi,
 } from "../adapters/bigcommerce.ts";
+import { probeStorefrontApi } from "../adapters/storefront.ts";
 import {
   discoverCollectionHandles,
   discoverShopifyProducts,
@@ -632,6 +633,80 @@ export async function discoverProducts(
     }
   }
 
+  // ── 2.8 Headless storefront native API (Tier 4). ───────────────────
+  // The JS-shell storefront class (activefitnessstore.com and friends)
+  // renders NO prices server-side and loads them via a late XHR — so even
+  // the Playwright renderer extracts nothing — but exposes a native JSON
+  // API (`/api/fetchPage` → catalogue JSON → batched `POST /api/get-price`)
+  // that returns everything over plain HTTP. Probe it ONLY when the
+  // standard Tier-3 adapters (WooCommerce/Shopify/BigCommerce) all failed
+  // AND the homepage carries a JS-shell fingerprint (the class where HTML
+  // + rendering both fail). One fetchPage request on a non-storefront
+  // store; a bounded price-API sweep only after fetchPage matches.
+  //
+  // The probe needs a sample product URL (country + slug come from it), so
+  // it runs after sitemap discovery. A storefront API adds prices + data,
+  // not URLs — the sitemap already found the URLs; this adapter enriches
+  // the fetch loop (per-product fetchPage → catalogue → batched prices).
+  if (
+    !shallow &&
+    urlSet.size > 0 &&
+    homepageHtml &&
+    /_next\/static|__nuxt|ant-spin|id=["']__(next|nuxt)|\.vite\/|react\s*\.js/i.test(
+      homepageHtml,
+    ) &&
+    diagnostics.wooCommerce?.status !== "public" &&
+    diagnostics.bigCommerce?.status !== "public" &&
+    diagnostics.shopifyApi?.status !== "public"
+  ) {
+    log.push("Storefront API: probing /api/fetchPage…");
+    // Samples: prefer URLs whose PATH has ≥2 segments (a real product slug
+    // like `/om/wattbike-…`, not the bare homepage `/om/` that some GCC
+    // sitemaps list first). The sitemap often LEADS with a block of
+    // brand/category pages (`/om/kettler`, `/om/york-fitness`…) before any
+    // real product, so pass a SPREAD: the first 25 deep URLs, then every
+    // Nth after that — the probe stops at the first URL that returns a
+    // product payload.
+    const deep = [...urlSet].filter(
+      (u) => new URL(u).pathname.split("/").filter(Boolean).length >= 2,
+    );
+    const step = Math.max(1, Math.floor(deep.length / 25));
+    const samples = deep
+      .filter((_, i) => i % step === 0)
+      .slice(0, 25);
+    const probe = await probeStorefrontApi(
+      config.origin,
+      opts,
+      samples.length > 0 ? samples : [...urlSet].slice(0, 25),
+      config.locale,
+    );
+    if (probe.status === "public" && probe.recipe) {
+      diagnostics.storefrontApi = {
+        status: "public",
+        urls: 0,
+        recipe: probe.recipe,
+        message: probe.message,
+      };
+      log.push(
+        `Storefront API: public — ${probe.message ?? "fetchPage + batched get-price"}. Products will come from the store's JSON API (no browser).`,
+      );
+      findings.push({
+        level: "success",
+        message: `Native storefront API detected — ${urlSet.size.toLocaleString()} product URLs will be fetched via the store's JSON API (plain HTTP, no browser).`,
+      });
+    } else {
+      diagnostics.storefrontApi = {
+        status: "unavailable",
+        urls: 0,
+        message: probe.message,
+      };
+      log.push(
+        `Storefront API unavailable (${probe.message}) — continuing with sitemap/HTML.`,
+      );
+    }
+    tick("sitemap", "Storefront API probe done.");
+  }
+
   // ── 3. HTML link-graph BFS from the site root. ───────────────────────
   // Shallow mode never BFS-crawls the site — the sitemap is the catalogue.
   if (shallow) {
@@ -853,9 +928,19 @@ export function filterProductSitemapEntries(
     ) {
       return true;
     }
+    const seg = segments.get(u.loc) ?? [];
+    // GCC retailer SEO landing pages — per-product-type × city slugs ending
+    // in "-in-<place>" (treadmills-in-al-qusais, yoga-strap-in-abu-dhabi).
+    // These are category×location pages, NOT products: a whole sitemap can be
+    // built from them (lifetimefitnessstore — 37,264 of its 39,427 classified
+    // URLs were landing pages that extracted nothing; the crawl burned ~14k
+    // requests fetching them). The explicit product-base patterns above
+    // always win; this guards only the heuristic flat rule. Aug 2026.
+    if (/-in-[a-z0-9-]+$/i.test(seg[seg.length - 1] ?? "")) {
+      return false;
+    }
     // Non-base URL in a base-dominant sitemap = junk (blog/category page).
     if (baseDominant) return false;
-    const seg = segments.get(u.loc) ?? [];
     return (
       seg.length >= 2 &&
       !NON_PRODUCT_SECTION_RE.test(seg[0]) &&

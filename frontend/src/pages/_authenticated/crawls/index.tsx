@@ -318,6 +318,7 @@ function CrawlsPage() {
                   storeKey={key}
                   origin={group[0].store.origin}
                   storeCount={group[0].store.productCount}
+                  health={group[0].store.health}
                   group={group.map((e) => e.snapshot)}
                   typeFilter={typeFilter}
                   open={isGroupOpen(key)}

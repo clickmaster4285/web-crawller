@@ -1,4 +1,4 @@
-# Parity — Architecture (Scale: 100+ stores · 10k+ products per store)
+# PriceFinderAI — Architecture (Scale: 100+ stores · 10k+ products per store)
 
 > **Status:** Design document — **Phases 1 (storage refactor), 2 (worker
 > pool + queue + scheduler), 3 (indexed matching) and 4 (events → alerts)

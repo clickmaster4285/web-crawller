@@ -71,6 +71,9 @@ row(
       : "") +
     (api.bigCommerce !== "unavailable"
       ? ` · bigcommerce: ${api.bigCommerce}`
+      : "") +
+    (api.storefront === "public"
+      ? ` · storefront: ${api.storefront}`
       : ""),
 );
 row(

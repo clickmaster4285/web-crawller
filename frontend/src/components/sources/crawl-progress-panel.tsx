@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { TierBadge } from "@/components/sources/tier-badge";
+import { HealthChip } from "@/components/sources/health-chip";
 import { RunLog } from "@/components/crawls/run-log";
 import { Card } from "@/components/ui/card";
 import type { CrawlJob, CrawlJobDiscovery } from "@/lib/crawl";
@@ -164,6 +165,12 @@ export function CrawlProgressPanel({
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
             <span className="label-caps text-muted-foreground">Analyzed</span>
             <TierBadge tier={job.analysis.tier} />
+            {/* P4 store-health pass — the pre-flight verdict right next to
+                the strategy tier, so a doomed crawl (no-products / blocked /
+                corporate) is flagged before it burns hours. */}
+            {job.analysis.healthVerdict ? (
+              <HealthChip verdict={job.analysis.healthVerdict} />
+            ) : null}
             <span className="text-muted-foreground">
               {job.analysis.platform} · {job.analysis.rendering}
             </span>

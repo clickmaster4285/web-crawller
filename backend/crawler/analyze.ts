@@ -51,6 +51,7 @@ import { extractJsonLdBlocks, findProductNode } from "./extract/jsonld.ts";
 import { probeWooCommerceApi } from "./adapters/woocommerce.ts";
 import { probeBigCommerceApi } from "./adapters/bigcommerce.ts";
 import { probeShopifyApi } from "./adapters/shopify-discover.ts";
+import { probeStorefrontApi } from "./adapters/storefront.ts";
 import { isCrawlCancelled, type CrawlControl } from "./core/control.ts";
 import type { RobotsStatus } from "./core/types.ts";
 
@@ -71,6 +72,33 @@ export type Framework = "next" | "nuxt" | "gatsby" | "plain" | "unknown";
 export type RecommendationTier =
   "API-first" | "sitemap-HTTP" | "sitemap-browser" | "HTML-BFS" | "manual";
 
+/**
+ * Store-health verdict — the pre-flight answer to "will a crawl of this
+ * store actually yield products?" (P4 store-health pass).
+ */
+export type StoreHealthVerdict =
+  | "healthy"
+  | "no-products"
+  | "blocked"
+  | "corporate"
+  | "unclear";
+
+/**
+ * Pre-flight health assessment of a store, derived from the probe profile.
+ * Flags the expensive dead ends BEFORE a crawl spends worker hours on them
+ * (the lifetimefitnessstore class: 39k classified URLs that were all
+ * `<category>-in-<city>` landing pages with no Product schema, no API and no
+ * real product sitemap — a 6-hour crawl would have ended at 0 products).
+ */
+export interface StoreHealth {
+  verdict: StoreHealthVerdict;
+  /** 0–100 — how confident we are the store yields parseable products. */
+  score: number;
+  /** Short human-readable reasons (the "why" behind the verdict). */
+  flags: string[];
+  analyzedAt: string;
+}
+
 /** What the analyzer learned about one website. */
 export interface WebsiteProfile {
   origin: string;
@@ -89,6 +117,15 @@ export interface WebsiteProfile {
     graphql: ApiProbeState;
     wooCommerce: ApiProbeState;
     bigCommerce: ApiProbeState;
+    /**
+     * Native storefront API (Tier 4 — the activefitness class): the store's
+     * own JSON API (`/api/fetchPage` → catalogue JSON → batched
+     * `POST /api/get-price`). Probed only when the pages are JS shells and
+     * no standard store API was public — that's the class where HTML + even
+     * browser rendering extract nothing, while the native API returns
+     * everything over plain HTTP.
+     */
+    storefront: ApiProbeState;
   };
   jsonLd: {
     blocks: number;
@@ -133,6 +170,8 @@ export interface WebsiteProfile {
     tier: RecommendationTier;
     notes: string[];
   };
+  /** P4 store-health pass — pre-flight verdict (see assessStoreHealth). */
+  health: StoreHealth;
 }
 
 export interface AnalyzeOptions {
@@ -310,12 +349,19 @@ export function recommend(
   const apiPublic =
     p.api.shopifyProductsJson === "public" ||
     p.api.wooCommerce === "public" ||
-    p.api.bigCommerce === "public";
+    p.api.bigCommerce === "public" ||
+    p.api.storefront === "public";
 
   if (apiPublic) {
-    notes.push(
-      "Public store API detected — structured product JSON beats HTML extraction (full SKU/GTIN/stock, fewer requests).",
-    );
+    if (p.api.storefront === "public") {
+      notes.push(
+        "Native storefront API detected (fetchPage → catalogue → batched get-price) — the engine fetches products from the store's JSON API over plain HTTP: no browser, ~2 requests per product + 1 per ~100 for prices. (The sitemap-browser tier would render every page and still extract nothing — the prices load via a late XHR the renderer can't see.)",
+      );
+    } else {
+      notes.push(
+        "Public store API detected — structured product JSON beats HTML extraction (full SKU/GTIN/stock, fewer requests).",
+      );
+    }
     return { tier: "API-first", notes };
   }
   if (p.protection.blocking) {
@@ -343,6 +389,142 @@ export function recommend(
     "Product sitemap + server-rendered content-rich pages — plain HTTP at full speed, no rendering cost.",
   );
   return { tier: "sitemap-HTTP", notes };
+}
+
+/**
+ * P4 store-health pass — a pure function over the probed profile that
+ * answers "will a crawl of this store yield products?" BEFORE a crawl burns
+ * worker hours on it. Combines the signals the five probes already gathered:
+ *
+ *   - public store API → the strongest signal (API-first sidesteps HTML
+ *     extraction AND most WAFs — recommend() puts it above blocking)
+ *   - Product schema with prices on a sampled product page → the decisive
+ *     extraction signal (lifetimefitnessstore had NONE of these)
+ *   - product sitemap size (post-classifier → an honest count)
+ *   - WAF blocking (the dawlance class — fixable with a proxy/browser UA,
+ *     so it's "blocked", not "no-products")
+ *   - corporate-vs-store (the haier class — prices live on the linked store)
+ *   - csr-shell rendering (no server-rendered schema ≠ no products — the
+ *     browser render would reveal them)
+ *
+ * Verdict priority: API > blocked > corporate > no-products > unclear.
+ * Pure: no network, no side effects — callable from the analyzer, the
+ * pre-crawl gate, or a re-check over a stored profile.
+ */
+export function assessStoreHealth(
+  p: Pick<
+    WebsiteProfile,
+    | "analyzedAt"
+    | "api"
+    | "protection"
+    | "sitemap"
+    | "jsonLd"
+    | "rendering"
+    | "platform"
+    | "homepage"
+  >,
+): StoreHealth {
+  const flags: string[] = [];
+  const apiPublic =
+    p.api.shopifyProductsJson === "public" ||
+    p.api.wooCommerce === "public" ||
+    p.api.bigCommerce === "public" ||
+    p.api.storefront === "public";
+
+  const pricedSchema =
+    p.jsonLd.productOnProductPage && p.jsonLd.hasPrice;
+
+  // Corporate site that links out to its real store (haier.com → haiermall.pk).
+  const corporate =
+    p.platform.kind === "corporate" ||
+    (p.homepage.externalStoreLinks.length > 0 && !p.homepage.looksLikeStore);
+
+  // A client-rendered shell has no server-rendered schema BY DESIGN — the
+  // absence of JSON-LD in the raw HTML is not evidence of no products there
+  // (the browser render would reveal them). Only judge schema absence on
+  // server-rendered pages.
+  const shell = p.rendering.verdict === "csr-shell";
+
+  let score = 0;
+  if (apiPublic) {
+    score += 50;
+    flags.push(
+      "Public store API — structured product JSON beats HTML extraction",
+    );
+  }
+  if (pricedSchema) {
+    score += 40;
+    flags.push("Product pages carry Product schema with prices");
+  } else if (p.jsonLd.productOnProductPage || p.jsonLd.hasPrice) {
+    score += 20;
+    flags.push("Partial product schema found on sampled pages");
+  } else if (!apiPublic && !shell) {
+    flags.push("No Product schema found on sampled pages");
+  }
+  if (p.sitemap.found) {
+    score += 10;
+    const n = p.sitemap.urls;
+    if (n >= 1000) score += 15;
+    else if (n >= 100) score += 10;
+    else if (n >= 10) score += 5;
+    flags.push(`${n.toLocaleString()} product URLs in the sitemap`);
+  } else if (p.sitemap.budgetLimited) {
+    flags.push("Sitemap walk budget-limited — count unknown");
+  } else {
+    flags.push("No usable product sitemap");
+  }
+  if (p.homepage.looksLikeStore) {
+    score += 5;
+    flags.push("Homepage looks like a store");
+  }
+
+  // A small/absent sitemap + no schema + no API on server-rendered pages is
+  // the expensive dead end: pages load fine but nothing will parse. Stores
+  // with a real catalogue (>100 URLs) stay healthy even without schema — the
+  // HTML extractor handles them.
+  const noProductsSignal =
+    !shell &&
+    !apiPublic &&
+    !pricedSchema &&
+    !p.jsonLd.productOnProductPage &&
+    !p.jsonLd.hasPrice &&
+    (!p.sitemap.found || p.sitemap.urls < 100);
+
+  let verdict: StoreHealthVerdict;
+  if (apiPublic) {
+    verdict = "healthy";
+  } else if (p.protection.blocking) {
+    verdict = "blocked";
+    score = Math.min(score, 45); // a WAF blocks everything — cap the score
+    flags.push(p.protection.evidence);
+  } else if (corporate) {
+    verdict = "corporate";
+    score = Math.min(score, 30);
+    const hosts = p.homepage.externalStoreLinks.map((l) => l.host).join(", ");
+    flags.push(
+      hosts
+        ? `Corporate site — prices likely live on ${hosts}`
+        : "Corporate site — no direct product pages",
+    );
+  } else if (noProductsSignal) {
+    verdict = "no-products";
+    score = Math.min(score, 25);
+    flags.push(
+      "Store serves pages but exposes no parseable product data — expect ~0 products",
+    );
+  } else if (p.sitemap.budgetLimited && !p.sitemap.found) {
+    verdict = "unclear";
+    flags.push("Sitemap walk was cut short by the request budget");
+  } else {
+    verdict = "healthy";
+  }
+
+  return {
+    verdict,
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    flags: flags.slice(0, 4),
+    analyzedAt: p.analyzedAt,
+  };
 }
 
 // ── The probes ───────────────────────────────────────────────────────────
@@ -376,7 +558,19 @@ async function probeSitemap(
   opts: HttpOptions,
   robotsBody: string,
   control: CrawlControl & { budgetExhausted?: boolean },
-): Promise<WebsiteProfile["sitemap"] & { firstProductUrl: string | null }> {
+): Promise<
+  WebsiteProfile["sitemap"] & {
+    firstProductUrl: string | null;
+    /**
+     * Product-classified URL spread (up to 25 deep URLs, every Nth) — the
+     * sample set for the Tier-4 storefront probe, which needs a real product
+     * URL (country + slug) and often misses on the sitemap's first entries
+     * (GCC sitemaps lead with brand/category pages). Mirrors discovery's own
+     * probe sampling.
+     */
+    productUrls: string[];
+  }
+> {
   for (const candidate of sitemapCandidates(origin, robotsBody)) {
     let result;
     try {
@@ -391,6 +585,7 @@ async function probeSitemap(
           productSitemap: false,
           source: candidate.url,
           firstProductUrl: null,
+          productUrls: [],
           budgetLimited: true,
         };
       }
@@ -409,12 +604,25 @@ async function probeSitemap(
       : filterProductSitemapEntries(cleaned);
     const ratio =
       cleaned.length > 0 ? productEntries.length / cleaned.length : 0;
+    // Spread sample for the storefront probe: the first 25 DEEP URLs (a
+    // real product slug, not the bare `/om/` homepage some GCC sitemaps
+    // list first), then every Nth — a spread catches a product even when
+    // the sitemap leads with a block of brand/category pages.
+    const deep = productEntries.filter(
+      (u) => new URL(u.loc).pathname.split("/").filter(Boolean).length >= 2,
+    );
+    const step = Math.max(1, Math.floor(deep.length / 25));
+    const productUrls = deep
+      .filter((_, i) => i % step === 0)
+      .slice(0, 25)
+      .map((u) => u.loc);
     return {
       found: true,
       urls: productEntries.length,
       productSitemap: result.isProductSitemap === true || ratio > 0.5,
       source: candidate.url,
       firstProductUrl: productEntries[0]?.loc ?? null,
+      productUrls,
       budgetLimited: false,
     };
   }
@@ -424,6 +632,7 @@ async function probeSitemap(
     productSitemap: false,
     source: null,
     firstProductUrl: null,
+    productUrls: [],
     budgetLimited: false,
   };
 }
@@ -546,6 +755,9 @@ async function runProbes(
   let graphql: ApiProbeState = "unavailable";
   let wooCommerce: ApiProbeState = "unavailable";
   let bigCommerce: ApiProbeState = "unavailable";
+  // Tier 4 native storefront API (the activefitness class) — probed below
+  // ONLY when the pages are JS shells and every standard store API failed.
+  let storefront: ApiProbeState = "unavailable";
   const platformName = detection.platform.toLowerCase();
 
   if (!control.budgetExhausted) {
@@ -576,6 +788,30 @@ async function runProbes(
     if (platformName === "bigcommerce" && !control.budgetExhausted) {
       const probe = await probeBigCommerceApi(base, opts);
       bigCommerce = probe.status;
+    }
+
+    // ── Probe 2c: native storefront API (Tier 4). The class where HTML AND
+    //     browser rendering both extract nothing (csr-shell) — the store's
+    //     own JSON API (fetchPage → catalogue → batched get-price) is the
+    //     only fast path. One fetchPage on a non-storefront store; a bounded
+    //     price-API sweep only after fetchPage matches. Bounded by the
+    //     remaining request budget so the polite 20-request promise holds.
+    if (
+      rendering.verdict === "csr-shell" &&
+      shopifyProductsJson !== "public" &&
+      wooCommerce !== "public" &&
+      bigCommerce !== "public" &&
+      sitemap.productUrls.length > 0
+    ) {
+      const remaining = Math.max(1, budget - requests);
+      const probe = await probeStorefrontApi(
+        base,
+        opts,
+        sitemap.productUrls.slice(0, remaining),
+      );
+      if (probe.status === "public") {
+        storefront = "public";
+      }
     }
   }
 
@@ -635,7 +871,7 @@ async function runProbes(
     requests,
     platform: { name: detection.platform, kind, signal: detection.signal },
     server: detection.server ?? null,
-    api: { shopifyProductsJson, graphql, wooCommerce, bigCommerce },
+    api: { shopifyProductsJson, graphql, wooCommerce, bigCommerce, storefront },
     jsonLd: {
       blocks,
       productOnHomepage,
@@ -666,6 +902,13 @@ async function runProbes(
       tier: "sitemap-HTTP",
       notes: [],
     },
+    // P4 store-health — filled below with the probed profile (same pattern).
+    health: {
+      verdict: "unclear",
+      score: 0,
+      flags: [],
+      analyzedAt,
+    },
   };
 
   // The recommendation is a pure function of the probed profile — computed
@@ -677,6 +920,10 @@ async function runProbes(
     rendering: profile.rendering,
     platform: profile.platform,
   });
+  // P4 store-health pass — same pattern: a pure function of the probed
+  // profile, attached so every consumer (POST /api/analyze, the pre-crawl
+  // gate, the analysis panel) gets the verdict for free.
+  profile.health = assessStoreHealth(profile);
 
   return profile;
 }

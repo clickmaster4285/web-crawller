@@ -402,9 +402,17 @@ export interface CrawlJob {
   persisted?: boolean;
 }
 
-/** Base backend URL for the Express API (dev-proxied same-origin otherwise). */
+/** Base backend URL for the Express API (dev-proxied same-origin otherwise).
+ *  Single source of truth: the port comes from backend/.env (PORT=…) via the
+ *  build-time `__BACKEND_PORT__` constant that vite.config.ts injects — the
+ *  same value the Vite proxy uses. PARITY_BACKEND_URL still overrides at
+ *  runtime (prod). `typeof` guard keeps TS happy when the constant isn't
+ *  defined outside a Vite build (e.g. plain node/tsx). */
 const backendUrl = () =>
-  process.env.PARITY_BACKEND_URL ?? "http://localhost:3000";
+  process.env.PARITY_BACKEND_URL ??
+  (typeof __BACKEND_PORT__ === "string" && __BACKEND_PORT__
+    ? `http://localhost:${__BACKEND_PORT__}`
+    : "http://localhost:3000");
 
 /**
  * Phase 5 auth: these handlers run on the Nitro server and call the Express
@@ -428,9 +436,11 @@ import type {
   WebsiteProfile,
   RecommendationTier,
   RenderVerdict,
+  StoreHealth,
+  StoreHealthVerdict,
 } from "../../../backend/crawler/analyze";
 
-export type { WebsiteProfile };
+export type { WebsiteProfile, StoreHealth, StoreHealthVerdict };
 
 /** The recommended crawl strategy (same union as the analyzer's tiers). */
 export type CrawlTier = RecommendationTier;
@@ -465,6 +475,11 @@ export interface CrawlJobAnalysis {
   applied: string[];
   /** Non-null when the crawl carries a real risk (e.g. WAF-blocked store). */
   warning: string | null;
+  /**
+   * P4 store-health pass: the pre-flight verdict (healthy / no-products /
+   * blocked / corporate / unclear) — null on failed probes or shallow runs.
+   */
+  healthVerdict: StoreHealthVerdict | null;
 }
 
 /**
