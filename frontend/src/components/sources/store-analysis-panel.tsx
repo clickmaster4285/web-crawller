@@ -188,7 +188,8 @@ export function StoreAnalysisPanel({
                 value={
                   profile.api.shopifyProductsJson === "public" ||
                   profile.api.wooCommerce === "public" ||
-                  profile.api.bigCommerce === "public"
+                  profile.api.bigCommerce === "public" ||
+                  profile.api.storefront === "public"
                     ? "public ✓"
                     : "none"
                 }

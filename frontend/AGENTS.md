@@ -4,7 +4,7 @@
 
 ## What this is
 
-**Parity** — a competitive intelligence SaaS dashboard. It lets users track
+**PriceFinderAI** — a competitive intelligence SaaS dashboard. It lets users track
 competitors, their products, pricing, product catalogues, market insights,
 alerts, reports, and data sources.
 
@@ -236,7 +236,7 @@ runs server-side via the persisted `ProductMatch` pipeline (see Layer 6).
 
 ## What's next (the plan)
 
-Goal — take Parity from a static mock prototype to a **real competitive
+Goal — take PriceFinderAI from a static mock prototype to a **real competitive
 intelligence product**. Work proceeds in layers; each layer keeps the app green
 (`tsc` → `lint` → `build`).
 
@@ -604,7 +604,7 @@ The crawler started Shopify-only (hardcoded `/products/{handle}.json`), but
 build steps 1–5 below are done: it is now a **generic engine** with a Shopify
 native adapter, JSON-LD/microdata/OG/HTML extraction, sitemap + HTML-crawl
 discovery, SQLite checkpointing, and robots.txt + adaptive-throttle
-politeness. Parity's stated goal (Layer 4 of the product plan) is "real
+politeness. PriceFinderAI's stated goal (Layer 4 of the product plan) is "real
 data-source connectors (web crawlers/APIs) feeding competitors, products, and
 prices" — the Playwright fallback, the WooCommerce + BigCommerce adapters,
 cross-store identity matching (build step 8) and residential proxy routing

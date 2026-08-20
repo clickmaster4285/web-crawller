@@ -34,6 +34,15 @@ export interface BrowserRenderOptions {
   /** Extra settle time after network idle (ms) for SPA hydration. Default 1500. */
   settleMs?: number;
   /**
+   * Wait up to this long (ms) AFTER the settle for a price signal to appear
+   * in the DOM. Some storefronts fetch prices via a late XHR that fires well
+   * after networkidle (activefitnessstore.com's `get-price` call lands ~3s+
+   * after idle, and its price node is blank until then) — without this poll
+   * the render returns a shell with no price and extraction misses. Default
+   * 4000ms. 0 disables (old behavior).
+   */
+  priceWaitMs?: number;
+  /**
    * Tier 2 — residential proxy gateway URL. When set, the rendering context's
    * traffic exits through the proxy (Playwright context-level proxy), so a
    * WAF that blocks the machine's IP can't spare the JS-shell pages either.
@@ -192,6 +201,47 @@ export async function renderWithBrowser(
       // Sites with persistent connections (websockets, analytics) never idle.
     }
     await page.waitForTimeout(options.settleMs ?? 1500);
+    // Late-price wait (Aug 2026): poll the DOM for a price-ish signal so a
+    // storefront whose prices load via a post-idle XHR actually extracts.
+    // The signals mirror the extractor chain's own patterns (price selectors
+    // would be store-specific; these are the universal ones). Cheap: a
+    // querySelector poll, no navigation. Breaks the instant a signal appears
+    // so fast stores pay nothing.
+    const priceWaitMs = options.priceWaitMs ?? 4000;
+    if (priceWaitMs > 0) {
+      const deadline = Date.now() + priceWaitMs;
+      let sawPrice = false;
+      while (Date.now() < deadline && !sawPrice) {
+        sawPrice = await withTimeout(
+          page.evaluate(() => {
+            // Runs in the BROWSER (the crawler's tsconfig has no DOM lib, so
+            // the globals are reached via the globalThis escape hatch; the
+            // document shape is declared structurally).
+            type PageDoc = {
+              body?: { innerText?: string } | null;
+              querySelector?: (sel: string) => unknown;
+            };
+            const doc = (globalThis as unknown as { document?: PageDoc })
+              .document;
+            const text = doc?.body?.innerText ?? "";
+            // Mirror the extractor chain's own price patterns (core
+            // http.ts needsBrowserRender / extract/html-heuristics.ts): ISO
+            // currency codes + symbols followed by a number. OMR/AED/SAR/
+            // QAR/KWD/BHD are the GCC codes activefitnessstore renders as
+            // `TOTAL PRICE <span> OMR 1,545</span>`.
+            return (
+              /(?:AED|OMR|SAR|QAR|KWD|BHD|USD|EUR|GBP|JPY|INR|PKR|EGP|CNY|د\.إ|£|\$|€|¥)\s*[\d,.]+/.test(text) ||
+              (doc?.querySelector?.(
+                '[itemprop="price"], .price, .product-price, [class*="price"], [data-testid*="price"]',
+              ) != null)
+            );
+          }),
+          2000,
+          "price-poll",
+        );
+        if (!sawPrice) await page.waitForTimeout(400);
+      }
+    }
     return await withTimeout(page.content(), 10_000, "page.content");
   } finally {
     await context.close().catch(() => {});

@@ -1,4 +1,4 @@
-# Parity — Project Summary
+# PriceFinderAI — Project Summary
 
 A condensed status snapshot: where the plan stands, the bug fixed this session,
 and how the architecture changed from "before" to "now".

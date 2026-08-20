@@ -51,6 +51,7 @@ import { extractJsonLdBlocks, findProductNode } from "./extract/jsonld.ts";
 import { probeWooCommerceApi } from "./adapters/woocommerce.ts";
 import { probeBigCommerceApi } from "./adapters/bigcommerce.ts";
 import { probeShopifyApi } from "./adapters/shopify-discover.ts";
+import { probeStorefrontApi } from "./adapters/storefront.ts";
 import { isCrawlCancelled, type CrawlControl } from "./core/control.ts";
 import type { RobotsStatus } from "./core/types.ts";
 
@@ -116,6 +117,15 @@ export interface WebsiteProfile {
     graphql: ApiProbeState;
     wooCommerce: ApiProbeState;
     bigCommerce: ApiProbeState;
+    /**
+     * Native storefront API (Tier 4 — the activefitness class): the store's
+     * own JSON API (`/api/fetchPage` → catalogue JSON → batched
+     * `POST /api/get-price`). Probed only when the pages are JS shells and
+     * no standard store API was public — that's the class where HTML + even
+     * browser rendering extract nothing, while the native API returns
+     * everything over plain HTTP.
+     */
+    storefront: ApiProbeState;
   };
   jsonLd: {
     blocks: number;
@@ -339,12 +349,19 @@ export function recommend(
   const apiPublic =
     p.api.shopifyProductsJson === "public" ||
     p.api.wooCommerce === "public" ||
-    p.api.bigCommerce === "public";
+    p.api.bigCommerce === "public" ||
+    p.api.storefront === "public";
 
   if (apiPublic) {
-    notes.push(
-      "Public store API detected — structured product JSON beats HTML extraction (full SKU/GTIN/stock, fewer requests).",
-    );
+    if (p.api.storefront === "public") {
+      notes.push(
+        "Native storefront API detected (fetchPage → catalogue → batched get-price) — the engine fetches products from the store's JSON API over plain HTTP: no browser, ~2 requests per product + 1 per ~100 for prices. (The sitemap-browser tier would render every page and still extract nothing — the prices load via a late XHR the renderer can't see.)",
+      );
+    } else {
+      notes.push(
+        "Public store API detected — structured product JSON beats HTML extraction (full SKU/GTIN/stock, fewer requests).",
+      );
+    }
     return { tier: "API-first", notes };
   }
   if (p.protection.blocking) {
@@ -411,7 +428,8 @@ export function assessStoreHealth(
   const apiPublic =
     p.api.shopifyProductsJson === "public" ||
     p.api.wooCommerce === "public" ||
-    p.api.bigCommerce === "public";
+    p.api.bigCommerce === "public" ||
+    p.api.storefront === "public";
 
   const pricedSchema =
     p.jsonLd.productOnProductPage && p.jsonLd.hasPrice;
@@ -540,7 +558,19 @@ async function probeSitemap(
   opts: HttpOptions,
   robotsBody: string,
   control: CrawlControl & { budgetExhausted?: boolean },
-): Promise<WebsiteProfile["sitemap"] & { firstProductUrl: string | null }> {
+): Promise<
+  WebsiteProfile["sitemap"] & {
+    firstProductUrl: string | null;
+    /**
+     * Product-classified URL spread (up to 25 deep URLs, every Nth) — the
+     * sample set for the Tier-4 storefront probe, which needs a real product
+     * URL (country + slug) and often misses on the sitemap's first entries
+     * (GCC sitemaps lead with brand/category pages). Mirrors discovery's own
+     * probe sampling.
+     */
+    productUrls: string[];
+  }
+> {
   for (const candidate of sitemapCandidates(origin, robotsBody)) {
     let result;
     try {
@@ -555,6 +585,7 @@ async function probeSitemap(
           productSitemap: false,
           source: candidate.url,
           firstProductUrl: null,
+          productUrls: [],
           budgetLimited: true,
         };
       }
@@ -573,12 +604,25 @@ async function probeSitemap(
       : filterProductSitemapEntries(cleaned);
     const ratio =
       cleaned.length > 0 ? productEntries.length / cleaned.length : 0;
+    // Spread sample for the storefront probe: the first 25 DEEP URLs (a
+    // real product slug, not the bare `/om/` homepage some GCC sitemaps
+    // list first), then every Nth — a spread catches a product even when
+    // the sitemap leads with a block of brand/category pages.
+    const deep = productEntries.filter(
+      (u) => new URL(u.loc).pathname.split("/").filter(Boolean).length >= 2,
+    );
+    const step = Math.max(1, Math.floor(deep.length / 25));
+    const productUrls = deep
+      .filter((_, i) => i % step === 0)
+      .slice(0, 25)
+      .map((u) => u.loc);
     return {
       found: true,
       urls: productEntries.length,
       productSitemap: result.isProductSitemap === true || ratio > 0.5,
       source: candidate.url,
       firstProductUrl: productEntries[0]?.loc ?? null,
+      productUrls,
       budgetLimited: false,
     };
   }
@@ -588,6 +632,7 @@ async function probeSitemap(
     productSitemap: false,
     source: null,
     firstProductUrl: null,
+    productUrls: [],
     budgetLimited: false,
   };
 }
@@ -710,6 +755,9 @@ async function runProbes(
   let graphql: ApiProbeState = "unavailable";
   let wooCommerce: ApiProbeState = "unavailable";
   let bigCommerce: ApiProbeState = "unavailable";
+  // Tier 4 native storefront API (the activefitness class) — probed below
+  // ONLY when the pages are JS shells and every standard store API failed.
+  let storefront: ApiProbeState = "unavailable";
   const platformName = detection.platform.toLowerCase();
 
   if (!control.budgetExhausted) {
@@ -740,6 +788,30 @@ async function runProbes(
     if (platformName === "bigcommerce" && !control.budgetExhausted) {
       const probe = await probeBigCommerceApi(base, opts);
       bigCommerce = probe.status;
+    }
+
+    // ── Probe 2c: native storefront API (Tier 4). The class where HTML AND
+    //     browser rendering both extract nothing (csr-shell) — the store's
+    //     own JSON API (fetchPage → catalogue → batched get-price) is the
+    //     only fast path. One fetchPage on a non-storefront store; a bounded
+    //     price-API sweep only after fetchPage matches. Bounded by the
+    //     remaining request budget so the polite 20-request promise holds.
+    if (
+      rendering.verdict === "csr-shell" &&
+      shopifyProductsJson !== "public" &&
+      wooCommerce !== "public" &&
+      bigCommerce !== "public" &&
+      sitemap.productUrls.length > 0
+    ) {
+      const remaining = Math.max(1, budget - requests);
+      const probe = await probeStorefrontApi(
+        base,
+        opts,
+        sitemap.productUrls.slice(0, remaining),
+      );
+      if (probe.status === "public") {
+        storefront = "public";
+      }
     }
   }
 
@@ -799,7 +871,7 @@ async function runProbes(
     requests,
     platform: { name: detection.platform, kind, signal: detection.signal },
     server: detection.server ?? null,
-    api: { shopifyProductsJson, graphql, wooCommerce, bigCommerce },
+    api: { shopifyProductsJson, graphql, wooCommerce, bigCommerce, storefront },
     jsonLd: {
       blocks,
       productOnHomepage,

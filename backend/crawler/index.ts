@@ -33,6 +33,13 @@
 
 import { discoverProducts } from "./discover/index.ts";
 import {
+  fetchStorefrontPrices,
+  fetchStorefrontProduct,
+  indexStorefrontProducts,
+  type StorefrontPrice,
+  type StorefrontUrlInfo,
+} from "./adapters/storefront.ts";
+import {
   closeProxyAgent,
   fetchHtmlWithStatus,
   fetchWithRetry,
@@ -82,6 +89,8 @@ interface FetchedProduct {
   product: CrawledProduct | null;
   etag: string | null;
   statusCode: number | null;
+  /** True when the page went through browser rendering (auto JS render). */
+  rendered?: boolean;
 }
 
 /**
@@ -205,18 +214,37 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       `robots.txt ${politeness.robotsStatus}${politeness.robotsCrawlDelayMs ? ` (crawl-delay ${Math.round(politeness.robotsCrawlDelayMs / 1000)}s)` : ""}`
     );
   }
+  // Mid-crawl checkpoint (Step 4, Aug 2026): a `resumeCheckpoint` (written by
+  // a previous run of this job before a crash/restart) skips discovery
+  // entirely — the URL list, lastmod map, diagnostics and BigCommerce id map
+  // are rebuilt from the snapshot, so a re-claimed job continues the fetch
+  // phase instead of re-walking sitemaps + probes from zero.
+  const resume =
+    config.resumeCheckpoint?.v === 1 ? config.resumeCheckpoint : null;
   let discovered;
-  try {
-    discovered = await discoverProducts(config, opts, robotsSnapshot);
+  if (resume) {
+    discovered = {
+      urls: resume.urls,
+      lastmod: new Map(resume.lastmod),
+      productIds: new Map(resume.productIds),
+      diagnostics: resume.discovery,
+    };
     log(
       "info",
-      `discovery done — ${discovered.urls.length.toLocaleString()} product URLs` +
-        (discovered.diagnostics.platform?.platform
-          ? ` (${discovered.diagnostics.platform.platform})`
-          : "")
+      `resuming from checkpoint — ${resume.products.length.toLocaleString()} products, ${resume.done.length.toLocaleString()} URLs already processed (discovery skipped)`
     );
-  } catch (error) {
-    store?.close();
+  } else {
+    try {
+      discovered = await discoverProducts(config, opts, robotsSnapshot);
+      log(
+        "info",
+        `discovery done — ${discovered.urls.length.toLocaleString()} product URLs` +
+          (discovered.diagnostics.platform?.platform
+            ? ` (${discovered.diagnostics.platform.platform})`
+            : "")
+      );
+    } catch (error) {
+      store?.close();
     // Tier 1: release the shared browser so the process can exit / the job
     // finishes cleanly (no-op when browser rendering was never used).
     if (config.useBrowser !== false) await closeBrowser();
@@ -248,6 +276,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
       // Requests made before the failure still count.
       requestCount,
     );
+    }
   }
 
   // Optional page cap: crawl at most `maxPages` of the discovered URLs.
@@ -263,11 +292,40 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   // cluster all of them at the HEAD of the list: a first-N cap then fetches
   // 400 brand pages and zero products (observed Aug 2026). Stratified
   // sampling keeps the cap representative of the whole store.
-  const urlsToFetch =
-    config.maxPages != null && config.maxPages > 0
+  // On a resumed run the checkpoint's URL list IS the fetch list (it was
+  // already capped/stratified) — and `discovered.urls` only holds that same
+  // list, so the full pre-cap count comes from the checkpoint instead of
+  // `stats.discovered` silently shrinking to the sample.
+  const fullDiscovered = resume ? resume.discoveredCount : discovered.urls.length;
+  const urlsToFetch = resume
+    ? resume.urls
+    : config.maxPages != null && config.maxPages > 0
       ? stratifiedSample(discovered.urls, config.maxPages)
       : discovered.urls;
-  const capped = urlsToFetch.length < discovered.urls.length;
+  let capped = urlsToFetch.length < fullDiscovered;
+  // URLs already fully processed by the dead run (product, cached-skip, or
+  // failure) — their outcome is seeded below and they're skipped in the loop.
+  const done = resume ? new Set(resume.done) : new Set<string>();
+  // Seed the run state captured by the dead run's checkpoint so progress,
+  // stats and the final result are identical to a run that never crashed —
+  // the resumed fetch phase just appends to what's already in hand.
+  if (resume) {
+    products.push(...resume.products);
+    failures.push(...resume.failures);
+    fetchedCount = resume.fetchedCount;
+    skippedUnchanged = resume.skippedUnchanged;
+    for (const [u, state] of resume.httpState) httpStateByUrl.set(u, state);
+  }
+  // Render-miss circuit breaker (Aug 2026): when a crawl renders page after
+  // page (auto JS rendering ON) and N CONSECUTIVE rendered pages extract no
+  // product, the store almost certainly loads its prices via a client-side
+  // API the crawler can't see (activefitnessstore.com rendered 11k pages to
+  // extract 16). Stop the fetch loop early instead of burning thousands of
+  // renders. The partial result is kept; `capped` is set so the ingest diff
+  // doesn't read the skipped URLs as removals; a finding explains the stop.
+  const renderMissBreaker = config.renderMissBreaker ?? 25;
+  let renderMisses = 0;
+  let renderBreakerTripped = false;
 
   // Store-detour hints (Aug 2026): a corporate site's product pages often
   // carry a "Buy Now" button that links out to the REAL priced storefront
@@ -311,6 +369,64 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     discovered.diagnostics.platform?.platform != null &&
     !["Shopify", "Unknown"].includes(discovered.diagnostics.platform.platform);
 
+  // Tier 4 headless storefront API (activefitnessstore.com class): when
+  // discovery found the store's native JSON API (fetchPage → catalogue →
+  // batched get-price), build the per-URL index + price map BEFORE the main
+  // loop so prices can be BATCHED (1 request per ~100 products instead of 1
+  // per product). Stores without the API skip this entirely (recipe absent).
+  // The index walk costs 1 fetchPage request per URL; products whose
+  // fetchPage call fails simply don't make the map and fall through to the
+  // normal chain below.
+  const storefrontRecipe = !shallow
+    ? (discovered.diagnostics.storefrontApi?.recipe ?? null)
+    : null;
+  let storefrontByUrl: Map<string, StorefrontUrlInfo> | null = null;
+  let storefrontPrices: Map<number, StorefrontPrice> | null = null;
+  if (storefrontRecipe) {
+    if (resume?.storefrontByUrl && resume.storefrontByUrl.length > 0) {
+      // Resume: the dead run already walked fetchPage for every URL (1
+      // request each — 11k requests on a big store) and batched the prices.
+      // Rebuild from the checkpoint instead of re-walking.
+      storefrontByUrl = new Map(resume.storefrontByUrl);
+      storefrontPrices = new Map(resume.storefrontPrices ?? []);
+      log(
+        "info",
+        `storefront API index resumed from checkpoint — ${storefrontByUrl.size.toLocaleString()} URLs, ${storefrontPrices.size.toLocaleString()} prices`
+      );
+    } else {
+      log(
+        "info",
+        `storefront API public — indexing ${urlsToFetch.length.toLocaleString()} URLs via fetchPage…`
+      );
+      const indexed = await indexStorefrontProducts(
+        urlsToFetch,
+        storefrontRecipe,
+        opts,
+        concurrency,
+        config.control,
+        // The index walk is part of the fetch phase — report it so the UI
+        // shows movement instead of a stalled 0/N while fetchPage runs.
+        (indexedCount, total) =>
+          config.onProgress?.(Math.round((indexedCount / total) * total), total),
+      );
+      storefrontByUrl = indexed.byUrl;
+      log(
+        "info",
+        `storefront API indexed ${indexed.byUrl.size.toLocaleString()} of ${urlsToFetch.length.toLocaleString()} URLs — fetching batched prices`
+      );
+      storefrontPrices = await fetchStorefrontPrices(
+        storefrontRecipe,
+        indexed.byUrl,
+        opts,
+        config.control,
+      );
+      log(
+        "info",
+        `storefront API prices: ${storefrontPrices.size.toLocaleString()} products priced (batched get-price)`
+      );
+    }
+  }
+
   // `onProgress` first arg = products in hand (freshly fetched + cache-reused),
   // i.e. progress through the run; `stats.fetched` is the fresh-only count.
   // try/finally guarantees the checkpoint/resume store is closed even if a
@@ -318,14 +434,57 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   if (capped) {
     log(
       "info",
-      `maxPages cap — fetching ${urlsToFetch.length.toLocaleString()} of ${discovered.urls.length.toLocaleString()} discovered URLs (stratified sample)`
+      `maxPages cap — fetching ${urlsToFetch.length.toLocaleString()} of ${fullDiscovered.toLocaleString()} discovered URLs (stratified sample)`
     );
   }
+  // Mid-crawl checkpoint emission (Step 4, Aug 2026): a throttled JSON
+  // snapshot of the run's fetch-phase state handed to `config.onCheckpoint`
+  // (the worker persists it on the job). A crash/restart then loses at most
+  // ~CHECKPOINT_INTERVAL_MS of work — the resume path rebuilds discovery and
+  // the storefront index from the snapshot instead of re-running them.
+  let lastCheckpointAt = 0;
+  const CHECKPOINT_INTERVAL_MS = 15_000;
+  const emitCheckpoint = () => {
+    if (!config.onCheckpoint) return;
+    const now = Date.now();
+    if (now - lastCheckpointAt < CHECKPOINT_INTERVAL_MS) return;
+    lastCheckpointAt = now;
+    try {
+      config.onCheckpoint({
+        v: 1,
+        urls: urlsToFetch,
+        lastmod: [...discovered.lastmod.entries()],
+        productIds: [...discovered.productIds.entries()],
+        done: [...done],
+        products,
+        failures,
+        fetchedCount,
+        skippedUnchanged,
+        discoveredCount: fullDiscovered,
+        discovery: discovered.diagnostics,
+        httpState: [...httpStateByUrl.entries()],
+        ...(storefrontByUrl
+          ? { storefrontByUrl: [...storefrontByUrl.entries()] }
+          : {}),
+        ...(storefrontPrices
+          ? { storefrontPrices: [...storefrontPrices.entries()] }
+          : {}),
+      });
+    } catch {
+      // A failing checkpoint must never break the crawl.
+    }
+  };
   try {
     await runWithConcurrency(urlsToFetch, concurrency, async (url) => {
       // Cooperative control: pause waits here, cancel throws. Checked before
       // every URL so a pause/cancel lands within ~one in-flight request.
       await waitForControl(config.control);
+      // Render-miss circuit breaker tripped — the loop drains immediately
+      // (no more fetches; the partial result is what we ship).
+      if (renderBreakerTripped) return;
+      // Resumed run: this URL was already fully processed before the crash —
+      // its product (or failure) is seeded from the checkpoint; skip it.
+      if (done.has(url)) return;
 
       // Resume fast-path: content unchanged since the last successful run
       // (sitemap lastmod match against Product.httpState, or etag match after
@@ -358,6 +517,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
           etag: prev.etag,
           lastmod: lastmodNum,
         });
+        done.add(url);
         config.onProgress?.(products.length, urlsToFetch.length);
         return;
       }
@@ -370,6 +530,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
           products.push(cached);
           skippedUnchanged++;
           httpStateByUrl.set(url, { etag: null, lastmod: lastmodNum });
+          done.add(url);
           config.onProgress?.(products.length, urlsToFetch.length);
           return;
         }
@@ -386,16 +547,65 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
           ? { etag: prev.etag, lastmod: prev.lastmod }
           : undefined;
 
+      // Tier 4 storefront fast-path: the store's native API already gave us
+      // this URL's product id + catalogue JSON URL (and a batched price).
+      // Fetch the catalogue (1 request) and assemble the product — no HTML,
+      // no Shopify probe, no browser. Failures fall through to the normal
+      // chain below (catalogue fetch failing = the HTML chain still runs).
       // Robots.txt was already enforced during discovery (disallowed URLs were
       // dropped from `discovered.urls`), so no extra gate is needed here.
       const host = hostOf(url);
       await limiter.acquire(host);
       try {
         try {
+          // Tier 4 storefront fast-path: the store's native API already gave
+          // us this URL's product id + catalogue JSON URL (and a batched
+          // price). Fetch the catalogue (1 request) and assemble the product
+          // — no HTML, no Shopify probe, no browser.
+          const sfInfo = storefrontByUrl?.get(url);
+          if (sfInfo) {
+            const price = storefrontPrices?.get(sfInfo.productId);
+            const product = await fetchStorefrontProduct(
+              url,
+              sfInfo,
+              price,
+              opts,
+            );
+            if (product) {
+              store?.recordFetch({
+                origin: config.origin,
+                url,
+                etag: null,
+                lastmod: lastmod ?? null,
+                statusCode: 200,
+                status: "fetched",
+                productJson: JSON.stringify(product),
+                lastFetchedAt: new Date().toISOString(),
+              });
+              httpStateByUrl.set(url, { etag: null, lastmod: lastmodNum });
+              products.push(product);
+              fetchedCount++;
+              done.add(url);
+              // A storefront-API product extracted fine — reset the render
+              // miss streak (the store works; nothing is broken).
+              renderMisses = 0;
+            } else {
+              failures.push({
+                url,
+                error: "Storefront catalogue returned no product data",
+                kind: "extraction",
+              });
+              store?.recordFailure(config.origin, url);
+              done.add(url);
+            }
+            config.onProgress?.(products.length, urlsToFetch.length);
+            return;
+          }
+
           const bcId = bcApiAvailable
             ? (discovered.productIds.get(url) ?? null)
             : null;
-          const { product, etag, statusCode } = await fetchOneProduct(
+          const { product, etag, statusCode, rendered } = await fetchOneProduct(
             url,
             config.origin,
             opts,
@@ -409,6 +619,9 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             noteStoreLink,
           );
           if (product) {
+            // A real product came out of the HTML chain — reset the render
+            // miss streak (rendering IS working for this store).
+            renderMisses = 0;
             // Persist before mutating run state so a storage failure can't
             // desync `products`/`fetchedCount` from `stats`.
             store?.recordFetch({
@@ -426,6 +639,7 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             httpStateByUrl.set(url, { etag, lastmod: lastmodNum });
             products.push(product);
             fetchedCount++;
+            done.add(url);
           } else if (statusCode === 304 && prev?.product) {
             // 304 Not Modified — the stored validators are still current, so
             // the stored product is reused (cheap revalidation). Counted as a
@@ -447,6 +661,8 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
             });
             products.push(prev.product);
             skippedUnchanged++;
+            done.add(url);
+            renderMisses = 0;
           } else {
             // P4 failure classification: the page LOADED but no product was
             // parsed from it (extraction miss) — not an HTTP failure. A
@@ -458,14 +674,51 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
               kind: 'extraction',
             });
             store?.recordFailure(config.origin, url);
+            done.add(url);
+            // Render-miss circuit breaker: a page that was ACTUALLY rendered
+            // in a browser (auto JS rendering ON) and still extracted nothing
+            // is a strong "this store loads its prices via a client-side API
+            // the crawler can't see" signal. N consecutive such pages → stop
+            // the crawl instead of rendering thousands more.
+            if (rendered && renderMissBreaker > 0) {
+              renderMisses++;
+              // Only trip when the run has extracted NOTHING so far — a store
+              // that yields any product is working (at least partially) and
+              // must never be cut short by a block of junk URLs. And never
+              // trip when the storefront API is active: that store HAS a
+              // native API the crawler uses (its few non-indexed stragglers
+              // are junk brand pages, not evidence the store is broken).
+              if (
+                renderMisses >= renderMissBreaker &&
+                products.length === 0 &&
+                !storefrontRecipe
+              ) {
+                renderBreakerTripped = true;
+                capped = true; // partial run — don't read the rest as removals
+                log(
+                  "warn",
+                  `circuit breaker: ${renderMisses} consecutive browser-rendered pages extracted no product and the run has ${products.length} products — this store loads its prices via a client-side API the crawler can't see. Stopping the fetch loop instead of rendering thousands more pages.`
+                );
+              }
+            } else if (!rendered) {
+              // A NON-rendered miss (server-rendered page with no product, or
+              // rendering disabled) is a normal miss — reset the streak so
+              // random junk URLs don't trip the breaker.
+              renderMisses = 0;
+            }
           }
         } catch (error) {
           // The fetch itself failed (timeout, rate-limit, WAF block,
           // network) — an HTTP-level failure.
           failures.push({ url, error: String(error), kind: 'http' });
           store?.recordFailure(config.origin, url);
+          done.add(url);
         }
         config.onProgress?.(products.length, urlsToFetch.length);
+        // Throttled mid-crawl checkpoint — the worker persists this on the
+        // job so a crash resumes here instead of re-running discovery + the
+        // fetch phase from zero.
+        emitCheckpoint();
       } finally {
         limiter.release(host);
       }
@@ -498,6 +751,21 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
     });
   }
 
+  // Render-miss circuit breaker finding: the crawl stopped itself because
+  // page after page RENDERED but extracted nothing — explain it so the user
+  // doesn't re-run the same doomed crawl.
+  if (renderBreakerTripped) {
+    discovered.diagnostics.findings.push({
+      level: "warning",
+      message:
+        "Stopped early: consecutive browser-rendered pages extracted no product — this store loads its prices via a client-side API the crawler can't see (browser rendering shows the shell, not the prices). The crawl stopped after " +
+        `${renderMisses} rendered misses instead of burning thousands of renders.` +
+        (storefrontRecipe
+          ? " The store's native JSON API was used where available."
+          : ""),
+    });
+  }
+
   // Completion summary — the crawl's story in one line (landed on the job's
   // run log so it's visible after the process exits). P4: the failed count
   // splits extraction-miss vs http so a 0-priced run reads honestly.
@@ -520,7 +788,10 @@ export async function runCrawl(config: CrawlConfig): Promise<CrawlResult> {
   return {
     config: { origin: config.origin, collections: config.collections },
     stats: {
-      discovered: discovered.urls.length,
+      // The full pre-cap discovery count — on a resumed run `discovered.urls`
+      // only holds the checkpoint's fetch list, so the true count comes from
+      // the checkpoint.
+      discovered: fullDiscovered,
       // `fetched` = actually fetched this run; `skippedUnchanged` = reused
       // from the checkpoint/resume cache. `fetched + skippedUnchanged === products.length`.
       fetched: fetchedCount,
@@ -645,6 +916,7 @@ async function fetchOneProduct(
     status,
     etag,
     body: html,
+    rendered,
   } = await fetchHtmlWithStatus(url, {
     ...opts,
     conditional,
@@ -670,6 +942,7 @@ async function fetchOneProduct(
     product,
     etag,
     statusCode: status,
+    rendered,
   };
 }
 

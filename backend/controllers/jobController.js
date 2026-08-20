@@ -145,7 +145,26 @@ async function analyzeBeforeCrawl(params) {
     );
     const applied = [];
     let renderingForced = false;
-    if (profile.rendering.verdict === 'csr-shell') {
+    if (
+      profile.recommendation.tier === 'sitemap-HTTP' ||
+      profile.recommendation.tier === 'API-first'
+    ) {
+      // The tier recommendation IS the point: sitemap-HTTP/API-first means
+      // the analysis found server-rendered content (or a public API) that
+      // extracts fine over plain HTTP — spawning the browser is pure
+      // overhead. Turn auto JS rendering OFF. This must win over the
+      // csr-shell force below: a headless storefront (Next.js shell + native
+      // JSON API) is BOTH csr-shell AND API-first — the storefront adapter
+      // bypasses the shell entirely over HTTP, so forcing the browser would
+      // add 10-90s renders for the junk pages that fall through. If the
+      // analysis was wrong and the store turns out JS-rendered with no
+      // working API, the worker's 0-prices follow-up auto re-crawls with
+      // rendering ON (no silent 0-priced catalogue).
+      params.useBrowser = false;
+      applied.push(
+        `analysis says ${profile.recommendation.tier} — auto JS rendering OFF (plain HTTP extracts fine)`
+      );
+    } else if (profile.rendering.verdict === 'csr-shell') {
       params.useBrowser = true;
       renderingForced = true;
       applied.push(

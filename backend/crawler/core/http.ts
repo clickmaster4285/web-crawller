@@ -127,6 +127,15 @@ export interface HttpOptions {
   maxRetries?: number;
   /** Per-request timeout (ms). Default 30s — a stalled connection can't hang the crawl. */
   timeoutMs?: number;
+  /**
+   * HTTP method (default GET). POST is used by the storefront-API adapter's
+   * batched price calls (Tier 4 — `POST /api/get-price` takes a JSON body).
+   */
+  method?: "GET" | "POST";
+  /** Request body (POST) — sent as-is; pair with `headers` content-type. */
+  body?: string;
+  /** Extra headers merged over the defaults (e.g. `content-type: application/json`). */
+  headers?: Record<string, string>;
   userAgent?: string;
   /**
    * Stored validators for a conditional revalidation: when set, the request
@@ -221,7 +230,13 @@ export async function fetchWithRetry(
   const delayMs = options.delayMs ?? 1000;
   const maxRetries = options.maxRetries ?? 3;
   const timeoutMs = options.timeoutMs ?? 30_000;
-  const headers = makeHeaders(options.userAgent);
+  const headers = { ...makeHeaders(options.userAgent), ...options.headers };
+  const init: RequestInit = {
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+    ...(options.method ? { method: options.method } : {}),
+    ...(options.body != null ? { body: options.body } : {}),
+  };
   // Conditional revalidation: an unchanged resource answers 304 (no body) —
   // the cheapest possible "still the same" signal for resume state.
   if (options.conditional?.etag) {
@@ -247,15 +262,8 @@ export async function fetchWithRetry(
       // `proxiedFetch` above; direct requests keep the global fetch.
       const proxy = options.proxy ? proxyAgentFor(options.proxy) : undefined;
       response = proxy
-        ? await proxiedFetch(
-            url,
-            { headers, signal: AbortSignal.timeout(timeoutMs) },
-            proxy,
-          )
-        : await fetch(url, {
-            headers,
-            signal: AbortSignal.timeout(timeoutMs),
-          });
+        ? await proxiedFetch(url, init, proxy)
+        : await fetch(url, init);
     } catch (error) {
       // Count the attempt even when it failed — it was a real request.
       options.onRequest?.();
@@ -337,6 +345,14 @@ export interface FetchedHtml {
   status: number;
   etag: string | null;
   body: string;
+  /**
+   * True when the page was re-rendered in a browser (auto JS rendering). The
+   * fetch loop uses it for the render-miss circuit breaker: a page that was
+   * RENDERED and still extracted nothing is a strong "this store loads its
+   * prices via an unknown XHR" signal — grinding thousands of renders is the
+   * exact failure we want to stop early.
+   */
+  rendered?: boolean;
 }
 
 /**
@@ -369,6 +385,7 @@ export async function fetchHtmlWithStatus(
         status: response.status,
         etag: response.headers.get("etag"),
         body: await options.renderWithBrowser(url),
+        rendered: true,
       };
     } catch {
       // Fall through with the raw HTML.

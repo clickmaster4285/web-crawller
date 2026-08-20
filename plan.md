@@ -1,6 +1,6 @@
-# Parity — Development Plan
+# PriceFinderAI — Development Plan
 
-**Parity** is a competitive-intelligence SaaS dashboard: crawl e-commerce stores,
+**PriceFinderAI** is a competitive-intelligence SaaS dashboard: crawl e-commerce stores,
 save their product catalogues as snapshot history, and compare them against your
 own store — prices, new/removed products, and changes over time.
 

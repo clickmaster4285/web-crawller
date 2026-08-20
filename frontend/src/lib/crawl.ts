@@ -403,10 +403,16 @@ export interface CrawlJob {
 }
 
 /** Base backend URL for the Express API (dev-proxied same-origin otherwise).
- *  The default mirrors the dev backend port in backend/.env (PORT=3011) and
- *  the Vite proxy target — keep all three in sync when it moves. */
+ *  Single source of truth: the port comes from backend/.env (PORT=…) via the
+ *  build-time `__BACKEND_PORT__` constant that vite.config.ts injects — the
+ *  same value the Vite proxy uses. PARITY_BACKEND_URL still overrides at
+ *  runtime (prod). `typeof` guard keeps TS happy when the constant isn't
+ *  defined outside a Vite build (e.g. plain node/tsx). */
 const backendUrl = () =>
-  process.env.PARITY_BACKEND_URL ?? "http://localhost:3011";
+  process.env.PARITY_BACKEND_URL ??
+  (typeof __BACKEND_PORT__ === "string" && __BACKEND_PORT__
+    ? `http://localhost:${__BACKEND_PORT__}`
+    : "http://localhost:3000");
 
 /**
  * Phase 5 auth: these handlers run on the Nitro server and call the Express
